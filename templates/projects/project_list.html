@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}课题库 - OpenMedAILab{% endblock %}
+{% block content %}
+<h1>课题库</h1>
+<form class="card filters" method="get">
+  <div>
+    <label for="q">关键词</label>
+    <input id="q" name="q" value="{{ filters.q }}" placeholder="RAG / OCT / 安全评测">
+  </div>
+  <div>
+    <label for="theme">主题</label>
+    <select id="theme" name="theme">
+      <option value="">全部</option>
+      {% for theme in themes %}
+        <option value="{{ theme.slug }}" {% if filters.theme == theme.slug or filters.theme == theme.name %}selected{% endif %}>{{ theme.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label for="tag">标签</label>
+    <select id="tag" name="tag">
+      <option value="">全部</option>
+      {% for tag in tags %}
+        <option value="{{ tag.slug }}" {% if filters.tag == tag.slug or filters.tag == tag.name %}selected{% endif %}>{{ tag.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label for="stage">阶段</label>
+    <select id="stage" name="stage">
+      <option value="">全部</option>
+      {% for value,label in stages %}
+        <option value="{{ value }}" {% if filters.stage == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label for="has_pdf">PDF</label>
+    <select id="has_pdf" name="has_pdf">
+      <option value="">全部</option>
+      <option value="1" {% if filters.has_pdf == "1" %}selected{% endif %}>有 PDF</option>
+      <option value="0" {% if filters.has_pdf == "0" %}selected{% endif %}>无 PDF</option>
+    </select>
+  </div>
+  <div>
+    <label for="sort">排序</label>
+    <select id="sort" name="sort">
+      <option value="recommended" {% if filters.sort == "recommended" %}selected{% endif %}>综合推荐</option>
+      <option value="llm_score" {% if filters.sort == "llm_score" %}selected{% endif %}>初始评分</option>
+      <option value="community_score" {% if filters.sort == "community_score" %}selected{% endif %}>社区评分</option>
+      <option value="follows" {% if filters.sort == "follows" %}selected{% endif %}>关注数</option>
+      <option value="updated" {% if filters.sort == "updated" %}selected{% endif %}>最近更新</option>
+      <option value="project_no" {% if filters.sort == "project_no" %}selected{% endif %}>课题编号</option>
+    </select>
+  </div>
+  <button type="submit">筛选</button>
+</form>
+
+<div class="grid" style="margin-top: 18px;">
+  {% for project in page_obj %}
+    <article class="card">
+      <p class="project-title"><a href="{% url 'project_detail' project.pk %}">{{ project.title }}</a></p>
+      <p class="muted">
+        {{ project.theme }} · {{ project.topic_id }} · {{ project.get_stage_display }}
+        · 初评 {{ project.llm_score|default:"-" }} · 社区 {{ project.community_score|default:"-" }}
+        · 关注 {{ project.follow_count }} · 参与 {{ project.interest_count }}
+        {% if project.has_pdf %} · PDF{% endif %}
+      </p>
+      <p>{{ project.summary|truncatechars:220 }}</p>
+      <p>{% for tag in project.tags.all %}<span class="pill">{{ tag.name }}</span>{% endfor %}</p>
+      <a class="button secondary" href="{% url 'project_detail' project.pk %}">查看详情</a>
+    </article>
+  {% empty %}
+    <div class="card muted">没有找到匹配课题。</div>
+  {% endfor %}
+</div>
+
+{% if page_obj.paginator.num_pages > 1 %}
+  <p class="card">
+    第 {{ page_obj.number }} / {{ page_obj.paginator.num_pages }} 页
+    {% if page_obj.has_previous %}<a href="?page={{ page_obj.previous_page_number }}">上一页</a>{% endif %}
+    {% if page_obj.has_next %}<a href="?page={{ page_obj.next_page_number }}">下一页</a>{% endif %}
+  </p>
+{% endif %}
+{% endblock %}

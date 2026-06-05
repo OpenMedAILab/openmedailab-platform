@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}我的工作台 - OpenMedAILab{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>我的工作台</h1>
+  <p>{{ profile.display_name }} · {{ profile.get_role_type_display }} · 积分 {{ profile.credit_balance }} · 声誉 {{ profile.reputation_score }}</p>
+</section>
+
+<section class="grid grid-2" style="margin-top: 16px;">
+  <div class="card">
+    <h2>我的关注课题</h2>
+    {% for item in follows %}
+      <p><a href="{% url 'project_detail' item.project.pk %}">{{ item.project.title }}</a><br><span class="muted">{{ item.created_at }}</span></p>
+    {% empty %}<p class="muted">暂无关注。</p>{% endfor %}
+  </div>
+  <div class="card">
+    <h2>我的参与意向</h2>
+    {% for item in interests %}
+      <p><a href="{% url 'project_detail' item.project.pk %}">{{ item.project.title }}</a><br>{{ item.role }} · {{ item.get_status_display }}</p>
+    {% empty %}<p class="muted">暂无参与意向。</p>{% endfor %}
+  </div>
+  <div class="card">
+    <h2>我的认领意向</h2>
+    {% for item in claims %}
+      <p><a href="{% url 'project_detail' item.project.pk %}">{{ item.project.title }}</a><br>{{ item.get_claim_type_display }} · {{ item.get_status_display }}</p>
+    {% empty %}<p class="muted">暂无认领意向。</p>{% endfor %}
+  </div>
+  <div class="card">
+    <h2>我的资助意向</h2>
+    {% for item in sponsors %}
+      <p><a href="{% url 'project_detail' item.project.pk %}">{{ item.project.title }}</a><br>{{ item.get_sponsor_type_display }} · {{ item.get_status_display }}</p>
+    {% empty %}<p class="muted">暂无资助意向。</p>{% endfor %}
+  </div>
+  <div class="card">
+    <h2>我的评分</h2>
+    {% for item in scores %}
+      <p><a href="{% url 'project_detail' item.project.pk %}">{{ item.project.title }}</a><br>{{ item.score }} 分</p>
+    {% empty %}<p class="muted">暂无评分。</p>{% endfor %}
+  </div>
+</section>
+{% endblock %}

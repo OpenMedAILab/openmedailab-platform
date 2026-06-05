@@ -1,0 +1,13 @@
+.DS_Store
+.env
+OpenMedAILab_old/
+*.sqlite3
+db.sqlite3
+media/
+staticfiles/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/

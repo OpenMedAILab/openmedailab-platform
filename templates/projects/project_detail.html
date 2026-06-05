@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}{{ project.title }} - OpenMedAILab{% endblock %}
+{% block content %}
+<article class="card">
+  <p class="muted">{{ project.theme }} · {{ project.topic_id }} · {{ project.get_stage_display }}</p>
+  <h1>{{ project.title }}</h1>
+  <p>
+    {% for tag in project.tags.all %}<span class="pill">{{ tag.name }}</span>{% endfor %}
+  </p>
+  <p>
+    初始评分 {{ project.llm_score|default:"-" }} · 社区评分 {{ project.community_score|default:"-" }}
+    · 综合评分 {{ project.composite_score|default:"-" }} · 推荐期刊 {{ project.recommended_journal|default:"-" }}
+  </p>
+  <p>{{ project.summary }}</p>
+  {% if project.source_pdf_path %}<p class="muted">PDF 路径：{{ project.source_pdf_path }}</p>{% endif %}
+</article>
+
+<section class="grid grid-2" style="margin-top: 16px;">
+  <div class="card">
+    <h2>组队情况</h2>
+    {% for role,count in team_status.roles.items %}
+      <p>{{ role }}：{{ count }}</p>
+    {% endfor %}
+    <p>资助意向：{{ team_status.sponsor_count }}</p>
+    <p><strong>{% if team_status.basic_ready %}基础团队已具备{% else %}基础团队未凑齐{% endif %}</strong></p>
+  </div>
+  <div class="card">
+    <h2>我的状态</h2>
+    {% if user.is_authenticated %}
+      <p>{% if user_state.is_following %}已关注{% else %}未关注{% endif %}</p>
+      {% if user_state.score %}<p>我的评分：{{ user_state.score.score }}</p>{% endif %}
+      {% if user_state.is_following %}
+        <form method="post" action="{% url 'project_unfollow' project.pk %}">{% csrf_token %}<button class="secondary" type="submit">取消关注</button></form>
+      {% else %}
+        <form method="post" action="{% url 'project_follow' project.pk %}">{% csrf_token %}<button type="submit">关注课题</button></form>
+      {% endif %}
+    {% else %}
+      <p><a href="{% url 'login' %}?next={{ request.path }}">登录后可关注、评分、参与、认领和表达资助意向。</a></p>
+    {% endif %}
+  </div>
+</section>
+
+{% if user.is_authenticated %}
+<section class="grid grid-2" style="margin-top: 16px;">
+  <div class="card">
+    <h2>评分</h2>
+    <form method="post" action="{% url 'project_score' project.pk %}">
+      {% csrf_token %}
+      {{ score_form.as_p }}
+      <button type="submit">提交评分</button>
+    </form>
+  </div>
+  <div class="card">
+    <h2>参与意向</h2>
+    <form method="post" action="{% url 'project_interest' project.pk %}">
+      {% csrf_token %}
+      {{ interest_form.as_p }}
+      <button type="submit">提交参与意向</button>
+    </form>
+  </div>
+  <div class="card">
+    <h2>认领意向</h2>
+    <form method="post" action="{% url 'project_claim' project.pk %}">
+      {% csrf_token %}
+      {{ claim_form.as_p }}
+      <button type="submit">提交认领意向</button>
+    </form>
+  </div>
+  <div class="card">
+    <h2>资助意向</h2>
+    <form method="post" action="{% url 'project_sponsor' project.pk %}">
+      {% csrf_token %}
+      {{ sponsor_form.as_p }}
+      <button type="submit">记录资助意向</button>
+    </form>
+    <p class="muted">第一版只记录意向，不提供在线支付入口。</p>
+  </div>
+</section>
+{% endif %}
+
+<section style="margin-top: 24px;">
+  <h2>Markdown 原文</h2>
+  <div class="markdown-body">{{ project.body_markdown|default:"暂无 Markdown 正文。" }}</div>
+</section>
+
+<section class="grid grid-2" style="margin-top: 24px;">
+  <div class="card">
+    <h2>最近参与意向</h2>
+    {% for item in recent_interests %}
+      <p>{{ item.user.profile.display_name|default:item.user.username }} · {{ item.role }} · {{ item.get_status_display }}</p>
+    {% empty %}
+      <p class="muted">暂无参与意向。</p>
+    {% endfor %}
+  </div>
+  <div class="card">
+    <h2>最近评分</h2>
+    {% for item in recent_scores %}
+      <p>{{ item.user.profile.display_name|default:item.user.username }} · {{ item.score }} 分</p>
+    {% empty %}
+      <p class="muted">暂无评分。</p>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}
