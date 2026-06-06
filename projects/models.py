@@ -89,8 +89,9 @@ class Project(models.Model):
         for item in self.interests.exclude(status="withdrawn").values("role").annotate(count=models.Count("id")):
             role_counts[item["role"]] = item["count"]
         sponsor_count = self.sponsor_intents.exclude(status="withdrawn").count()
+        role_labels = {"Leader": "项目负责人", "AI工程师": "AI 工程师"}
         return {
-            "roles": role_counts,
+            "roles": {role_labels.get(role, role): count for role, count in role_counts.items()},
             "sponsor_count": sponsor_count,
             "basic_ready": role_counts["医生"] >= 1 and role_counts["学生"] >= 1 and role_counts["Leader"] >= 1,
         }

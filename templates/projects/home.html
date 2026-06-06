@@ -1,44 +1,85 @@
 {% extends "base.html" %}
 {% block title %}OpenMedAILab{% endblock %}
 {% block content %}
-<section class="card">
-  <h1>OpenMedAILab</h1>
-  <p>医学 AI 开放科研课题协作平台：课题展示、参与意向、评分、组队与后台统计的最小闭环。</p>
-  <p><a class="button" href="{% url 'project_list' %}">浏览课题</a></p>
+<section class="home-hero">
+  <div>
+    <p class="eyebrow">医学 AI 开放科研协作平台</p>
+    <h1>从课题发现到组队意向，先把科研合作跑起来。</h1>
+    <p class="lead">检索课题、查看正文和组队状态，登录后关注、评分、申请参与或表达资助意向。</p>
+    <form class="quick-search" method="get" action="{% url 'project_list' %}">
+      <label class="sr-only" for="home-q">搜索课题</label>
+      <input id="home-q" name="q" placeholder="搜索 RAG、OCT、安全评测、阴道镜">
+      <button type="submit">搜索课题</button>
+    </form>
+  </div>
+  <div class="hero-panel signal-board" aria-label="平台状态">
+    <div class="signal-header">
+      <span>协作信号</span>
+      <strong>在线协作</strong>
+    </div>
+    <div class="signal-flow" aria-hidden="true">
+      <span class="signal-node active"></span>
+      <span class="signal-link"></span>
+      <span class="signal-node active"></span>
+      <span class="signal-link"></span>
+      <span class="signal-node"></span>
+    </div>
+    <div class="signal-stats">
+      <div>
+        <span class="metric-value">{{ stats.project_count }}</span>
+        <span class="metric-label">公开课题</span>
+      </div>
+      <div>
+        <span class="metric-value">{{ stats.theme_count }}</span>
+        <span class="metric-label">研究主题</span>
+      </div>
+      <div>
+        <span class="metric-value">{{ stats.interest_count }}</span>
+        <span class="metric-label">参与意向</span>
+      </div>
+    </div>
+  </div>
 </section>
 
-<section class="grid grid-4" style="margin-top: 16px;">
-  <div class="card"><div class="stats">{{ stats.project_count }}</div><div class="muted">课题数</div></div>
-  <div class="card"><div class="stats">{{ stats.theme_count }}</div><div class="muted">主题数</div></div>
-  <div class="card"><div class="stats">{{ stats.user_count }}</div><div class="muted">注册用户</div></div>
-  <div class="card"><div class="stats">{{ stats.interest_count }}</div><div class="muted">参与意向</div></div>
-</section>
-
-<section style="margin-top: 24px;">
-  <h2>主题入口</h2>
-  <div class="grid grid-4">
+<section class="section-block">
+  <div class="section-heading">
+    <div>
+      <h2>主题入口</h2>
+      <p class="muted">按研究方向快速进入课题库。</p>
+    </div>
+    <a class="button secondary" href="{% url 'project_list' %}">全部课题</a>
+  </div>
+  <div class="theme-grid">
     {% for theme in themes %}
-      <a class="card" href="{% url 'project_list' %}?theme={{ theme.slug }}">
+      <a class="theme-card" href="{% url 'project_list' %}?theme={{ theme.slug }}">
         <strong>{{ theme.name }}</strong>
-        <div class="muted">{{ theme.project_count }} 个课题</div>
+        <span>{{ theme.project_count }} 个课题</span>
       </a>
     {% empty %}
-      <div class="card muted">还没有导入主题。</div>
+      <div class="empty-state">还没有导入主题。</div>
     {% endfor %}
   </div>
 </section>
 
-<section style="margin-top: 24px;">
-  <h2>热门课题</h2>
-  <div class="grid">
+<section class="section-block">
+  <div class="section-heading">
+    <div>
+      <h2>热门课题</h2>
+      <p class="muted">优先查看近期更容易形成协作的小组入口。</p>
+    </div>
+  </div>
+  <div class="project-stack">
     {% for project in hot_projects %}
-      <div class="card">
-        <p class="project-title"><a href="{% url 'project_detail' project.pk %}">{{ project.title }}</a></p>
-        <p class="muted">{{ project.theme }} · {{ project.get_stage_display }} · 关注 {{ project.follow_count }} · 参与 {{ project.interest_count }}</p>
-        <p>{{ project.summary|truncatechars:180 }}</p>
+      <div class="project-row">
+        <div>
+          <p class="project-title"><a href="{% url 'project_detail' project.pk %}">{{ project.title }}</a></p>
+          <p class="muted">{{ project.theme }} / {{ project.get_stage_display }} / 关注 {{ project.follow_count }} / 参与 {{ project.interest_count }}</p>
+          <p>{{ project.summary|truncatechars:180 }}</p>
+        </div>
+        <a class="button secondary" href="{% url 'project_detail' project.pk %}">查看详情</a>
       </div>
     {% empty %}
-      <div class="card muted">导入课题后会显示热门课题。</div>
+      <div class="empty-state">导入课题后会显示热门课题。</div>
     {% endfor %}
   </div>
 </section>

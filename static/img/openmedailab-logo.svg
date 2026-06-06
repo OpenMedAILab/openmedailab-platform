@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title>OpenMedAILab mark</title>
+  <rect width="64" height="64" rx="14" fill="#0f766e"/>
+  <path d="M20 32c0-7.2 4.8-12 12-12s12 4.8 12 12-4.8 12-12 12-12-4.8-12-12Z" fill="none" stroke="#ffffff" stroke-width="6"/>
+  <path d="M32 17v10M32 37v10M17 32h10M37 32h10" stroke="#b7f1e7" stroke-width="5" stroke-linecap="round"/>
+</svg>

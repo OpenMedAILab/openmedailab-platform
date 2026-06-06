@@ -1,6 +1,7 @@
-from django.contrib import messages
-from django.contrib.auth.models import User
 from django.contrib.auth.decorators import login_required
+from django.contrib.auth.models import User
+from django.conf import settings
+from django.contrib import messages
 from django.core.paginator import Paginator
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404, redirect, render
@@ -61,12 +62,23 @@ def project_list(request):
 
     paginator = Paginator(projects, 20)
     page_obj = paginator.get_page(request.GET.get("page"))
+    page_query = request.GET.copy()
+    page_query.pop("page", None)
+    pagination_query = page_query.urlencode()
+    if request.user.is_authenticated:
+        project_ids = [project.pk for project in page_obj.object_list]
+        followed_ids = set(
+            ProjectFollow.objects.filter(user=request.user, project_id__in=project_ids).values_list("project_id", flat=True)
+        )
+        for project in page_obj.object_list:
+            project.viewer_is_following = project.pk in followed_ids
     context = {
         "page_obj": page_obj,
         "themes": Theme.objects.filter(is_active=True).order_by("sort_order", "name"),
         "tags": Tag.objects.order_by("name")[:80],
         "stages": ProjectStage.choices,
         "filters": {"q": q, "theme": theme, "tag": tag, "stage": stage, "has_pdf": has_pdf, "sort": sort},
+        "pagination_query": pagination_query,
     }
     return render(request, "projects/project_list.html", context)
 
@@ -89,6 +101,7 @@ def project_detail(request, pk):
         "project": project,
         "team_status": project.team_status,
         "user_state": user_state,
+        "pdf_url": project_pdf_url(project),
         "score_form": ProjectScoreForm(instance=user_state.get("score")),
         "interest_form": ProjectInterestForm(),
         "claim_form": ProjectClaimIntentForm(),
@@ -114,6 +127,18 @@ def dashboard(request):
 
 def _project_redirect(project):
     return redirect(reverse("project_detail", args=[project.pk]))
+
+
+def project_pdf_url(project):
+    path = project.source_pdf_path or ""
+    if not path:
+        pdf_document = project.documents.filter(doc_type="pdf").first()
+        path = pdf_document.path if pdf_document else ""
+    if not path:
+        return ""
+    if path.startswith(("http://", "https://", "/")):
+        return path
+    return f"{settings.MEDIA_URL}{path}"
 
 
 @login_required

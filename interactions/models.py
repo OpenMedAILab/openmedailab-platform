@@ -109,6 +109,11 @@ class ProjectInterest(models.Model):
     def __str__(self):
         return f"{self.user} interest {self.project} as {self.role}"
 
+    @property
+    def role_display_name(self):
+        labels = {"Leader": "项目负责人", "AI工程师": "AI 工程师"}
+        return labels.get(self.role, self.get_role_display())
+
 
 class ProjectClaimIntent(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="project_claim_intents")

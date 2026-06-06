@@ -1,39 +1,59 @@
 {% extends "base.html" %}
+{% load markdown_extras %}
 {% block title %}{{ project.title }} - OpenMedAILab{% endblock %}
 {% block content %}
-<article class="card">
-  <p class="muted">{{ project.theme }} · {{ project.topic_id }} · {{ project.get_stage_display }}</p>
-  <h1>{{ project.title }}</h1>
-  <p>
-    {% for tag in project.tags.all %}<span class="pill">{{ tag.name }}</span>{% endfor %}
-  </p>
-  <p>
-    初始评分 {{ project.llm_score|default:"-" }} · 社区评分 {{ project.community_score|default:"-" }}
-    · 综合评分 {{ project.composite_score|default:"-" }} · 推荐期刊 {{ project.recommended_journal|default:"-" }}
-  </p>
-  <p>{{ project.summary }}</p>
-  {% if project.source_pdf_path %}<p class="muted">PDF 路径：{{ project.source_pdf_path }}</p>{% endif %}
+<article class="detail-hero">
+  <div>
+    <p class="project-kicker"><span>{{ project.theme }}</span><span>{{ project.topic_id }}</span><span>{{ project.get_stage_display }}</span></p>
+    <h1>{{ project.title }}</h1>
+    <p class="lead">{{ project.summary }}</p>
+    <p class="tag-row">{% for tag in project.tags.all %}<span class="pill">{{ tag.name }}</span>{% endfor %}</p>
+    <div class="action-row">
+      {% if user.is_authenticated %}
+        {% if user_state.is_following %}
+          <form class="inline" method="post" action="{% url 'project_unfollow' project.pk %}">{% csrf_token %}<button class="secondary" type="submit">已关注，点此取消</button></form>
+        {% else %}
+          <form class="inline" method="post" action="{% url 'project_follow' project.pk %}">{% csrf_token %}<button type="submit">关注课题</button></form>
+        {% endif %}
+        <a class="button secondary" href="#interest">申请参与</a>
+        <a class="button ghost" href="#score">评分</a>
+      {% else %}
+        <a class="button" href="{% url 'login' %}?next={{ request.get_full_path|urlencode }}">登录后参与</a>
+        <a class="button secondary" href="{% url 'project_list' %}">返回课题库</a>
+      {% endif %}
+      {% if pdf_url %}<a class="button ghost" href="{{ pdf_url }}" target="_blank" rel="noopener">查看 PDF</a>{% endif %}
+    </div>
+  </div>
+  <aside class="detail-metrics" aria-label="课题评分">
+    <div><strong>{{ project.llm_score|default:"-" }}</strong><span>初始评分</span></div>
+    <div><strong>{{ project.community_score|default:"-" }}</strong><span>社区评分</span></div>
+    <div><strong>{{ project.composite_score|default:"-" }}</strong><span>综合评分</span></div>
+    <div><strong>{{ project.recommended_journal|default:"-" }}</strong><span>推荐期刊</span></div>
+  </aside>
 </article>
 
-<section class="grid grid-2" style="margin-top: 16px;">
+<section class="detail-grid">
   <div class="card">
     <h2>组队情况</h2>
-    {% for role,count in team_status.roles.items %}
-      <p>{{ role }}：{{ count }}</p>
-    {% endfor %}
-    <p>资助意向：{{ team_status.sponsor_count }}</p>
-    <p><strong>{% if team_status.basic_ready %}基础团队已具备{% else %}基础团队未凑齐{% endif %}</strong></p>
+    <div class="team-grid">
+      {% for role,count in team_status.roles.items %}
+        <div><strong>{{ count }}</strong><span>{{ role }}</span></div>
+      {% endfor %}
+      <div><strong>{{ team_status.sponsor_count }}</strong><span>资助意向</span></div>
+    </div>
+    <p class="status-line {% if team_status.basic_ready %}ready{% else %}pending{% endif %}">
+      {% if team_status.basic_ready %}基础团队已具备{% else %}基础团队未凑齐{% endif %}
+    </p>
   </div>
   <div class="card">
     <h2>我的状态</h2>
     {% if user.is_authenticated %}
-      <p>{% if user_state.is_following %}已关注{% else %}未关注{% endif %}</p>
-      {% if user_state.score %}<p>我的评分：{{ user_state.score.score }}</p>{% endif %}
-      {% if user_state.is_following %}
-        <form method="post" action="{% url 'project_unfollow' project.pk %}">{% csrf_token %}<button class="secondary" type="submit">取消关注</button></form>
-      {% else %}
-        <form method="post" action="{% url 'project_follow' project.pk %}">{% csrf_token %}<button type="submit">关注课题</button></form>
-      {% endif %}
+      <div class="state-list">
+        <p><strong>{% if user_state.is_following %}已关注{% else %}未关注{% endif %}</strong><span>关注状态</span></p>
+        <p><strong>{{ user_state.score.score|default:"-" }}</strong><span>我的评分</span></p>
+        <p><strong>{{ user_state.interests|length }}</strong><span>参与意向</span></p>
+        <p><strong>{{ user_state.claims|length }}</strong><span>认领意向</span></p>
+      </div>
     {% else %}
       <p><a href="{% url 'login' %}?next={{ request.path }}">登录后可关注、评分、参与、认领和表达资助意向。</a></p>
     {% endif %}
@@ -41,32 +61,35 @@
 </section>
 
 {% if user.is_authenticated %}
-<section class="grid grid-2" style="margin-top: 16px;">
-  <div class="card">
+<section class="interaction-grid">
+  <div class="card" id="score">
     <h2>评分</h2>
+    <p class="muted">1-10 分评价课题价值，可补充一句判断依据。</p>
     <form method="post" action="{% url 'project_score' project.pk %}">
       {% csrf_token %}
       {{ score_form.as_p }}
       <button type="submit">提交评分</button>
     </form>
   </div>
-  <div class="card">
+  <div class="card" id="interest">
     <h2>参与意向</h2>
+    <p class="muted">说明你能承担的角色、时间和相关经验，方便管理员后续匹配。</p>
     <form method="post" action="{% url 'project_interest' project.pk %}">
       {% csrf_token %}
       {{ interest_form.as_p }}
       <button type="submit">提交参与意向</button>
     </form>
   </div>
-  <div class="card">
+  <div class="card" id="claim">
     <h2>认领意向</h2>
+    <p class="muted">第一版只记录推动意向，不会自动变成任务。</p>
     <form method="post" action="{% url 'project_claim' project.pk %}">
       {% csrf_token %}
       {{ claim_form.as_p }}
       <button type="submit">提交认领意向</button>
     </form>
   </div>
-  <div class="card">
+  <div class="card" id="sponsor">
     <h2>资助意向</h2>
     <form method="post" action="{% url 'project_sponsor' project.pk %}">
       {% csrf_token %}
@@ -78,16 +101,22 @@
 </section>
 {% endif %}
 
-<section style="margin-top: 24px;">
-  <h2>Markdown 原文</h2>
-  <div class="markdown-body">{{ project.body_markdown|default:"暂无 Markdown 正文。" }}</div>
+<section class="section-block">
+  <div class="section-heading">
+    <div>
+      <h2>课题正文</h2>
+      <p class="muted">保留原始课题信息，便于判断研究边界和协作角色。</p>
+    </div>
+    {% if pdf_url %}<a class="button secondary" href="{{ pdf_url }}" target="_blank" rel="noopener">查看 PDF</a>{% endif %}
+  </div>
+  <div class="markdown-body">{{ project.body_markdown|readable_markdown }}</div>
 </section>
 
-<section class="grid grid-2" style="margin-top: 24px;">
+<section class="detail-grid">
   <div class="card">
     <h2>最近参与意向</h2>
     {% for item in recent_interests %}
-      <p>{{ item.user.profile.display_name|default:item.user.username }} · {{ item.role }} · {{ item.get_status_display }}</p>
+      <p>{{ item.user.profile.display_name|default:item.user.username }} / {{ item.role_display_name }} / {{ item.get_status_display }}</p>
     {% empty %}
       <p class="muted">暂无参与意向。</p>
     {% endfor %}

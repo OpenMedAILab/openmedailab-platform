@@ -1,13 +1,19 @@
 {% extends "base.html" %}
 {% block title %}课题库 - OpenMedAILab{% endblock %}
 {% block content %}
-<h1>课题库</h1>
-<form class="card filters" method="get">
+<section class="page-header">
   <div>
+    <h1>课题库</h1>
+    <p class="lead">用关键词、主题、阶段和 PDF 状态快速定位可参与课题。</p>
+  </div>
+</section>
+
+<form class="filter-panel" method="get">
+  <div class="filter-field wide">
     <label for="q">关键词</label>
     <input id="q" name="q" value="{{ filters.q }}" placeholder="RAG / OCT / 安全评测">
   </div>
-  <div>
+  <div class="filter-field">
     <label for="theme">主题</label>
     <select id="theme" name="theme">
       <option value="">全部</option>
@@ -16,7 +22,7 @@
       {% endfor %}
     </select>
   </div>
-  <div>
+  <div class="filter-field">
     <label for="tag">标签</label>
     <select id="tag" name="tag">
       <option value="">全部</option>
@@ -25,7 +31,7 @@
       {% endfor %}
     </select>
   </div>
-  <div>
+  <div class="filter-field">
     <label for="stage">阶段</label>
     <select id="stage" name="stage">
       <option value="">全部</option>
@@ -34,7 +40,7 @@
       {% endfor %}
     </select>
   </div>
-  <div>
+  <div class="filter-field">
     <label for="has_pdf">PDF</label>
     <select id="has_pdf" name="has_pdf">
       <option value="">全部</option>
@@ -42,7 +48,7 @@
       <option value="0" {% if filters.has_pdf == "0" %}selected{% endif %}>无 PDF</option>
     </select>
   </div>
-  <div>
+  <div class="filter-field">
     <label for="sort">排序</label>
     <select id="sort" name="sort">
       <option value="recommended" {% if filters.sort == "recommended" %}selected{% endif %}>综合推荐</option>
@@ -53,33 +59,70 @@
       <option value="project_no" {% if filters.sort == "project_no" %}selected{% endif %}>课题编号</option>
     </select>
   </div>
-  <button type="submit">筛选</button>
+  <div class="filter-actions">
+    <button type="submit">筛选</button>
+    <a class="button ghost" href="{% url 'project_list' %}">清空</a>
+  </div>
 </form>
 
-<div class="grid" style="margin-top: 18px;">
+<div class="result-bar">
+  <span>共 {{ page_obj.paginator.count }} 个匹配课题</span>
+  <span>第 {{ page_obj.number }} / {{ page_obj.paginator.num_pages }} 页</span>
+</div>
+
+<div class="project-stack">
   {% for project in page_obj %}
-    <article class="card">
-      <p class="project-title"><a href="{% url 'project_detail' project.pk %}">{{ project.title }}</a></p>
-      <p class="muted">
-        {{ project.theme }} · {{ project.topic_id }} · {{ project.get_stage_display }}
-        · 初评 {{ project.llm_score|default:"-" }} · 社区 {{ project.community_score|default:"-" }}
-        · 关注 {{ project.follow_count }} · 参与 {{ project.interest_count }}
-        {% if project.has_pdf %} · PDF{% endif %}
-      </p>
-      <p>{{ project.summary|truncatechars:220 }}</p>
-      <p>{% for tag in project.tags.all %}<span class="pill">{{ tag.name }}</span>{% endfor %}</p>
-      <a class="button secondary" href="{% url 'project_detail' project.pk %}">查看详情</a>
+    <article class="project-card">
+      <div class="project-card-main">
+        <div class="project-kicker">
+          <span>{{ project.theme }}</span>
+          <span>{{ project.topic_id }}</span>
+          <span>{{ project.get_stage_display }}</span>
+          {% if project.has_pdf %}<span>PDF</span>{% endif %}
+        </div>
+        <h2 class="project-title"><a href="{% url 'project_detail' project.pk %}">{{ project.title }}</a></h2>
+        <p>{{ project.summary|truncatechars:220 }}</p>
+        <p class="tag-row">{% for tag in project.tags.all %}<span class="pill">{{ tag.name }}</span>{% endfor %}</p>
+      </div>
+      <div class="project-card-side">
+        <div class="score-grid">
+          <div><strong>{{ project.llm_score|default:"-" }}</strong><span>初评</span></div>
+          <div><strong>{{ project.community_score|default:"-" }}</strong><span>社区</span></div>
+          <div><strong>{{ project.follow_count }}</strong><span>关注</span></div>
+          <div><strong>{{ project.interest_count }}</strong><span>参与</span></div>
+        </div>
+        <div class="action-row">
+          <a class="button" href="{% url 'project_detail' project.pk %}">查看详情</a>
+          {% if user.is_authenticated %}
+            {% if project.viewer_is_following %}
+              <form class="inline" method="post" action="{% url 'project_unfollow' project.pk %}">{% csrf_token %}<button class="secondary" type="submit">已关注</button></form>
+            {% else %}
+              <form class="inline" method="post" action="{% url 'project_follow' project.pk %}">{% csrf_token %}<button class="secondary" type="submit">关注</button></form>
+            {% endif %}
+            <a class="button ghost" href="{% url 'project_detail' project.pk %}#score">评分</a>
+            <a class="button ghost" href="{% url 'project_detail' project.pk %}#interest">申请参与</a>
+            <a class="button ghost" href="{% url 'project_detail' project.pk %}#claim">认领</a>
+            <a class="button ghost" href="{% url 'project_detail' project.pk %}#sponsor">资助</a>
+          {% else %}
+            <a class="button secondary" href="{% url 'login' %}?next={% url 'project_detail' project.pk %}">登录后互动</a>
+          {% endif %}
+        </div>
+      </div>
     </article>
   {% empty %}
-    <div class="card muted">没有找到匹配课题。</div>
+    <div class="empty-state">没有找到匹配课题。可以清空筛选条件，或换一个关键词试试。</div>
   {% endfor %}
 </div>
 
 {% if page_obj.paginator.num_pages > 1 %}
-  <p class="card">
-    第 {{ page_obj.number }} / {{ page_obj.paginator.num_pages }} 页
-    {% if page_obj.has_previous %}<a href="?page={{ page_obj.previous_page_number }}">上一页</a>{% endif %}
-    {% if page_obj.has_next %}<a href="?page={{ page_obj.next_page_number }}">下一页</a>{% endif %}
-  </p>
+  <nav class="pagination" aria-label="课题分页">
+    {% if page_obj.has_previous %}
+      <a class="button secondary" href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page={{ page_obj.previous_page_number }}">上一页</a>
+    {% endif %}
+    <span>第 {{ page_obj.number }} / {{ page_obj.paginator.num_pages }} 页</span>
+    {% if page_obj.has_next %}
+      <a class="button secondary" href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page={{ page_obj.next_page_number }}">下一页</a>
+    {% endif %}
+  </nav>
 {% endif %}
 {% endblock %}
