@@ -31,6 +31,84 @@ Open:
 - `http://127.0.0.1:8000/projects/`
 - `http://127.0.0.1:8000/admin/`
 
+## JSON API Contract
+
+The separated frontend should use `/api/` endpoints. Cookie session authentication is used in MVP. For unsafe methods (`POST`, `PUT`, `PATCH`, `DELETE`), first call `GET /api/csrf/`, then send the returned token in the `X-CSRFToken` header with `credentials: "include"`.
+
+All API responses use the same envelope:
+
+```json
+{"ok": true, "data": {}}
+```
+
+Errors use:
+
+```json
+{"ok": false, "error": {"code": "validation_error", "message": "...", "details": {}}}
+```
+
+Core endpoints:
+
+```text
+GET  /api/health/
+GET  /api/csrf/
+GET  /api/meta/
+
+POST /api/auth/register/
+POST /api/auth/login/
+POST /api/auth/logout/
+GET  /api/me/
+GET  /api/me/profile/
+PUT  /api/me/profile/
+PATCH /api/me/profile/
+GET  /api/me/dashboard/
+
+GET  /api/projects/
+GET  /api/projects/<id>/
+POST /api/projects/<id>/follow/
+POST /api/projects/<id>/unfollow/
+DELETE /api/projects/<id>/unfollow/
+POST /api/projects/<id>/score/
+POST /api/projects/<id>/interest/
+POST /api/projects/<id>/claim/
+POST /api/projects/<id>/sponsor/
+```
+
+Project list query parameters:
+
+```text
+q, theme, tag, stage, has_pdf, sort, page, page_size
+```
+
+Allowed `sort` values:
+
+```text
+recommended, llm_score, community_score, follows, updated, project_no
+```
+
+Interaction request bodies:
+
+```json
+{"score": 9, "comment": "值得做"}
+{"role": "学生", "available_hours_per_week": 4, "experience": "文献整理", "message": "想参与"}
+{"claim_type": "literature", "message": "我想认领文献整理"}
+{"sponsor_type": "compute", "note": "可提供算力"}
+```
+
+Frontend CORS defaults allow:
+
+```text
+http://127.0.0.1:3000
+http://localhost:3000
+```
+
+Override them with:
+
+```text
+OPENMEDAILAB_CORS_ALLOWED_ORIGINS=https://frontend.example.com
+CSRF_TRUSTED_ORIGINS=https://frontend.example.com
+```
+
 ## Production Notes
 
 Environment variables are loaded from `.env`.
