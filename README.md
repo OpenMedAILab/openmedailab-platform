@@ -31,6 +31,33 @@ Open:
 - `http://127.0.0.1:8000/projects/`
 - `http://127.0.0.1:8000/admin/`
 
+## Vue Frontend
+
+The separated Vue frontend lives in `frontend/`. It only calls `/api/` endpoints and does not depend on Django templates.
+
+When a Node package manager is available:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open:
+
+```text
+http://127.0.0.1:5173/
+```
+
+This workspace currently has Node but no npm/pnpm/yarn, so the frontend also supports a lightweight static preview through the CDN import map in `frontend/index.html`:
+
+```bash
+cd frontend
+conda run -n base python -m http.server 5173
+```
+
+The Django backend must run at `http://127.0.0.1:8000` for the static preview. Production builds should use the normal Vite flow.
+
 ## JSON API Contract
 
 The separated frontend should use `/api/` endpoints. Cookie session authentication is used in MVP. For unsafe methods (`POST`, `PUT`, `PATCH`, `DELETE`), first call `GET /api/csrf/`, then send the returned token in the `X-CSRFToken` header with `credentials: "include"`.
@@ -98,6 +125,8 @@ Interaction request bodies:
 Frontend CORS defaults allow:
 
 ```text
+http://127.0.0.1:5173
+http://localhost:5173
 http://127.0.0.1:3000
 http://localhost:3000
 ```

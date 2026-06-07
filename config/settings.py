@@ -148,12 +148,18 @@ LOGOUT_REDIRECT_URL = "home"
 OPENMEDAILAB_INITIAL_CREDITS = int(os.getenv("OPENMEDAILAB_INITIAL_CREDITS", "100"))
 OPENMEDAILAB_CORS_ALLOWED_ORIGINS = [
     origin.strip()
-    for origin in os.getenv("OPENMEDAILAB_CORS_ALLOWED_ORIGINS", "http://127.0.0.1:3000,http://localhost:3000").split(",")
+    for origin in os.getenv(
+        "OPENMEDAILAB_CORS_ALLOWED_ORIGINS",
+        "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:3000,http://localhost:3000",
+    ).split(",")
     if origin.strip()
 ]
 CSRF_TRUSTED_ORIGINS = [
     origin.strip()
-    for origin in os.getenv("CSRF_TRUSTED_ORIGINS", "http://127.0.0.1:3000,http://localhost:3000").split(",")
+    for origin in os.getenv(
+        "CSRF_TRUSTED_ORIGINS",
+        "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:3000,http://localhost:3000",
+    ).split(",")
     if origin.strip()
 ]
 
