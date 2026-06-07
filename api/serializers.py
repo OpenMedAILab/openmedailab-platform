@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+from .rbac import capabilities_for_user
+
 
 def decimal_value(value):
     if value is None:
@@ -18,6 +20,7 @@ def user_payload(user):
         "username": user.username,
         "email": user.email,
         "is_staff": user.is_staff,
+        "rbac": capabilities_for_user(user),
         "profile": profile_payload(profile) if profile else None,
     }
 
@@ -52,6 +55,7 @@ def theme_payload(theme):
         "slug": theme.slug,
         "description": theme.description,
         "cover_image": theme.cover_image,
+        "file_space": theme.file_space,
         "sort_order": theme.sort_order,
         "is_active": theme.is_active,
     }
@@ -79,6 +83,13 @@ def project_summary_payload(project):
         "topic_id": project.topic_id,
         "title": project.title,
         "summary": project.summary,
+        "problem_statement": project.problem_statement,
+        "research_goal": project.research_goal,
+        "technical_route": project.technical_route,
+        "data_requirements": project.data_requirements,
+        "evaluation_metrics": project.evaluation_metrics,
+        "expected_outputs": project.expected_outputs,
+        "compliance_notes": project.compliance_notes,
         "theme": theme_payload(project.theme),
         "project_no": project.project_no,
         "stage": project.stage,
@@ -112,10 +123,24 @@ def project_detail_payload(project):
             "score_dimensions": project.score_dimensions,
             "team_status": project.team_status,
             "documents": [document_payload(document) for document in project.documents.all()],
+            "source_payload": project.source_payload,
             "imported_at": project.imported_at,
         }
     )
     return payload
+
+
+def theme_space_payload(theme, projects, documents):
+    grouped_documents = {}
+    for document in documents:
+        grouped_documents.setdefault(document.doc_type, []).append(document_payload(document))
+    return {
+        "theme": theme_payload(theme),
+        "project_count": len(projects),
+        "document_count": len(documents),
+        "documents_by_type": grouped_documents,
+        "projects": [project_summary_payload(project) for project in projects],
+    }
 
 
 def score_payload(score):

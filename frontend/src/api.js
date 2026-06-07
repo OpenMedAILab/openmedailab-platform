@@ -50,6 +50,9 @@ export async function request(path, options = {}) {
 
 export const api = {
   meta: () => request("/api/meta/"),
+  rbac: () => request("/api/rbac/"),
+  projectSchema: () => request("/api/project-schema/"),
+  themeSpace: (slug) => request(`/api/themes/${encodeURIComponent(slug)}/space/`),
   me: () => request("/api/me/"),
   dashboard: () => request("/api/me/dashboard/"),
   profile: (payload) => request("/api/me/profile/", { method: "PATCH", body: payload }),
@@ -63,7 +66,16 @@ export const api = {
   score: (id, payload) => request(`/api/projects/${id}/score/`, { method: "POST", body: payload }),
   interest: (id, payload) => request(`/api/projects/${id}/interest/`, { method: "POST", body: payload }),
   claim: (id, payload) => request(`/api/projects/${id}/claim/`, { method: "POST", body: payload }),
-  sponsor: (id, payload) => request(`/api/projects/${id}/sponsor/`, { method: "POST", body: payload })
+  sponsor: (id, payload) => request(`/api/projects/${id}/sponsor/`, { method: "POST", body: payload }),
+  adminThemes: () => request("/api/admin/themes/"),
+  adminCreateTheme: (payload) => request("/api/admin/themes/", { method: "POST", body: payload }),
+  adminUpdateTheme: (id, payload) => request(`/api/admin/themes/${id}/`, { method: "PATCH", body: payload }),
+  adminDeleteTheme: (id) => request(`/api/admin/themes/${id}/`, { method: "DELETE", body: {} }),
+  adminProjects: (params = {}) => request(`/api/admin/projects/?${new URLSearchParams(cleanParams(params))}`),
+  adminCreateProject: (payload) => request("/api/admin/projects/", { method: "POST", body: payload }),
+  adminUpdateProject: (id, payload) => request(`/api/admin/projects/${id}/`, { method: "PATCH", body: payload }),
+  adminDeleteProject: (id) => request(`/api/admin/projects/${id}/`, { method: "DELETE", body: {} }),
+  adminImportProjects: (payload) => request("/api/admin/projects/import-json/", { method: "POST", body: payload })
 };
 
 function cleanParams(params) {

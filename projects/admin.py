@@ -22,6 +22,11 @@ class ThemeAdmin(admin.ModelAdmin):
     search_fields = ("name", "description")
     prepopulated_fields = {"slug": ("name",)}
     readonly_fields = ("created_at", "updated_at")
+    fieldsets = (
+        ("基础信息", {"fields": ("name", "slug", "description", "cover_image", "sort_order", "is_active")}),
+        ("文件域空间", {"fields": ("file_space",)}),
+        ("时间", {"fields": ("created_at", "updated_at")}),
+    )
 
     def project_count(self, obj):
         return obj.projects.count()
@@ -53,11 +58,19 @@ class ProjectAdmin(admin.ModelAdmin):
         "updated_at",
     )
     list_filter = ("theme", "stage", "has_pdf", "is_public", "imported_at")
-    search_fields = ("topic_id", "title", "summary", "source_md_path", "recommended_journal")
+    search_fields = ("topic_id", "title", "summary", "problem_statement", "source_md_path", "recommended_journal")
     readonly_fields = ("created_at", "updated_at", "imported_at")
     autocomplete_fields = ("theme",)
     inlines = (ProjectTagInline, ProjectDocumentInline)
     actions = ("mark_open_recruiting", "mark_team_building", "mark_active", "mark_archived")
+    fieldsets = (
+        ("基础信息", {"fields": ("topic_id", "title", "summary", "theme", "project_no", "stage", "is_public")}),
+        ("结构化课题字段", {"fields": ("problem_statement", "research_goal", "technical_route", "data_requirements", "evaluation_metrics", "expected_outputs", "compliance_notes")}),
+        ("评分与角色", {"fields": ("llm_score", "community_score", "composite_score", "recommended_journal", "needed_roles", "score_dimensions")}),
+        ("来源与文件", {"fields": ("source_md_path", "source_pdf_path", "page_path", "content_hash", "has_pdf", "body_markdown")}),
+        ("导入原始 JSON", {"fields": ("source_payload",), "classes": ("collapse",)}),
+        ("时间", {"fields": ("created_at", "updated_at", "imported_at")}),
+    )
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related("theme").prefetch_related("follows", "interests")

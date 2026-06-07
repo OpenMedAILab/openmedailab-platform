@@ -87,6 +87,9 @@ Core endpoints:
 GET  /api/health/
 GET  /api/csrf/
 GET  /api/meta/
+GET  /api/rbac/
+GET  /api/project-schema/
+GET  /api/themes/<slug>/space/
 
 POST /api/auth/register/
 POST /api/auth/login/
@@ -106,7 +109,21 @@ POST /api/projects/<id>/score/
 POST /api/projects/<id>/interest/
 POST /api/projects/<id>/claim/
 POST /api/projects/<id>/sponsor/
+
+GET    /api/admin/themes/
+POST   /api/admin/themes/
+PATCH  /api/admin/themes/<id>/
+DELETE /api/admin/themes/<id>/
+GET    /api/admin/projects/
+POST   /api/admin/projects/
+PATCH  /api/admin/projects/<id>/
+DELETE /api/admin/projects/<id>/
+POST   /api/admin/projects/import-json/
 ```
+
+Admin endpoints require RBAC capabilities returned by `/api/rbac/` and `/api/me/`. Staff or superuser accounts receive `manage_themes`, `manage_projects`, and `import_projects`.
+
+Project JSON imports should follow the field contract from `GET /api/project-schema/`. The backend stores structured fields such as `problem_statement`, `research_goal`, `technical_route`, `data_requirements`, `evaluation_metrics`, `expected_outputs`, `compliance_notes`, project documents, and the original `source_payload`.
 
 Project list query parameters:
 
