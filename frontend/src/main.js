@@ -50,6 +50,8 @@ const App = {
       const interests = state.projects.reduce((sum, item) => sum + (item.interest_count || 0), 0);
       return { total, follows, interests, themes: state.meta.themes.length };
     });
+    const featuredProject = computed(() => state.projects[0] || null);
+    const themeMatrix = computed(() => state.meta.themes.slice(0, 8));
 
     onMounted(async () => {
       window.addEventListener("hashchange", handleRouteChange);
@@ -261,40 +263,54 @@ const App = {
       displayScore,
       shortText,
       stageLabel,
-      roleCountEntries
+      roleCountEntries,
+      featuredProject,
+      themeMatrix,
+      signalWidth,
+      topicInitial,
+      scoreTone
     };
   },
   template: `
     <div class="app-shell">
+      <div class="ambient-grid"></div>
+      <div class="scanline"></div>
+
       <aside class="sidebar">
-        <button class="brand" @click="navigate('home')">
-          <span class="brand-mark">OM</span>
+        <button class="brand" @click="navigate('home')" title="OpenMedAILab">
+          <span class="brand-mark">
+            <span class="brand-pulse"></span>
+            OM
+          </span>
           <span>
             <strong>OpenMedAILab</strong>
-            <small>医学 AI 科研协作</small>
+            <small>MED AI RESEARCH OS</small>
           </span>
         </button>
+
         <nav class="side-nav">
-          <button :class="{active: activeView === 'home'}" @click="navigate('home')">总览</button>
-          <button :class="{active: activeView === 'projects'}" @click="navigate('projects')">课题库</button>
-          <button :class="{active: activeView === 'dashboard'}" @click="navigate('dashboard')">工作台</button>
+          <button :class="{active: activeView === 'home'}" @click="navigate('home')"><span class="nav-icon">01</span>指挥舱</button>
+          <button :class="{active: activeView === 'projects'}" @click="navigate('projects')"><span class="nav-icon">02</span>课题库</button>
+          <button :class="{active: activeView === 'dashboard'}" @click="navigate('dashboard')"><span class="nav-icon">03</span>工作台</button>
         </nav>
-        <div class="sidebar-note">
-          <strong>前后端分离版</strong>
-          <span>所有数据来自 Django JSON API。</span>
+
+        <div class="system-chip">
+          <span class="status-dot"></span>
+          <strong>API ONLINE</strong>
+          <small>{{ stats.total || 0 }} projects indexed</small>
         </div>
       </aside>
 
       <section class="workspace">
         <header class="topbar">
           <div>
-            <p class="eyebrow">Open research operations</p>
-            <h1>{{ activeView === 'project' ? '课题详情' : activeView === 'projects' ? '课题库' : activeView === 'dashboard' ? '我的工作台' : '协作总览' }}</h1>
+            <p class="eyebrow">Clinical intelligence network</p>
+            <h1>{{ activeView === 'project' ? '课题任务舱' : activeView === 'projects' ? '课题信号矩阵' : activeView === 'dashboard' ? '个人协作台' : '医学 AI 协作中枢' }}</h1>
           </div>
           <div class="user-box">
             <template v-if="state.user">
-              <span>{{ state.user.profile?.display_name || state.user.username }}</span>
-              <button class="ghost" @click="logout">退出</button>
+              <span class="user-pill">{{ state.user.profile?.display_name || state.user.username }}</span>
+              <button class="icon-button ghost" @click="logout" title="退出">OUT</button>
             </template>
             <template v-else>
               <button class="ghost" @click="navigate('login')">登录</button>
@@ -305,46 +321,101 @@ const App = {
 
         <main>
           <div v-if="state.toast" class="toast">{{ state.toast }}</div>
-          <div v-if="state.booting" class="loading-panel">正在连接系统接口...</div>
+          <div v-if="state.booting" class="loading-panel">
+            <span class="loading-core"></span>
+            正在同步医学 AI 课题数据...
+          </div>
 
           <template v-else>
             <section v-if="activeView === 'home'" class="view-stack">
-              <div class="hero-band">
-                <div>
-                  <p class="eyebrow">MVP collaboration loop</p>
-                  <h2>把开放医学 AI 课题变成可跟踪、可组队、可推进的项目池。</h2>
-                  <p>浏览课题、筛选方向、提交参与意向、记录资助与认领，管理员在后台沉淀真实互动数据。</p>
+              <div class="command-hero">
+                <div class="hero-copy">
+                  <p class="eyebrow">OpenMedAILab Command Deck</p>
+                  <h2>让医生、学生、工程师和资助者围绕真实医学 AI 课题快速成队。</h2>
+                  <div class="hero-actions">
+                    <button @click="navigate('projects')">进入课题矩阵</button>
+                    <button class="ghost" @click="navigate('dashboard')">查看我的协作</button>
+                  </div>
                 </div>
-                <button @click="navigate('projects')">进入课题库</button>
+                <div class="bio-core" aria-label="medical ai visual">
+                  <div class="core-ring ring-one"></div>
+                  <div class="core-ring ring-two"></div>
+                  <div class="core-ring ring-three"></div>
+                  <div class="neural-node n1"></div>
+                  <div class="neural-node n2"></div>
+                  <div class="neural-node n3"></div>
+                  <div class="neural-node n4"></div>
+                  <div class="core-label">
+                    <strong>{{ stats.total || 0 }}</strong>
+                    <span>ACTIVE TOPICS</span>
+                  </div>
+                </div>
               </div>
 
-              <div class="metrics-grid">
-                <div class="metric"><span>{{ stats.total }}</span><small>课题</small></div>
-                <div class="metric"><span>{{ stats.themes }}</span><small>主题</small></div>
-                <div class="metric"><span>{{ stats.follows }}</span><small>近期关注</small></div>
-                <div class="metric"><span>{{ stats.interests }}</span><small>参与意向</small></div>
+              <div class="metrics-grid holo">
+                <div class="metric"><small>Project Index</small><span>{{ stats.total }}</span><em>DB synced</em></div>
+                <div class="metric"><small>Research Themes</small><span>{{ stats.themes }}</span><em>clinical domains</em></div>
+                <div class="metric"><small>Follow Signals</small><span>{{ stats.follows }}</span><em>from current page</em></div>
+                <div class="metric"><small>Join Signals</small><span>{{ stats.interests }}</span><em>from current page</em></div>
               </div>
 
-              <section class="section-block">
+              <div class="home-grid">
+                <section class="neural-panel">
+                  <div class="section-head">
+                    <div>
+                      <p class="eyebrow">Theme map</p>
+                      <h2>研究主题分布</h2>
+                    </div>
+                  </div>
+                  <div class="theme-matrix">
+                    <button v-for="theme in themeMatrix" :key="theme.id" @click="state.filters.theme = theme.slug; submitFilters();">
+                      <span>{{ topicInitial(theme.name) }}</span>
+                      <strong>{{ theme.name }}</strong>
+                    </button>
+                  </div>
+                </section>
+
+                <section class="feature-panel" v-if="featuredProject">
+                  <p class="eyebrow">Top signal</p>
+                  <h2>{{ featuredProject.title }}</h2>
+                  <p>{{ shortText(featuredProject.summary, 170) }}</p>
+                  <div class="signal-meter">
+                    <span :style="{ width: signalWidth(featuredProject) }"></span>
+                  </div>
+                  <div class="feature-meta">
+                    <span>{{ featuredProject.theme?.name }}</span>
+                    <span>Score {{ displayScore(featuredProject.composite_score) }}</span>
+                    <span>{{ featuredProject.stage_label }}</span>
+                  </div>
+                  <button @click="navigate('project', { id: featuredProject.id })">打开任务舱</button>
+                </section>
+              </div>
+
+              <section class="section-block dark-section">
                 <div class="section-head">
-                  <h2>推荐课题</h2>
-                  <button class="ghost" @click="navigate('projects')">查看全部</button>
+                  <div>
+                    <p class="eyebrow">Recommended queue</p>
+                    <h2>优先推进课题</h2>
+                  </div>
+                  <button class="ghost" @click="navigate('projects')">全部课题</button>
                 </div>
                 <div class="project-grid">
-                  <article v-for="project in state.projects.slice(0, 6)" :key="project.id" class="project-card" @click="navigate('project', { id: project.id })">
+                  <article v-for="project in state.projects.slice(0, 6)" :key="project.id" class="project-card research-card" @click="navigate('project', { id: project.id })">
+                    <div class="card-beam"></div>
                     <div class="card-top">
                       <span>{{ project.theme?.name || '未分类' }}</span>
-                      <span>{{ project.stage_label }}</span>
+                      <span :class="['score-badge', scoreTone(project)]">{{ displayScore(project.composite_score) }}</span>
                     </div>
                     <h3>{{ project.title }}</h3>
-                    <p>{{ shortText(project.summary, 118) }}</p>
+                    <p>{{ shortText(project.summary, 130) }}</p>
                     <div class="tag-row">
                       <span v-for="tag in project.tags.slice(0, 4)" :key="tag.id">{{ tag.name }}</span>
                     </div>
+                    <div class="signal-meter compact"><span :style="{ width: signalWidth(project) }"></span></div>
                     <div class="card-metrics">
-                      <span>综合 {{ displayScore(project.composite_score) }}</span>
                       <span>关注 {{ project.follow_count || 0 }}</span>
                       <span>参与 {{ project.interest_count || 0 }}</span>
+                      <span>{{ project.stage_label }}</span>
                     </div>
                   </article>
                 </div>
@@ -352,10 +423,10 @@ const App = {
             </section>
 
             <section v-if="activeView === 'projects'" class="view-stack">
-              <form class="filter-bar" @submit.prevent="submitFilters">
-                <label>
-                  <span>搜索</span>
-                  <input v-model="state.filters.q" placeholder="RAG / OCT / 安全评测" />
+              <form class="filter-bar cockpit-filter" @submit.prevent="submitFilters">
+                <label class="wide-field">
+                  <span>检索课题信号</span>
+                  <input v-model="state.filters.q" placeholder="RAG / OCT / 安全评测 / Agent" />
                 </label>
                 <label>
                   <span>主题</span>
@@ -389,30 +460,31 @@ const App = {
                     <option value="project_no">课题编号</option>
                   </select>
                 </label>
-                <button type="submit">筛选</button>
+                <button type="submit">扫描</button>
               </form>
 
               <div class="result-line">
-                <span>共 {{ state.pagination.total_count || 0 }} 个匹配课题</span>
-                <span v-if="state.loading">正在刷新...</span>
+                <span>{{ state.pagination.total_count || 0 }} topics matched</span>
+                <span v-if="state.loading" class="live-chip">SYNCING</span>
               </div>
 
-              <div class="project-grid">
-                <article v-for="project in state.projects" :key="project.id" class="project-card" @click="navigate('project', { id: project.id })">
+              <div class="project-grid dense-grid">
+                <article v-for="project in state.projects" :key="project.id" class="project-card research-card" @click="navigate('project', { id: project.id })">
+                  <div class="card-beam"></div>
                   <div class="card-top">
                     <span>{{ project.topic_id }}</span>
                     <span>{{ project.stage_label }}</span>
                   </div>
                   <h3>{{ project.title }}</h3>
-                  <p>{{ shortText(project.summary, 142) }}</p>
+                  <p>{{ shortText(project.summary, 150) }}</p>
                   <div class="tag-row">
                     <span v-for="tag in project.tags.slice(0, 5)" :key="tag.id">{{ tag.name }}</span>
                   </div>
-                  <div class="card-metrics">
-                    <span>初评 {{ displayScore(project.llm_score) }}</span>
-                    <span>社区 {{ displayScore(project.community_score) }}</span>
-                    <span>关注 {{ project.follow_count || 0 }}</span>
-                    <span>参与 {{ project.interest_count || 0 }}</span>
+                  <div class="metric-strip">
+                    <div><small>LLM</small><strong>{{ displayScore(project.llm_score) }}</strong></div>
+                    <div><small>社区</small><strong>{{ displayScore(project.community_score) }}</strong></div>
+                    <div><small>关注</small><strong>{{ project.follow_count || 0 }}</strong></div>
+                    <div><small>参与</small><strong>{{ project.interest_count || 0 }}</strong></div>
                   </div>
                 </article>
               </div>
@@ -425,9 +497,12 @@ const App = {
             </section>
 
             <section v-if="activeView === 'project'" class="view-stack">
-              <div v-if="state.loading || !state.currentProject" class="loading-panel">正在读取课题详情...</div>
+              <div v-if="state.loading || !state.currentProject" class="loading-panel">
+                <span class="loading-core"></span>
+                正在读取课题任务舱...
+              </div>
               <template v-else>
-                <article class="detail-hero">
+                <article class="detail-hero cockpit-hero">
                   <div>
                     <p class="eyebrow">{{ state.currentProject.theme?.name }} · {{ state.currentProject.topic_id }}</p>
                     <h2>{{ state.currentProject.title }}</h2>
@@ -436,9 +511,10 @@ const App = {
                       <span v-for="tag in state.currentProject.tags" :key="tag.id">{{ tag.name }}</span>
                     </div>
                   </div>
-                  <div class="score-panel">
+                  <div class="score-panel cyber-score">
                     <span>{{ displayScore(state.currentProject.composite_score) }}</span>
-                    <small>综合评分</small>
+                    <small>综合信号</small>
+                    <div class="signal-meter"><span :style="{ width: signalWidth(state.currentProject) }"></span></div>
                     <button @click="toggleFollow(state.currentProject)">
                       {{ state.currentProject.viewer_state?.is_following ? '已关注' : '关注课题' }}
                     </button>
@@ -446,9 +522,12 @@ const App = {
                 </article>
 
                 <div class="detail-grid">
-                  <section class="section-block">
+                  <section class="section-block cockpit-panel">
                     <div class="section-head">
-                      <h2>组队状态</h2>
+                      <div>
+                        <p class="eyebrow">Team readiness</p>
+                        <h2>组队状态</h2>
+                      </div>
                       <span :class="['status-pill', state.currentProject.team_status.basic_ready ? 'ready' : '']">
                         {{ state.currentProject.team_status.basic_ready ? '基础团队已具备' : '继续招募' }}
                       </span>
@@ -465,8 +544,13 @@ const App = {
                     </div>
                   </section>
 
-                  <section class="section-block">
-                    <h2>核心指标</h2>
+                  <section class="section-block cockpit-panel">
+                    <div class="section-head">
+                      <div>
+                        <p class="eyebrow">Evidence metrics</p>
+                        <h2>核心指标</h2>
+                      </div>
+                    </div>
                     <dl class="fact-list">
                       <div><dt>阶段</dt><dd>{{ state.currentProject.stage_label }}</dd></div>
                       <div><dt>推荐期刊</dt><dd>{{ state.currentProject.recommended_journal || '-' }}</dd></div>
@@ -478,14 +562,14 @@ const App = {
 
                 <section class="interaction-grid">
                   <form class="action-panel" @submit.prevent="submitScore">
-                    <h3>评分</h3>
+                    <h3>价值评分</h3>
                     <label><span>1-10 分</span><input type="number" min="1" max="10" v-model="state.forms.score.score" /></label>
-                    <label><span>短评</span><textarea rows="3" v-model="state.forms.score.comment"></textarea></label>
+                    <label><span>判断依据</span><textarea rows="3" v-model="state.forms.score.comment"></textarea></label>
                     <button type="submit">提交评分</button>
                   </form>
 
                   <form class="action-panel" @submit.prevent="submitInterest">
-                    <h3>参与意向</h3>
+                    <h3>加入团队</h3>
                     <label><span>角色</span><select v-model="state.forms.interest.role"><option v-for="role in state.meta.participation_roles" :value="role.value">{{ role.label }}</option></select></label>
                     <label><span>每周小时</span><input type="number" min="0" v-model="state.forms.interest.available_hours_per_week" /></label>
                     <label><span>经验</span><textarea rows="3" v-model="state.forms.interest.experience"></textarea></label>
@@ -493,21 +577,21 @@ const App = {
                   </form>
 
                   <form class="action-panel" @submit.prevent="submitClaim">
-                    <h3>认领意向</h3>
+                    <h3>认领工作</h3>
                     <label><span>方向</span><select v-model="state.forms.claim.claim_type"><option v-for="item in state.meta.claim_types" :value="item.value">{{ item.label }}</option></select></label>
                     <label><span>计划</span><textarea rows="4" v-model="state.forms.claim.message"></textarea></label>
                     <button type="submit">提交认领</button>
                   </form>
 
                   <form class="action-panel" @submit.prevent="submitSponsor">
-                    <h3>资助意向</h3>
+                    <h3>资源支持</h3>
                     <label><span>类型</span><select v-model="state.forms.sponsor.sponsor_type"><option v-for="item in state.meta.sponsor_types" :value="item.value">{{ item.label }}</option></select></label>
                     <label><span>说明</span><textarea rows="4" v-model="state.forms.sponsor.note"></textarea></label>
                     <button type="submit">记录意向</button>
                   </form>
                 </section>
 
-                <section class="section-block">
+                <section class="section-block manuscript-panel">
                   <div class="section-head"><h2>课题原文</h2><span>{{ state.currentProject.source_md_path }}</span></div>
                   <pre class="markdown-view">{{ state.currentProject.body_markdown || '暂无正文。' }}</pre>
                 </section>
@@ -516,57 +600,61 @@ const App = {
 
             <section v-if="activeView === 'dashboard'" class="view-stack">
               <div v-if="!state.user" class="auth-shell">
-                <h2>请先登录</h2>
-                <button @click="navigate('login')">去登录</button>
+                <form class="auth-panel">
+                  <h2>登录后进入个人协作台</h2>
+                  <button type="button" @click="navigate('login')">去登录</button>
+                </form>
               </div>
               <template v-else-if="state.dashboard">
-                <div class="metrics-grid">
-                  <div class="metric"><span>{{ state.dashboard.follows.length }}</span><small>关注</small></div>
-                  <div class="metric"><span>{{ state.dashboard.interests.length }}</span><small>参与</small></div>
-                  <div class="metric"><span>{{ state.dashboard.claims.length }}</span><small>认领</small></div>
-                  <div class="metric"><span>{{ state.dashboard.scores.length }}</span><small>评分</small></div>
+                <div class="metrics-grid holo">
+                  <div class="metric"><small>Follows</small><span>{{ state.dashboard.follows.length }}</span><em>跟进课题</em></div>
+                  <div class="metric"><small>Interests</small><span>{{ state.dashboard.interests.length }}</span><em>参与申请</em></div>
+                  <div class="metric"><small>Claims</small><span>{{ state.dashboard.claims.length }}</span><em>认领意向</em></div>
+                  <div class="metric"><small>Scores</small><span>{{ state.dashboard.scores.length }}</span><em>价值评分</em></div>
                 </div>
                 <div class="dashboard-grid">
-                  <section class="section-block">
+                  <section class="section-block cockpit-panel">
                     <h2>我的参与意向</h2>
                     <p v-for="item in state.dashboard.interests" :key="item.id" class="activity-row">
                       <span>{{ item.role_label }}</span>
                       <button class="link-button" @click="navigate('project', { id: item.project.id })">{{ item.project.title }}</button>
                     </p>
-                    <p v-if="!state.dashboard.interests.length" class="empty">还没有提交参与意向。</p>
+                    <p v-if="!state.dashboard.interests.length" class="empty">暂无参与意向</p>
                   </section>
-                  <section class="section-block">
+                  <section class="section-block cockpit-panel">
                     <h2>我的关注课题</h2>
                     <p v-for="item in state.dashboard.follows" :key="item.id" class="activity-row">
                       <span>{{ item.project.stage_label }}</span>
                       <button class="link-button" @click="navigate('project', { id: item.project.id })">{{ item.project.title }}</button>
                     </p>
-                    <p v-if="!state.dashboard.follows.length" class="empty">还没有关注课题。</p>
+                    <p v-if="!state.dashboard.follows.length" class="empty">暂无关注课题</p>
                   </section>
                 </div>
               </template>
             </section>
 
             <section v-if="activeView === 'login'" class="auth-shell">
-              <form class="auth-panel" @submit.prevent="login">
-                <h2>登录</h2>
+              <form class="auth-panel cyber-auth" @submit.prevent="login">
+                <p class="eyebrow">Secure access</p>
+                <h2>登录协作中枢</h2>
                 <label><span>用户名</span><input v-model="state.forms.login.username" autocomplete="username" /></label>
                 <label><span>密码</span><input type="password" v-model="state.forms.login.password" autocomplete="current-password" /></label>
-                <button type="submit">登录系统</button>
+                <button type="submit">登录</button>
                 <button type="button" class="ghost" @click="navigate('register')">创建账号</button>
               </form>
             </section>
 
             <section v-if="activeView === 'register'" class="auth-shell">
-              <form class="auth-panel" @submit.prevent="register">
-                <h2>注册</h2>
+              <form class="auth-panel cyber-auth" @submit.prevent="register">
+                <p class="eyebrow">Join network</p>
+                <h2>创建协作身份</h2>
                 <label><span>用户名</span><input v-model="state.forms.register.username" /></label>
                 <label><span>邮箱</span><input type="email" v-model="state.forms.register.email" /></label>
                 <label><span>昵称</span><input v-model="state.forms.register.display_name" /></label>
                 <label><span>身份</span><select v-model="state.forms.register.role_type"><option v-for="role in state.meta.profile_roles" :value="role.value">{{ role.label }}</option></select></label>
                 <label><span>密码</span><input type="password" v-model="state.forms.register.password1" /></label>
                 <label><span>确认密码</span><input type="password" v-model="state.forms.register.password2" /></label>
-                <button type="submit">注册并进入工作台</button>
+                <button type="submit">注册</button>
               </form>
             </section>
           </template>
@@ -613,6 +701,24 @@ function stageLabel(project) {
 
 function roleCountEntries(roles) {
   return Object.entries(roles || {});
+}
+
+function signalWidth(project) {
+  const raw = Number(project?.composite_score || project?.llm_score || 0);
+  const normalized = Math.max(8, Math.min(100, raw));
+  return `${normalized}%`;
+}
+
+function topicInitial(name) {
+  if (!name) return "AI";
+  return name.replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase() || name.slice(0, 1);
+}
+
+function scoreTone(project) {
+  const score = Number(project?.composite_score || project?.llm_score || 0);
+  if (score >= 70) return "hot";
+  if (score >= 45) return "warm";
+  return "cool";
 }
 
 createApp(App).mount("#app");

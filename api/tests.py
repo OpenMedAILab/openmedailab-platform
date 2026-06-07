@@ -49,6 +49,31 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()["error"]["code"], "auth_required")
 
+    def test_openapi_docs_are_generated_from_api_schema(self):
+        schema_response = self.client.get("/api/openapi.json")
+        self.assertEqual(schema_response.status_code, 200)
+        schema = schema_response.json()
+        self.assertIn("/api/projects/", schema["paths"])
+        self.assertIn("RegisterRequest", schema["components"]["schemas"])
+
+        docs_response = self.client.get("/api/docs")
+        self.assertEqual(docs_response.status_code, 200)
+        self.assertContains(docs_response, "OpenMedAILab API")
+
+    def test_protected_post_uses_csrf_envelope_when_enforced(self):
+        user = User.objects.create_user(username="csrfuser", password="StrongPass12345")
+        secure_client = Client(enforce_csrf_checks=True)
+        secure_client.force_login(user)
+
+        response = secure_client.post(
+            f"/api/projects/{self.project.pk}/follow/",
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "csrf_failed")
+
     def test_register_login_and_interactions(self):
         register_response = self.post_json(
             "/api/auth/register/",
