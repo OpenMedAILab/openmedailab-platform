@@ -1,6 +1,5 @@
 import { createApp, computed, onMounted, reactive, watch } from "vue";
 import { api, initCsrf } from "./api.js";
-import "./styles.css";
 
 const state = reactive({
   booting: true,
