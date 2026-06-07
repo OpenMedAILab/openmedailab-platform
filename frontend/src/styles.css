@@ -350,6 +350,7 @@ textarea:focus {
   padding: 18px;
   overflow: hidden;
   box-shadow: 0 14px 34px rgba(44, 92, 103, 0.08);
+  cursor: pointer;
 }
 
 .project-card::before {
@@ -379,6 +380,18 @@ textarea:focus {
   margin: 12px 0 8px;
   font-size: 20px;
   line-height: 1.35;
+}
+
+.project-card:hover {
+  border-color: rgba(15, 159, 154, 0.34);
+  box-shadow: 0 20px 42px rgba(44, 92, 103, 0.12);
+  transform: translateY(-2px);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.project-card:focus-visible {
+  outline: 3px solid rgba(15, 159, 154, 0.22);
+  outline-offset: 3px;
 }
 
 .project-card p {
@@ -686,6 +699,92 @@ code {
   background: #ffffff;
   color: var(--text);
   box-shadow: var(--shadow);
+}
+
+.project-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(14, 31, 35, 0.36);
+  backdrop-filter: blur(10px);
+}
+
+.project-modal {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(80vw, 1120px);
+  height: min(80vh, 820px);
+  overflow: hidden;
+  border: 1px solid rgba(217, 231, 233, 0.9);
+  border-radius: 8px;
+  background: #f8fcfc;
+  box-shadow: 0 28px 90px rgba(10, 40, 48, 0.28);
+}
+
+.project-modal.maximized {
+  width: calc(100vw - 32px);
+  height: calc(100vh - 32px);
+}
+
+.project-modal-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(12px);
+}
+
+.project-modal-header h2 {
+  max-width: 720px;
+  margin: 8px 0 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.project-modal-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 18px;
+}
+
+.modal-loading {
+  display: grid;
+  min-height: 420px;
+  place-items: center;
+  align-content: center;
+  gap: 12px;
+  color: var(--muted);
+}
+
+.modal-detail-header {
+  box-shadow: 0 12px 28px rgba(34, 82, 94, 0.08);
+}
+
+.project-modal .detail-header h1 {
+  font-size: clamp(24px, 4vw, 38px);
+}
+
+.modal-detail-grid {
+  margin-top: 14px;
 }
 
 .loader {

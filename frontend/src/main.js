@@ -34,6 +34,13 @@ const state = reactive({
     page_size: PAGE_SIZE
   },
   currentProject: null,
+  preview: {
+    open: false,
+    maximized: false,
+    loading: false,
+    returnScroll: 0,
+    returnProjectId: null
+  },
   themeSpace: null,
   dashboard: null,
   schema: null,
@@ -82,12 +89,14 @@ const App = {
     onMounted(async () => {
       window.addEventListener("hashchange", handleRouteChange);
       window.addEventListener("scroll", handleScroll, { passive: true });
+      window.addEventListener("keydown", handleKeydown);
       await boot();
     });
 
     onBeforeUnmount(() => {
       window.removeEventListener("hashchange", handleRouteChange);
       window.removeEventListener("scroll", handleScroll);
+      window.removeEventListener("keydown", handleKeydown);
     });
 
     watch(
@@ -170,8 +179,13 @@ const App = {
       await loadProjects();
     }
 
-    async function loadProject(id) {
-      state.loading = true;
+    async function loadProject(id, options = {}) {
+      const isPreview = Boolean(options.preview);
+      if (isPreview) {
+        state.preview.loading = true;
+      } else {
+        state.loading = true;
+      }
       state.currentProject = null;
       try {
         state.currentProject = await api.project(id);
@@ -181,7 +195,37 @@ const App = {
         showToast(error.message);
       } finally {
         state.loading = false;
+        state.preview.loading = false;
       }
+    }
+
+    async function openProjectPreview(project) {
+      const projectId = project.id || project;
+      state.preview.returnScroll = window.scrollY;
+      state.preview.returnProjectId = projectId;
+      state.preview.open = true;
+      state.preview.maximized = false;
+      await loadProject(projectId, { preview: true });
+    }
+
+    function closeProjectPreview() {
+      const returnScroll = state.preview.returnScroll;
+      const returnProjectId = state.preview.returnProjectId;
+      state.preview.open = false;
+      state.preview.maximized = false;
+      window.requestAnimationFrame(() => {
+        const card = document.querySelector(`[data-project-id="${returnProjectId}"]`);
+        if (card) {
+          const top = card.getBoundingClientRect().top + window.scrollY - 120;
+          window.scrollTo({ top: Math.max(0, top), behavior: "auto" });
+        } else {
+          window.scrollTo({ top: returnScroll, behavior: "auto" });
+        }
+      });
+    }
+
+    function toggleProjectPreviewSize() {
+      state.preview.maximized = !state.preview.maximized;
     }
 
     async function loadThemeSpace(slug) {
@@ -426,6 +470,12 @@ const App = {
       }
     }
 
+    function handleKeydown(event) {
+      if (event.key === "Escape" && state.preview.open) {
+        closeProjectPreview();
+      }
+    }
+
     function showToast(message) {
       state.toast = message;
       window.clearTimeout(showToast.timer);
@@ -445,6 +495,9 @@ const App = {
       roleCards,
       can,
       navigate,
+      openProjectPreview,
+      closeProjectPreview,
+      toggleProjectPreviewSize,
       applyFilters,
       selectTheme,
       selectSpace,
@@ -576,7 +629,16 @@ const App = {
             </div>
 
             <div class="project-grid">
-              <article v-for="project in state.projects" :key="project.id" class="project-card">
+              <article
+                v-for="project in state.projects"
+                :key="project.id"
+                :data-project-id="project.id"
+                class="project-card"
+                role="button"
+                tabindex="0"
+                @click="openProjectPreview(project)"
+                @keyup.enter="openProjectPreview(project)"
+              >
                 <div class="card-topline">
                   <span>{{ project.theme?.name || '未分类' }}</span>
                   <span>{{ project.stage_label }}</span>
@@ -592,8 +654,8 @@ const App = {
                   <div><dt>参与</dt><dd>{{ project.interest_count || 0 }}</dd></div>
                 </dl>
                 <div class="card-actions">
-                  <button class="primary-button" type="button" @click="navigate('project', { id: project.id })">查看详情</button>
-                  <button class="ghost-button" type="button" @click="toggleFollow(project)">关注</button>
+                  <button class="primary-button" type="button" @click.stop="openProjectPreview(project)">查看详情</button>
+                  <button class="ghost-button" type="button" @click.stop="toggleFollow(project)">关注</button>
                 </div>
               </article>
             </div>
@@ -844,6 +906,108 @@ const App = {
             </form>
           </section>
         </template>
+
+        <div v-if="state.preview.open" class="project-modal-backdrop" @click.self="closeProjectPreview">
+          <section class="project-modal" :class="{ maximized: state.preview.maximized }" role="dialog" aria-modal="true">
+            <header class="project-modal-header">
+              <div>
+                <span class="eyebrow">课题详情</span>
+                <h2>{{ state.currentProject?.title || '正在载入课题' }}</h2>
+              </div>
+              <div class="modal-actions">
+                <button class="ghost-button" type="button" @click="toggleProjectPreviewSize">
+                  {{ state.preview.maximized ? '恢复小窗' : '最大化' }}
+                </button>
+                <button class="ghost-button" type="button" @click="closeProjectPreview">返回列表</button>
+              </div>
+            </header>
+
+            <div class="project-modal-body">
+              <section v-if="state.preview.loading" class="modal-loading">
+                <div class="loader"></div>
+                <p>正在读取课题详情</p>
+              </section>
+
+              <template v-else-if="state.currentProject">
+                <div class="detail-header modal-detail-header">
+                  <div>
+                    <span class="eyebrow">{{ state.currentProject.theme?.name || '未分类' }} · {{ state.currentProject.stage_label }}</span>
+                    <h1>{{ state.currentProject.title }}</h1>
+                    <p>{{ state.currentProject.summary }}</p>
+                    <div class="tag-row">
+                      <span v-for="tag in state.currentProject.tags" :key="tag.id">{{ tag.name }}</span>
+                    </div>
+                  </div>
+                  <div class="score-panel">
+                    <strong>{{ displayScore(state.currentProject.composite_score) }}</strong>
+                    <span>综合评分</span>
+                    <button class="primary-button" type="button" @click="toggleFollow(state.currentProject)">关注课题</button>
+                  </div>
+                </div>
+
+                <div class="detail-grid modal-detail-grid">
+                  <article class="content-panel">
+                    <h2>结构化课题信息</h2>
+                    <div class="info-list">
+                      <section><h3>科学问题</h3><p>{{ state.currentProject.problem_statement || '待补充' }}</p></section>
+                      <section><h3>研究目标</h3><p>{{ state.currentProject.research_goal || '待补充' }}</p></section>
+                      <section><h3>技术路线</h3><p>{{ state.currentProject.technical_route || '待补充' }}</p></section>
+                      <section><h3>数据需求</h3><p>{{ formatList(state.currentProject.data_requirements) }}</p></section>
+                      <section><h3>评价指标</h3><p>{{ formatList(state.currentProject.evaluation_metrics) }}</p></section>
+                      <section><h3>预期成果</h3><p>{{ formatList(state.currentProject.expected_outputs) }}</p></section>
+                      <section><h3>合规说明</h3><p>{{ state.currentProject.compliance_notes || '第一版默认不允许上传可识别患者数据。' }}</p></section>
+                    </div>
+                  </article>
+
+                  <aside class="side-panel">
+                    <h2>组队情况</h2>
+                    <div class="role-list">
+                      <div v-for="[role, count] in roleCountEntries(state.currentProject.team_status)" :key="role">
+                        <span>{{ role }}</span>
+                        <strong>{{ count }}</strong>
+                      </div>
+                    </div>
+                    <p class="ready-text">{{ state.currentProject.team_status?.basic_ready ? '已具备基础启动团队' : '基础团队仍在招募' }}</p>
+                  </aside>
+                </div>
+
+                <div class="detail-grid modal-detail-grid">
+                  <article class="content-panel">
+                    <h2>课题文件</h2>
+                    <div class="file-list">
+                      <a v-for="doc in state.currentProject.documents" :key="doc.id" :href="doc.path" target="_blank" rel="noreferrer">
+                        <span>{{ fileTypeLabel(doc.doc_type) }}</span>
+                        <strong>{{ doc.title || doc.path }}</strong>
+                        <small>{{ doc.path }}</small>
+                      </a>
+                      <p v-if="!state.currentProject.documents.length">暂无文件记录。</p>
+                    </div>
+                  </article>
+                  <aside class="side-panel">
+                    <h2>参与操作</h2>
+                    <form class="stack-form" @submit.prevent="submitInterest">
+                      <select v-model="state.forms.interest.role">
+                        <option v-for="role in state.meta.participation_roles" :key="role.value" :value="role.value">{{ role.label }}</option>
+                      </select>
+                      <input v-model.number="state.forms.interest.available_hours_per_week" type="number" min="0" placeholder="每周可投入小时" />
+                      <textarea v-model="state.forms.interest.message" placeholder="补充说明"></textarea>
+                      <button class="primary-button" type="submit">申请参与</button>
+                    </form>
+                    <form class="stack-form compact-form" @submit.prevent="submitScore">
+                      <input v-model.number="state.forms.score.score" type="number" min="1" max="10" />
+                      <input v-model="state.forms.score.comment" type="text" placeholder="评分备注" />
+                      <button class="ghost-button" type="submit">提交评分</button>
+                    </form>
+                    <div class="button-row">
+                      <button class="ghost-button" type="button" @click="submitClaim">认领意向</button>
+                      <button class="ghost-button" type="button" @click="submitSponsor">资助意向</button>
+                    </div>
+                  </aside>
+                </div>
+              </template>
+            </div>
+          </section>
+        </div>
       </main>
     </div>
   `
