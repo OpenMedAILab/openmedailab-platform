@@ -142,6 +142,43 @@ class ProjectDocument(models.Model):
         return self.title or self.path
 
 
+class ThemeFile(models.Model):
+    class FileType(models.TextChoices):
+        DATASET = "dataset", "数据集文件"
+        DATA_DICTIONARY = "data_dictionary", "数据字典"
+        ANNOTATION_GUIDE = "annotation_guide", "标注规范"
+        ETHICS = "ethics", "伦理合规材料"
+        MODEL_ARTIFACT = "model_artifact", "模型与实验资产"
+        DATASET_META = "dataset_meta", "数据说明"
+        LINK = "link", "外部链接"
+        OTHER = "other", "其他"
+
+    theme = models.ForeignKey(Theme, on_delete=models.CASCADE, related_name="files")
+    section = models.CharField(max_length=80, default="数据集文件")
+    file_type = models.CharField(max_length=30, choices=FileType.choices, default=FileType.OTHER)
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    path = models.CharField(max_length=500)
+    sort_order = models.IntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["theme__sort_order", "theme__name", "sort_order", "section", "title"]
+        constraints = [
+            models.UniqueConstraint(fields=["theme", "path"], name="unique_theme_file_path"),
+        ]
+        indexes = [
+            models.Index(fields=["theme", "section"]),
+            models.Index(fields=["file_type"]),
+            models.Index(fields=["is_active"]),
+        ]
+
+    def __str__(self):
+        return f"{self.theme.name}: {self.title}"
+
+
 class ProjectTask(models.Model):
     class TaskStatus(models.TextChoices):
         TODO = "todo", "待认领"

@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import AuditLog, ImportLog, Project, ProjectDocument, ProjectTag, ProjectTask, Tag, Theme
+from .models import AuditLog, ImportLog, Project, ProjectDocument, ProjectTag, ProjectTask, Tag, Theme, ThemeFile
 
 
 class ProjectTagInline(admin.TabularInline):
@@ -15,13 +15,20 @@ class ProjectDocumentInline(admin.TabularInline):
     readonly_fields = ("created_at",)
 
 
+class ThemeFileInline(admin.TabularInline):
+    model = ThemeFile
+    extra = 0
+    readonly_fields = ("created_at", "updated_at")
+
+
 @admin.register(Theme)
 class ThemeAdmin(admin.ModelAdmin):
-    list_display = ("name", "slug", "project_count", "sort_order", "is_active", "updated_at")
+    list_display = ("name", "slug", "project_count", "file_count", "sort_order", "is_active", "updated_at")
     list_filter = ("is_active",)
     search_fields = ("name", "description")
     prepopulated_fields = {"slug": ("name",)}
     readonly_fields = ("created_at", "updated_at")
+    inlines = (ThemeFileInline,)
     fieldsets = (
         ("基础信息", {"fields": ("name", "slug", "description", "cover_image", "sort_order", "is_active")}),
         ("文件域空间", {"fields": ("file_space",)}),
@@ -30,6 +37,9 @@ class ThemeAdmin(admin.ModelAdmin):
 
     def project_count(self, obj):
         return obj.projects.count()
+
+    def file_count(self, obj):
+        return obj.files.count()
 
 
 @admin.register(Tag)
@@ -105,6 +115,15 @@ class ProjectDocumentAdmin(admin.ModelAdmin):
     search_fields = ("project__title", "path", "title")
     autocomplete_fields = ("project",)
     readonly_fields = ("created_at",)
+
+
+@admin.register(ThemeFile)
+class ThemeFileAdmin(admin.ModelAdmin):
+    list_display = ("title", "theme", "section", "file_type", "path", "is_active", "sort_order", "updated_at")
+    list_filter = ("theme", "section", "file_type", "is_active")
+    search_fields = ("title", "description", "path", "theme__name")
+    autocomplete_fields = ("theme",)
+    readonly_fields = ("created_at", "updated_at")
 
 
 @admin.register(ProjectTask)

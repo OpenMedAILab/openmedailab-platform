@@ -1,3 +1,5 @@
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Optional
 
 from django.contrib.auth import authenticate, login, logout
@@ -28,7 +30,7 @@ from interactions.models import (
 from interactions.services import project_stat_annotations, recalculate_project_community_score
 from projects.contracts import DEFAULT_THEME_FILE_SPACE, PROJECT_FIELD_CONTRACT, PROJECT_JSON_EXAMPLE
 from projects.importing import import_topic_bundle, unique_slug, upsert_project
-from projects.models import AuditLog, Project, ProjectDocument, ProjectStage, Tag, Theme
+from projects.models import AuditLog, Project, ProjectDocument, ProjectStage, Tag, Theme, ThemeFile
 
 from .rbac import capabilities_for_user, has_capability
 from .responses import form_errors
@@ -41,6 +43,7 @@ from .serializers import (
     score_payload,
     sponsor_payload,
     tag_payload,
+    theme_file_payload,
     theme_payload,
     theme_space_payload,
     user_payload,
@@ -163,6 +166,18 @@ class ProjectWriteRequest(Schema):
     is_public: Optional[bool] = True
 
 
+class ThemeFileWriteRequest(Schema):
+    theme_id: Optional[int] = None
+    theme: Optional[Any] = None
+    section: Optional[str] = "数据集文件"
+    file_type: Optional[str] = "other"
+    title: Optional[str] = None
+    description: Optional[str] = ""
+    path: Optional[str] = None
+    sort_order: Optional[int] = 0
+    is_active: Optional[bool] = True
+
+
 class ProjectImportRequest(Schema):
     themes: Optional[list[dict[str, Any]]] = []
     projects: list[dict[str, Any]]
@@ -233,6 +248,7 @@ def project_schema(request):
             "example": PROJECT_JSON_EXAMPLE,
             "stage_values": choice_payload(ProjectStage.choices),
             "document_types": choice_payload(ProjectDocument.DocumentType.choices),
+            "theme_file_types": choice_payload(ThemeFile.FileType.choices),
             "default_theme_file_space": DEFAULT_THEME_FILE_SPACE,
         }
     )
@@ -246,8 +262,8 @@ def theme_space(request, slug: str):
             Project.objects.filter(theme=theme, is_public=True).select_related("theme").prefetch_related("tags")
         ).order_by("-composite_score", "-updated_at")[:80]
     )
-    documents = list(ProjectDocument.objects.filter(project__theme=theme, project__is_public=True).select_related("project").order_by("doc_type", "title")[:200])
-    return ok(theme_space_payload(theme, projects, documents))
+    files = list(ThemeFile.objects.filter(theme=theme, is_active=True).order_by("sort_order", "section", "title")[:300])
+    return ok(theme_space_payload(theme, projects, files))
 
 
 @api.get("/me/", response={200: Envelope, 401: ErrorEnvelope}, tags=["Me"])
@@ -425,7 +441,7 @@ def admin_theme_create(request, payload: ThemeWriteRequest):
     auth_error = require_capability(request, "manage_themes")
     if auth_error:
         return auth_error
-    data = payload.model_dump(exclude_none=True)
+    data = payload.model_dump(exclude_unset=True, exclude_none=True)
     name = (data.get("name") or "").strip()
     if not name:
         return fail("Theme name is required.", status=422, code="validation_error")
@@ -452,7 +468,7 @@ def admin_theme_update(request, theme_id: int, payload: ThemeWriteRequest):
         return auth_error
     theme = get_object_or_404(Theme, pk=theme_id)
     before = theme_payload(theme)
-    data = payload.model_dump(exclude_none=True)
+    data = payload.model_dump(exclude_unset=True, exclude_none=True)
     if "name" in data and data["name"]:
         theme.name = data["name"].strip()
     if "slug" in data and data["slug"]:
@@ -483,6 +499,114 @@ def admin_theme_delete(request, theme_id: int):
     theme.save(update_fields=["is_active", "updated_at"])
     audit(request.user, "theme.deactivate", "Theme", theme.id, before=before, after=theme_payload(theme))
     return ok(theme_payload(theme))
+
+
+@api.get("/admin/theme-files/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Admin"])
+def admin_theme_file_list(request, theme: str = "", theme_id: Optional[int] = None, active: str = "", page: int = 1, page_size: int = 100):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    files = ThemeFile.objects.select_related("theme").order_by("theme__sort_order", "theme__name", "sort_order", "section", "title")
+    if theme_id:
+        files = files.filter(theme_id=theme_id)
+    elif theme.strip():
+        theme_value = theme.strip()
+        files = files.filter(Q(theme__slug=theme_value) | Q(theme__name=theme_value))
+    if active in {"1", "true", "yes"}:
+        files = files.filter(is_active=True)
+    elif active in {"0", "false", "no"}:
+        files = files.filter(is_active=False)
+    page_size = max(1, min(page_size, 500))
+    paginator = Paginator(files, page_size)
+    page_obj = paginator.get_page(page)
+    return ok(
+        {
+            "results": [theme_file_payload(file) for file in page_obj.object_list],
+            "pagination": {
+                "page": page_obj.number,
+                "page_size": page_size,
+                "total_pages": paginator.num_pages,
+                "total_count": paginator.count,
+                "has_next": page_obj.has_next(),
+                "has_previous": page_obj.has_previous(),
+            },
+        }
+    )
+
+
+@api.post("/admin/theme-files/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_theme_file_create(request, payload: ThemeFileWriteRequest):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    theme = theme_from_payload(data)
+    if not theme:
+        return fail("Theme is required.", status=422, code="validation_error")
+    title = (data.get("title") or "").strip()
+    path = (data.get("path") or "").strip()
+    if not title or not path:
+        return fail("title and path are required.", status=422, code="validation_error")
+    if ThemeFile.objects.filter(theme=theme, path=path).exists():
+        return fail("Theme file path already exists.", status=422, code="validation_error")
+    file = ThemeFile.objects.create(
+        theme=theme,
+        section=(data.get("section") or "数据集文件").strip(),
+        file_type=normalize_theme_file_type(data.get("file_type")),
+        title=title,
+        description=data.get("description", ""),
+        path=path,
+        sort_order=data.get("sort_order", 0),
+        is_active=data.get("is_active", True),
+    )
+    audit(request.user, "theme_file.create", "ThemeFile", file.id, after=theme_file_payload(file))
+    return 201, ok(theme_file_payload(file))
+
+
+@api.patch("/admin/theme-files/{file_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_theme_file_update(request, file_id: int, payload: ThemeFileWriteRequest):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    file = get_object_or_404(ThemeFile.objects.select_related("theme"), pk=file_id)
+    before = theme_file_payload(file)
+    data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    theme = theme_from_payload(data, current=file.theme)
+    if theme:
+        file.theme = theme
+    if "title" in data:
+        title = (data.get("title") or "").strip()
+        if not title:
+            return fail("title is required.", status=422, code="validation_error")
+        file.title = title
+    if "path" in data:
+        path = (data.get("path") or "").strip()
+        if not path:
+            return fail("path is required.", status=422, code="validation_error")
+        if ThemeFile.objects.filter(theme=file.theme, path=path).exclude(pk=file.pk).exists():
+            return fail("Theme file path already exists.", status=422, code="validation_error")
+        file.path = path
+    for field in ["section", "description", "sort_order", "is_active"]:
+        if field in data:
+            setattr(file, field, data[field])
+    if "file_type" in data:
+        file.file_type = normalize_theme_file_type(data.get("file_type"))
+    file.save()
+    audit(request.user, "theme_file.update", "ThemeFile", file.id, before=before, after=theme_file_payload(file))
+    return ok(theme_file_payload(file))
+
+
+@api.delete("/admin/theme-files/{file_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope}, tags=["Admin"])
+def admin_theme_file_delete(request, file_id: int):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    file = get_object_or_404(ThemeFile.objects.select_related("theme"), pk=file_id)
+    before = theme_file_payload(file)
+    file.is_active = False
+    file.save(update_fields=["is_active", "updated_at"])
+    audit(request.user, "theme_file.deactivate", "ThemeFile", file.id, before=before, after=theme_file_payload(file))
+    return ok(theme_file_payload(file))
 
 
 @api.get("/admin/projects/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Admin"])
@@ -516,6 +640,28 @@ def admin_project_list(request, q: str = "", theme: str = "", page: int = 1, pag
     )
 
 
+@api.post("/admin/projects/import-json/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_project_import_json(request, payload: ProjectImportRequest):
+    auth_error = require_capability(request, "import_projects")
+    if auth_error:
+        return auth_error
+    try:
+        result = import_topic_bundle(payload.model_dump(), source_label=f"api-json:{request.user.username}", dry_run=payload.dry_run)
+    except Exception as exc:
+        return fail(str(exc), status=422, code="validation_error")
+    audit(request.user, "project.import_json", "Project", "bundle", after=result)
+    return ok(result)
+
+
+@api.get("/admin/projects/{project_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope}, tags=["Admin"])
+def admin_project_get(request, project_id: int):
+    auth_error = require_capability(request, "manage_projects")
+    if auth_error:
+        return auth_error
+    project = get_object_or_404(Project.objects.select_related("theme").prefetch_related("tags", "documents"), pk=project_id)
+    return ok(project_detail_payload(project))
+
+
 @api.post("/admin/projects/", response={201: Envelope, 200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
 def admin_project_create(request, payload: ProjectWriteRequest):
     auth_error = require_capability(request, "manage_projects")
@@ -530,19 +676,6 @@ def admin_project_create(request, payload: ProjectWriteRequest):
     return (201 if created else 200), ok(project_detail_payload(project))
 
 
-@api.post("/admin/projects/import-json/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
-def admin_project_import_json(request, payload: ProjectImportRequest):
-    auth_error = require_capability(request, "import_projects")
-    if auth_error:
-        return auth_error
-    try:
-        result = import_topic_bundle(payload.model_dump(), source_label=f"api-json:{request.user.username}", dry_run=payload.dry_run)
-    except Exception as exc:
-        return fail(str(exc), status=422, code="validation_error")
-    audit(request.user, "project.import_json", "Project", "bundle", after=result)
-    return ok(result)
-
-
 @api.patch("/admin/projects/{project_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
 def admin_project_update(request, project_id: int, payload: ProjectWriteRequest):
     auth_error = require_capability(request, "manage_projects")
@@ -551,7 +684,7 @@ def admin_project_update(request, project_id: int, payload: ProjectWriteRequest)
     project = get_object_or_404(Project.objects.select_related("theme").prefetch_related("tags", "documents"), pk=project_id)
     before = project_detail_payload(project)
     data = project_import_payload(project)
-    data.update(payload.model_dump(exclude_none=True))
+    data.update(payload.model_dump(exclude_unset=True, exclude_none=True))
     created = upsert_project(data, source_label="api-admin")
     project = get_object_or_404(Project.objects.select_related("theme").prefetch_related("tags", "documents"), topic_id=data["topic_id"])
     audit(request.user, "project.update" if not created else "project.create", "Project", project.id, before=before, after=project_detail_payload(project))
@@ -782,12 +915,46 @@ def document_payload(document):
     }
 
 
+def theme_from_payload(data, current=None):
+    if "theme_id" in data and data.get("theme_id"):
+        return Theme.objects.filter(pk=data["theme_id"]).first()
+    theme_value = data.get("theme")
+    if isinstance(theme_value, dict):
+        if theme_value.get("id"):
+            return Theme.objects.filter(pk=theme_value["id"]).first()
+        theme_value = theme_value.get("slug") or theme_value.get("name")
+    if theme_value:
+        theme_value = str(theme_value).strip()
+        return Theme.objects.filter(Q(slug=theme_value) | Q(name=theme_value)).first()
+    return current
+
+
+def normalize_theme_file_type(file_type):
+    if file_type in ThemeFile.FileType.values:
+        return file_type
+    return ThemeFile.FileType.OTHER
+
+
 def audit(actor, action, target_type, target_id, before=None, after=None):
     AuditLog.objects.create(
         actor=actor if actor and actor.is_authenticated else None,
         action=action,
         target_type=target_type,
         target_id=str(target_id),
-        before=before or {},
-        after=after or {},
+        before=json_safe(before or {}),
+        after=json_safe(after or {}),
     )
+
+
+def json_safe(value):
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [json_safe(item) for item in value]
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return value

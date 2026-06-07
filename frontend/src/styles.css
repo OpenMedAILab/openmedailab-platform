@@ -521,6 +521,218 @@ textarea:focus {
   margin-top: 16px;
 }
 
+.admin-tabs {
+  position: sticky;
+  top: 74px;
+  z-index: 28;
+  display: flex;
+  gap: 6px;
+  margin: 14px 0 18px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(16px);
+  overflow-x: auto;
+}
+
+.admin-tabs button {
+  min-height: 38px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.admin-tabs button.active {
+  background: #112b31;
+  color: #ffffff;
+  box-shadow: 0 10px 24px rgba(17, 43, 49, 0.16);
+}
+
+.admin-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.admin-list-panel,
+.admin-form-panel {
+  min-width: 0;
+}
+
+.admin-filter-row,
+.form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 190px auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+.admin-table {
+  display: grid;
+  margin-top: 14px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.admin-table-head,
+.admin-table-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.35fr) minmax(120px, 0.65fr) minmax(90px, 0.5fr) minmax(80px, 0.42fr) minmax(184px, 0.72fr);
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+}
+
+.theme-file-table .admin-table-head,
+.theme-file-table .admin-table-row {
+  grid-template-columns: minmax(220px, 1.25fr) minmax(100px, 0.5fr) minmax(90px, 0.42fr) minmax(70px, 0.32fr) minmax(184px, 0.72fr);
+}
+
+.admin-table-head {
+  background: #f2f8f8;
+  color: #31555d;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.admin-table-row {
+  border-top: 1px solid var(--line);
+  color: #27464c;
+}
+
+.admin-table-row > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.admin-table-row strong,
+.space-project-link strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.admin-table-row small,
+.space-project-link span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-table-row .button-row {
+  justify-content: flex-start;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
+.admin-table-row .ghost-button {
+  min-height: 32px;
+  padding: 0 12px;
+}
+
+.project-edit-form,
+.theme-file-form {
+  padding-top: 4px;
+}
+
+.mini-json-editor {
+  min-height: 128px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.compact-json-editor {
+  min-height: 170px;
+}
+
+.form-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.compact-load-more {
+  min-height: 58px;
+}
+
+.space-domain-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.policy-box {
+  padding: 14px;
+  border: 1px solid #cfe8e8;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #f6fcfb, #ffffff);
+}
+
+.policy-box strong {
+  color: #12383d;
+}
+
+.policy-box p {
+  margin: 8px 0 0;
+}
+
+.domain-section {
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.domain-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.domain-section-head h3 {
+  margin: 0;
+  color: #173b42;
+}
+
+.domain-section-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.space-project-list {
+  display: grid;
+  gap: 10px;
+  max-height: 680px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.space-project-link {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfefe;
+  text-align: left;
+}
+
+.space-project-link:hover {
+  border-color: rgba(15, 159, 154, 0.35);
+  background: #f5fbfb;
+}
+
 .dashboard-grid,
 .role-card-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -818,10 +1030,24 @@ code {
   .detail-header,
   .detail-grid,
   .space-layout,
+  .admin-workbench,
   .admin-grid,
   .dashboard-grid,
   .role-card-grid {
     grid-template-columns: 1fr;
+  }
+
+  .admin-filter-row,
+  .form-grid,
+  .admin-table-head,
+  .admin-table-row,
+  .theme-file-table .admin-table-head,
+  .theme-file-table .admin-table-row {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-table-head {
+    display: none;
   }
 
   .project-grid {

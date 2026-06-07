@@ -77,6 +77,23 @@ def document_payload(document):
     }
 
 
+def theme_file_payload(file):
+    return {
+        "id": file.id,
+        "theme_id": file.theme_id,
+        "section": file.section,
+        "file_type": file.file_type,
+        "file_type_label": file.get_file_type_display(),
+        "title": file.title,
+        "description": file.description,
+        "path": file.path,
+        "sort_order": file.sort_order,
+        "is_active": file.is_active,
+        "created_at": file.created_at,
+        "updated_at": file.updated_at,
+    }
+
+
 def project_summary_payload(project):
     return {
         "id": project.id,
@@ -130,15 +147,24 @@ def project_detail_payload(project):
     return payload
 
 
-def theme_space_payload(theme, projects, documents):
-    grouped_documents = {}
-    for document in documents:
-        grouped_documents.setdefault(document.doc_type, []).append(document_payload(document))
+def theme_space_payload(theme, projects, files):
+    sections = {}
+    for file in files:
+        sections.setdefault(file.section, []).append(theme_file_payload(file))
+    configured_sections = theme.file_space.get("sections", []) if isinstance(theme.file_space, dict) else []
+    ordered_sections = []
+    used_sections = set()
+    for section_name in configured_sections:
+        ordered_sections.append({"name": section_name, "files": sections.get(section_name, [])})
+        used_sections.add(section_name)
+    for section_name, section_files in sections.items():
+        if section_name not in used_sections:
+            ordered_sections.append({"name": section_name, "files": section_files})
     return {
         "theme": theme_payload(theme),
         "project_count": len(projects),
-        "document_count": len(documents),
-        "documents_by_type": grouped_documents,
+        "file_count": len(files),
+        "sections": ordered_sections,
         "projects": [project_summary_payload(project) for project in projects],
     }
 

@@ -59,8 +59,8 @@ PROJECT_JSON_EXAMPLE = {
 
 
 DEFAULT_THEME_FILE_SPACE = {
-    "access_level": "public_metadata",
-    "storage_policy": "第一版只展示课题原文、PDF、公开链接和脱敏数据说明，不接收可识别患者数据。",
-    "allowed_file_types": ["markdown", "pdf", "html", "dataset_meta", "other"],
-    "sections": ["课题原文", "参考文献", "数据说明", "实验材料", "成果文件"],
+    "access_level": "restricted_metadata",
+    "storage_policy": "主题文件域只登记与该主题相关的数据资产元信息，例如公开数据集链接、数据字典、标注规范、伦理合规材料和模型实验资产；不登记单个课题原文、PDF 或公开页面。",
+    "allowed_file_types": ["dataset", "data_dictionary", "annotation_guide", "ethics", "model_artifact", "dataset_meta", "link", "other"],
+    "sections": ["数据集文件", "数据字典", "标注规范", "伦理合规材料", "模型与实验资产"],
 }

@@ -4,7 +4,7 @@ from django.contrib.auth.models import User
 from django.test import Client, TestCase
 
 from interactions.models import ProjectFollow, ProjectInterest, ProjectScore
-from projects.models import Project, ProjectStage, Tag, Theme
+from projects.models import Project, ProjectStage, Tag, Theme, ThemeFile
 
 
 class ApiTests(TestCase):
@@ -37,6 +37,9 @@ class ApiTests(TestCase):
     def post_json(self, path, data):
         return self.client.post(path, data=json.dumps(data), content_type="application/json")
 
+    def patch_json(self, path, data):
+        return self.client.patch(path, data=json.dumps(data), content_type="application/json")
+
     def test_project_list_and_detail_api(self):
         list_response = self.client.get("/api/projects/?q=RAG&page_size=10")
         self.assertEqual(list_response.status_code, 200)
@@ -65,6 +68,8 @@ class ApiTests(TestCase):
         self.assertIn("/api/projects/", schema["paths"])
         self.assertIn("RegisterRequest", schema["components"]["schemas"])
         self.assertIn("/api/admin/projects/import-json/", schema["paths"])
+        self.assertIn("/api/admin/theme-files/", schema["paths"])
+        self.assertIn("/api/admin/projects/{project_id}/", schema["paths"])
 
         docs_response = self.client.get("/api/docs")
         self.assertEqual(docs_response.status_code, 200)
@@ -72,20 +77,37 @@ class ApiTests(TestCase):
 
         contract_response = self.client.get("/api/project-schema/")
         self.assertEqual(contract_response.status_code, 200)
-        contract_fields = [field["name"] for field in contract_response.json()["data"]["fields"]]
+        contract_data = contract_response.json()["data"]
+        contract_fields = [field["name"] for field in contract_data["fields"]]
         self.assertIn("problem_statement", contract_fields)
         self.assertIn("data_requirements", contract_fields)
+        theme_file_types = [item["value"] for item in contract_data["theme_file_types"]]
+        self.assertIn("dataset", theme_file_types)
+        self.assertIn("data_dictionary", theme_file_types)
+        self.assertNotIn("markdown", theme_file_types)
+        self.assertNotIn("pdf", theme_file_types)
 
     def test_theme_file_space_api(self):
-        self.theme.file_space = {"sections": ["课题原文", "数据说明"]}
+        self.theme.file_space = {"sections": ["数据集文件", "数据字典"]}
         self.theme.save(update_fields=["file_space", "updated_at"])
+        ThemeFile.objects.create(
+            theme=self.theme,
+            section="数据集文件",
+            file_type=ThemeFile.FileType.DATASET,
+            title="抗 VEGF 脱敏随访样例索引",
+            path="datasets/antivegf/followup-index.csv",
+        )
 
         response = self.client.get(f"/api/themes/{self.theme.slug}/space/")
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()["data"]
-        self.assertEqual(payload["theme"]["file_space"]["sections"], ["课题原文", "数据说明"])
+        self.assertEqual(payload["theme"]["file_space"]["sections"], ["数据集文件", "数据字典"])
         self.assertEqual(payload["project_count"], 1)
+        self.assertEqual(payload["file_count"], 1)
+        self.assertEqual(payload["sections"][0]["name"], "数据集文件")
+        self.assertEqual(payload["sections"][0]["files"][0]["title"], "抗 VEGF 脱敏随访样例索引")
+        self.assertNotIn("documents_by_type", payload)
 
     def test_protected_post_uses_csrf_envelope_when_enforced(self):
         user = User.objects.create_user(username="csrfuser", password="StrongPass12345")
@@ -111,11 +133,11 @@ class ApiTests(TestCase):
                 "name": "视网膜影像",
                 "slug": "retina-imaging",
                 "description": "眼科影像相关课题",
-                "file_space": {"sections": ["课题原文", "标注说明"]},
+                "file_space": {"sections": ["数据集文件", "标注规范"]},
             },
         )
         self.assertEqual(theme_response.status_code, 201)
-        self.assertEqual(theme_response.json()["data"]["file_space"]["sections"], ["课题原文", "标注说明"])
+        self.assertEqual(theme_response.json()["data"]["file_space"]["sections"], ["数据集文件", "标注规范"])
 
         import_response = self.post_json(
             "/api/admin/projects/import-json/",
@@ -140,6 +162,42 @@ class ApiTests(TestCase):
         project = Project.objects.get(topic_id="RETINA-002")
         self.assertEqual(project.data_requirements["modalities"], ["OCT"])
         self.assertEqual(project.documents.count(), 1)
+
+        file_response = self.post_json(
+            "/api/admin/theme-files/",
+            {
+                "theme_id": project.theme_id,
+                "section": "数据说明",
+                "file_type": "dataset_meta",
+                "title": "脱敏数据说明",
+                "path": "spaces/retina-imaging/data.json",
+                "description": "主题级文件域记录",
+            },
+        )
+        self.assertEqual(file_response.status_code, 201)
+        file_id = file_response.json()["data"]["id"]
+
+        file_list_response = self.client.get(f"/api/admin/theme-files/?theme_id={project.theme_id}&page_size=50")
+        self.assertEqual(file_list_response.status_code, 200)
+        self.assertEqual(file_list_response.json()["data"]["pagination"]["total_count"], 1)
+
+        file_update_response = self.patch_json(f"/api/admin/theme-files/{file_id}/", {"title": "数据字典说明"})
+        self.assertEqual(file_update_response.status_code, 200)
+        self.assertEqual(file_update_response.json()["data"]["title"], "数据字典说明")
+
+        project_detail_response = self.client.get(f"/api/admin/projects/{project.pk}/")
+        self.assertEqual(project_detail_response.status_code, 200)
+        self.assertEqual(project_detail_response.json()["data"]["topic_id"], "RETINA-002")
+
+        project_update_response = self.patch_json(f"/api/admin/projects/{project.pk}/", {"title": "OCT 病灶分割临床评估", "stage": "active"})
+        self.assertEqual(project_update_response.status_code, 200)
+        project.refresh_from_db()
+        self.assertEqual(project.title, "OCT 病灶分割临床评估")
+        self.assertEqual(project.stage, ProjectStage.ACTIVE)
+
+        file_delete_response = self.client.delete(f"/api/admin/theme-files/{file_id}/")
+        self.assertEqual(file_delete_response.status_code, 200)
+        self.assertFalse(ThemeFile.objects.get(pk=file_id).is_active)
 
     def test_regular_user_cannot_manage_content(self):
         user = User.objects.create_user(username="normaluser", password="StrongPass12345")
