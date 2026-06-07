@@ -1,44 +1,65 @@
 {% extends "base.html" %}
 {% block title %}OpenMedAILab{% endblock %}
 {% block content %}
-<section class="card">
-  <h1>OpenMedAILab</h1>
-  <p>医学 AI 开放科研课题协作平台：课题展示、参与意向、评分、组队与后台统计的最小闭环。</p>
-  <p><a class="button" href="{% url 'project_list' %}">浏览课题</a></p>
+<section class="card hero" style="text-align: center; padding: 64px 24px;">
+  <h1 style="font-size: 3rem; justify-content: center; color: var(--primary); margin-bottom: 16px;">
+    <span class="material-symbols-rounded" style="font-size: 3.5rem;">biotech</span>
+    OpenMedAILab
+  </h1>
+  <p style="font-size: 1.15rem; color: var(--text-muted); max-width: 600px; margin: 0 auto 32px; line-height: 1.6;">医学 AI 开放科研课题协作平台：<br>课题展示、参与意向、评分、组队与后台统计的最小闭环。</p>
+  <p><a class="button" href="{% url 'project_list' %}" style="font-size: 1.1rem; padding: 14px 28px; box-shadow: 0 4px 14px 0 rgba(79, 70, 229, 0.39);"><span class="material-symbols-rounded">explore</span> 浏览所有课题</a></p>
 </section>
 
-<section class="grid grid-4" style="margin-top: 16px;">
-  <div class="card"><div class="stats">{{ stats.project_count }}</div><div class="muted">课题数</div></div>
-  <div class="card"><div class="stats">{{ stats.theme_count }}</div><div class="muted">主题数</div></div>
-  <div class="card"><div class="stats">{{ stats.user_count }}</div><div class="muted">注册用户</div></div>
-  <div class="card"><div class="stats">{{ stats.interest_count }}</div><div class="muted">参与意向</div></div>
+<section class="grid grid-4" style="margin-top: 24px;">
+  <div class="card">
+    <div class="muted">课题数</div>
+    <div class="stats">{{ stats.project_count }} <span class="material-symbols-rounded">folder_open</span></div>
+  </div>
+  <div class="card">
+    <div class="muted">主题数</div>
+    <div class="stats">{{ stats.theme_count }} <span class="material-symbols-rounded">category</span></div>
+  </div>
+  <div class="card">
+    <div class="muted">注册用户</div>
+    <div class="stats">{{ stats.user_count }} <span class="material-symbols-rounded">group</span></div>
+  </div>
+  <div class="card">
+    <div class="muted">参与意向</div>
+    <div class="stats">{{ stats.interest_count }} <span class="material-symbols-rounded">handshake</span></div>
+  </div>
 </section>
 
-<section style="margin-top: 24px;">
-  <h2>主题入口</h2>
+<section style="margin-top: 40px;">
+  <h2><span class="material-symbols-rounded">grid_view</span> 主题入口</h2>
   <div class="grid grid-4">
     {% for theme in themes %}
-      <a class="card" href="{% url 'project_list' %}?theme={{ theme.slug }}">
-        <strong>{{ theme.name }}</strong>
+      <a class="card" href="{% url 'project_list' %}?theme={{ theme.slug }}" style="display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px;">
+        <span class="material-symbols-rounded" style="font-size: 36px; color: var(--primary);">topic</span>
+        <strong style="font-size: 1.1rem;">{{ theme.name }}</strong>
         <div class="muted">{{ theme.project_count }} 个课题</div>
       </a>
     {% empty %}
-      <div class="card muted">还没有导入主题。</div>
+      <div class="card muted" style="text-align: center; grid-column: 1 / -1;">还没有导入主题。</div>
     {% endfor %}
   </div>
 </section>
 
-<section style="margin-top: 24px;">
-  <h2>热门课题</h2>
-  <div class="grid">
+<section style="margin-top: 40px;">
+  <h2><span class="material-symbols-rounded">local_fire_department</span> 热门课题</h2>
+  <div class="grid grid-2">
     {% for project in hot_projects %}
-      <div class="card">
-        <p class="project-title"><a href="{% url 'project_detail' project.pk %}">{{ project.title }}</a></p>
-        <p class="muted">{{ project.theme }} · {{ project.get_stage_display }} · 关注 {{ project.follow_count }} · 参与 {{ project.interest_count }}</p>
-        <p>{{ project.summary|truncatechars:180 }}</p>
-      </div>
+      <a class="card" href="{% url 'project_detail' project.pk %}" style="display: flex; flex-direction: column; height: 100%;">
+        <p class="project-title">{{ project.title }}</p>
+        <div style="margin-bottom: 16px; flex-wrap: wrap; display: flex;">
+          <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">category</span> {{ project.theme }}</span>
+          <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">moving</span> {{ project.get_stage_display }}</span>
+          <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">favorite</span> 关注 {{ project.follow_count }}</span>
+          <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">group</span> 参与 {{ project.interest_count }}</span>
+        </div>
+        <p class="muted" style="margin-top: auto;">{{ project.summary|truncatechars:180 }}</p>
+      </a>
     {% empty %}
-      <div class="card muted">导入课题后会显示热门课题。</div>
+      <div class="card muted" style="text-align: center; grid-column: 1 / -1;">导入课题后会显示热门课题。</div>
     {% endfor %}
   </div>
 </section>

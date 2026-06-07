@@ -1,104 +1,138 @@
 {% extends "base.html" %}
 {% block title %}{{ project.title }} - OpenMedAILab{% endblock %}
 {% block content %}
-<article class="card">
-  <p class="muted">{{ project.theme }} · {{ project.topic_id }} · {{ project.get_stage_display }}</p>
-  <h1>{{ project.title }}</h1>
-  <p>
-    {% for tag in project.tags.all %}<span class="pill">{{ tag.name }}</span>{% endfor %}
-  </p>
-  <p>
-    初始评分 {{ project.llm_score|default:"-" }} · 社区评分 {{ project.community_score|default:"-" }}
-    · 综合评分 {{ project.composite_score|default:"-" }} · 推荐期刊 {{ project.recommended_journal|default:"-" }}
-  </p>
-  <p>{{ project.summary }}</p>
-  {% if project.source_pdf_path %}<p class="muted">PDF 路径：{{ project.source_pdf_path }}</p>{% endif %}
+<article class="card hero" style="padding: 48px 32px; border-bottom: 4px solid var(--primary);">
+  <div style="margin-bottom: 20px; display: flex; gap: 8px; flex-wrap: wrap;">
+    <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">category</span> {{ project.theme }}</span>
+    <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">tag</span> {{ project.topic_id }}</span>
+    <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">moving</span> {{ project.get_stage_display }}</span>
+  </div>
+  <h1 style="font-size: 2.5rem; margin-bottom: 16px; display: block;">{{ project.title }}</h1>
+  <div style="margin-bottom: 24px;">
+    {% for tag in project.tags.all %}<span class="pill" style="background: #f1f5f9; border-style: dashed;">#{{ tag.name }}</span>{% endfor %}
+  </div>
+  <div class="card" style="background: var(--bg-color); box-shadow: none; border: 1px solid var(--border); padding: 20px; margin-bottom: 32px; display: flex; gap: 32px; flex-wrap: wrap;">
+    <div style="display: flex; flex-direction: column; gap: 4px;"><span class="muted" style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">smart_toy</span> 初始评分</span><strong style="font-size: 1.2rem;">{{ project.llm_score|default:"-" }}</strong></div>
+    <div style="display: flex; flex-direction: column; gap: 4px;"><span class="muted" style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">star</span> 社区评分</span><strong style="font-size: 1.2rem;">{{ project.community_score|default:"-" }}</strong></div>
+    <div style="display: flex; flex-direction: column; gap: 4px;"><span class="muted" style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">assessment</span> 综合评分</span><strong style="font-size: 1.2rem;">{{ project.composite_score|default:"-" }}</strong></div>
+    <div style="display: flex; flex-direction: column; gap: 4px;"><span class="muted" style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">menu_book</span> 推荐期刊</span><strong style="font-size: 1.2rem;">{{ project.recommended_journal|default:"-" }}</strong></div>
+  </div>
+  <p style="font-size: 1.1rem; line-height: 1.8;">{{ project.summary }}</p>
+  {% if project.source_pdf_path %}<p class="muted" style="margin-top: 16px;"><span class="material-symbols-rounded" style="vertical-align: middle;">picture_as_pdf</span> PDF 路径：{{ project.source_pdf_path }}</p>{% endif %}
 </article>
 
-<section class="grid grid-2" style="margin-top: 16px;">
-  <div class="card">
-    <h2>组队情况</h2>
-    {% for role,count in team_status.roles.items %}
-      <p>{{ role }}：{{ count }}</p>
-    {% endfor %}
-    <p>资助意向：{{ team_status.sponsor_count }}</p>
-    <p><strong>{% if team_status.basic_ready %}基础团队已具备{% else %}基础团队未凑齐{% endif %}</strong></p>
+<section class="grid grid-2" style="margin-top: 24px;">
+  <div class="card" style="display: flex; flex-direction: column;">
+    <h2><span class="material-symbols-rounded" style="color: var(--primary);">group</span> 组队情况</h2>
+    <div style="margin-bottom: 16px; flex-grow: 1;">
+      {% for role,count in team_status.roles.items %}
+        <p style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding-bottom: 8px; margin: 8px 0;"><span>{{ role }}</span> <strong>{{ count }}</strong></p>
+      {% endfor %}
+      <p style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding-bottom: 8px; margin: 8px 0;"><span>资助意向</span> <strong>{{ team_status.sponsor_count }}</strong></p>
+    </div>
+    <div class="message" style="margin: 0; {% if team_status.basic_ready %}border-color: var(--success);{% else %}border-color: #f59e0b; background: #fffbeb; color: #b45309;{% endif %}">
+      <span class="material-symbols-rounded">{% if team_status.basic_ready %}check_circle{% else %}pending{% endif %}</span>
+      <strong>{% if team_status.basic_ready %}基础团队已具备{% else %}基础团队未凑齐{% endif %}</strong>
+    </div>
   </div>
-  <div class="card">
-    <h2>我的状态</h2>
+  <div class="card" style="display: flex; flex-direction: column;">
+    <h2><span class="material-symbols-rounded" style="color: var(--primary);">person</span> 我的状态</h2>
     {% if user.is_authenticated %}
-      <p>{% if user_state.is_following %}已关注{% else %}未关注{% endif %}</p>
-      {% if user_state.score %}<p>我的评分：{{ user_state.score.score }}</p>{% endif %}
+      <div style="flex-grow: 1;">
+        <p style="margin-bottom: 16px; font-size: 1.1rem;">
+          {% if user_state.is_following %}
+            <span style="color: var(--success); display: flex; align-items: center; gap: 8px;"><span class="material-symbols-rounded">favorite</span> 已关注</span>
+          {% else %}
+            <span class="muted" style="display: flex; align-items: center; gap: 8px;"><span class="material-symbols-rounded">favorite_border</span> 未关注</span>
+          {% endif %}
+        </p>
+        {% if user_state.score %}<p style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;"><strong>我的评分：</strong> <span class="pill" style="background: var(--primary); color: white; border: none; font-size: 14px;">{{ user_state.score.score }} 分</span></p>{% endif %}
+      </div>
+      <div style="margin-top: auto;">
       {% if user_state.is_following %}
-        <form method="post" action="{% url 'project_unfollow' project.pk %}">{% csrf_token %}<button class="secondary" type="submit">取消关注</button></form>
+        <form method="post" action="{% url 'project_unfollow' project.pk %}">{% csrf_token %}<button class="button secondary" type="submit" style="width: 100%;"><span class="material-symbols-rounded">heart_broken</span> 取消关注</button></form>
       {% else %}
-        <form method="post" action="{% url 'project_follow' project.pk %}">{% csrf_token %}<button type="submit">关注课题</button></form>
+        <form method="post" action="{% url 'project_follow' project.pk %}">{% csrf_token %}<button type="submit" style="width: 100%;"><span class="material-symbols-rounded">favorite</span> 关注课题</button></form>
       {% endif %}
+      </div>
     {% else %}
-      <p><a href="{% url 'login' %}?next={{ request.path }}">登录后可关注、评分、参与、认领和表达资助意向。</a></p>
+      <div class="message" style="background: var(--bg-color); border-color: var(--border); color: var(--text-main); flex-grow: 1;">
+        <span class="material-symbols-rounded">lock</span>
+        <a href="{% url 'login' %}?next={{ request.path }}">登录后可关注、评分、参与、认领和表达资助意向。</a>
+      </div>
     {% endif %}
   </div>
 </section>
 
 {% if user.is_authenticated %}
-<section class="grid grid-2" style="margin-top: 16px;">
+<section class="grid grid-2" style="margin-top: 24px;">
   <div class="card">
-    <h2>评分</h2>
+    <h2><span class="material-symbols-rounded">star_rate</span> 评分</h2>
     <form method="post" action="{% url 'project_score' project.pk %}">
       {% csrf_token %}
       {{ score_form.as_p }}
-      <button type="submit">提交评分</button>
+      <button type="submit" style="width: 100%; margin-top: 8px;"><span class="material-symbols-rounded">send</span> 提交评分</button>
     </form>
   </div>
   <div class="card">
-    <h2>参与意向</h2>
+    <h2><span class="material-symbols-rounded">handshake</span> 参与意向</h2>
     <form method="post" action="{% url 'project_interest' project.pk %}">
       {% csrf_token %}
       {{ interest_form.as_p }}
-      <button type="submit">提交参与意向</button>
+      <button type="submit" style="width: 100%; margin-top: 8px;"><span class="material-symbols-rounded">send</span> 提交参与意向</button>
     </form>
   </div>
   <div class="card">
-    <h2>认领意向</h2>
+    <h2><span class="material-symbols-rounded">assignment_ind</span> 认领意向</h2>
     <form method="post" action="{% url 'project_claim' project.pk %}">
       {% csrf_token %}
       {{ claim_form.as_p }}
-      <button type="submit">提交认领意向</button>
+      <button type="submit" style="width: 100%; margin-top: 8px;"><span class="material-symbols-rounded">send</span> 提交认领意向</button>
     </form>
   </div>
   <div class="card">
-    <h2>资助意向</h2>
+    <h2><span class="material-symbols-rounded">volunteer_activism</span> 资助意向</h2>
     <form method="post" action="{% url 'project_sponsor' project.pk %}">
       {% csrf_token %}
       {{ sponsor_form.as_p }}
-      <button type="submit">记录资助意向</button>
+      <button type="submit" style="width: 100%; margin-top: 8px;"><span class="material-symbols-rounded">send</span> 记录资助意向</button>
     </form>
-    <p class="muted">第一版只记录意向，不提供在线支付入口。</p>
+    <p class="muted" style="margin-top: 12px; display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">info</span> 第一版只记录意向，不提供在线支付入口。</p>
   </div>
 </section>
 {% endif %}
 
-<section style="margin-top: 24px;">
-  <h2>Markdown 原文</h2>
+<section style="margin-top: 32px;">
+  <h2><span class="material-symbols-rounded">article</span> Markdown 原文</h2>
   <div class="markdown-body">{{ project.body_markdown|default:"暂无 Markdown 正文。" }}</div>
 </section>
 
-<section class="grid grid-2" style="margin-top: 24px;">
+<section class="grid grid-2" style="margin-top: 32px;">
   <div class="card">
-    <h2>最近参与意向</h2>
+    <h2><span class="material-symbols-rounded">history</span> 最近参与意向</h2>
+    <div style="display: grid; gap: 12px;">
     {% for item in recent_interests %}
-      <p>{{ item.user.profile.display_name|default:item.user.username }} · {{ item.role }} · {{ item.get_status_display }}</p>
+      <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px; background: var(--bg-color); border-radius: 8px; border: 1px solid var(--border);">
+        <div><strong>{{ item.user.profile.display_name|default:item.user.username }}</strong><br><span class="muted">{{ item.role }}</span></div>
+        <span class="pill" style="margin: 0;">{{ item.get_status_display }}</span>
+      </div>
     {% empty %}
       <p class="muted">暂无参与意向。</p>
     {% endfor %}
+    </div>
   </div>
   <div class="card">
-    <h2>最近评分</h2>
+    <h2><span class="material-symbols-rounded">history</span> 最近评分</h2>
+    <div style="display: grid; gap: 12px;">
     {% for item in recent_scores %}
-      <p>{{ item.user.profile.display_name|default:item.user.username }} · {{ item.score }} 分</p>
+      <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px; background: var(--bg-color); border-radius: 8px; border: 1px solid var(--border);">
+        <strong>{{ item.user.profile.display_name|default:item.user.username }}</strong>
+        <span class="pill" style="background: var(--primary); color: white; border: none; margin: 0;">{{ item.score }} 分</span>
+      </div>
     {% empty %}
       <p class="muted">暂无评分。</p>
     {% endfor %}
+    </div>
   </div>
 </section>
 {% endblock %}

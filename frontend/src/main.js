@@ -736,16 +736,20 @@ const App = {
             type="button"
             @click="navigate(item.name)"
           >
+            <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'home'">library_books</span>
+            <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'space'">folder_open</span>
+            <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'dashboard'">space_dashboard</span>
+            <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'admin'">settings</span>
             {{ item.label }}
           </button>
         </nav>
         <div class="account-area">
-          <span class="role-pill">{{ roleInfo.role_label }}</span>
-          <button v-if="state.user" class="text-button" type="button" @click="navigate('dashboard')">{{ state.user.profile?.display_name || state.user.username }}</button>
-          <button v-if="state.user" class="ghost-button" type="button" @click="logout">退出</button>
+          <span class="role-pill"><span class="material-symbols-rounded" style="font-size: 14px;">badge</span> {{ roleInfo.role_label }}</span>
+          <button v-if="state.user" class="text-button" type="button" @click="navigate('dashboard')"><span class="material-symbols-rounded" style="font-size: 18px;">person</span> {{ state.user.profile?.display_name || state.user.username }}</button>
+          <button v-if="state.user" class="ghost-button" type="button" @click="logout"><span class="material-symbols-rounded" style="font-size: 18px;">logout</span> 退出</button>
           <template v-else>
-            <button class="ghost-button" type="button" @click="navigate('login')">登录</button>
-            <button class="primary-button" type="button" @click="navigate('register')">注册</button>
+            <button class="ghost-button" type="button" @click="navigate('login')"><span class="material-symbols-rounded" style="font-size: 18px;">login</span> 登录</button>
+            <button class="primary-button" type="button" @click="navigate('register')"><span class="material-symbols-rounded" style="font-size: 18px;">person_add</span> 注册</button>
           </template>
         </div>
       </header>
@@ -759,33 +763,32 @@ const App = {
 
         <template v-else>
           <section v-if="activeView === 'home' || activeView === 'projects'" class="library-view">
-            <div class="library-hero">
-              <div>
-                <span class="eyebrow">医学 AI 课题库</span>
-                <h1>按主题浏览真实课题，找到可以加入的医学 AI 项目。</h1>
-                <p>课题、主题、文件空间和协作记录全部来自后端数据库。登录后可关注、评分、申请参与、认领任务或表达资助意向。</p>
-              </div>
-              <div class="hero-stats">
-                <div><strong>{{ stats.total }}</strong><span>课题</span></div>
-                <div><strong>{{ stats.themes }}</strong><span>主题</span></div>
-                <div><strong>{{ stats.interests }}</strong><span>参与意向</span></div>
+            <div class="library-hero" style="text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 100px 20px;">
+              <div style="max-width: 800px;">
+                <span class="eyebrow" style="background: rgba(20, 184, 166, 0.1); color: #0d9488; padding: 8px 16px; border-radius: 999px; margin-bottom: 24px; display: inline-flex;"><span class="material-symbols-rounded" style="font-size: 18px;">biotech</span> 全新一代医学 AI 课题库</span>
+                <h1 style="font-size: clamp(48px, 6vw, 72px); letter-spacing: -2px; margin: 24px 0; line-height: 1.1; color: #0f172a; font-weight: 800;">
+                  探索前沿医学人工智能
+                </h1>
+                <p style="font-size: 20px; color: #64748b; max-width: 600px; margin: 0 auto; line-height: 1.6;">
+                  真实临床场景驱动，从数据到算法，寻找改变未来的医学 AI 协作机会。
+                </p>
               </div>
             </div>
 
-            <div class="toolbar">
+            <div class="toolbar" style="margin-top: -32px; border: none; box-shadow: 0 20px 40px -10px rgba(0,0,0,0.08); background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(24px); border-radius: 24px; padding: 16px 24px; z-index: 10; position: relative;">
               <label class="search-box">
-                <span>搜索</span>
+                <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">search</span> 搜索</span>
                 <input v-model="state.filters.q" type="search" placeholder="输入疾病、模型、任务或期刊" @keyup.enter="applyFilters" />
               </label>
               <label>
-                <span>阶段</span>
+                <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">moving</span> 阶段</span>
                 <select v-model="state.filters.stage" @change="applyFilters">
                   <option value="">全部阶段</option>
                   <option v-for="stage in state.meta.project_stages" :key="stage.value" :value="stage.value">{{ stage.label }}</option>
                 </select>
               </label>
               <label>
-                <span>排序</span>
+                <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">sort</span> 排序</span>
                 <select v-model="state.filters.sort" @change="applyFilters">
                   <option value="recommended">综合推荐</option>
                   <option value="llm_score">初始评分</option>
@@ -795,7 +798,7 @@ const App = {
                   <option value="project_no">课题编号</option>
                 </select>
               </label>
-              <button class="primary-button" type="button" @click="applyFilters">筛选</button>
+              <button class="primary-button" type="button" @click="applyFilters" style="height: 40px; margin-top: auto;"><span class="material-symbols-rounded">filter_list</span> 筛选</button>
             </div>
 
             <div class="theme-strip">
@@ -831,23 +834,21 @@ const App = {
                 @click="openProjectPreview(project)"
                 @keyup.enter="openProjectPreview(project)"
               >
-                <div class="card-topline">
-                  <span>{{ project.theme?.name || '未分类' }}</span>
-                  <span>{{ project.stage_label }}</span>
+                <div class="card-topline" style="margin-bottom: 16px;">
+                  <span style="display: flex; align-items: center; gap: 6px; background: #f1f5f9; padding: 4px 10px; border-radius: 6px; color: #475569; font-weight: 600;"><span class="material-symbols-rounded" style="font-size: 16px; color: #0ea5e9;">category</span> {{ project.theme?.name || '未分类' }}</span>
+                  <span style="display: flex; align-items: center; gap: 6px; color: #14b8a6; font-weight: 600;"><span class="material-symbols-rounded" style="font-size: 16px;">moving</span> {{ project.stage_label }}</span>
                 </div>
-                <h3>{{ project.title }}</h3>
-                <p>{{ shortText(project.summary || project.problem_statement, 120) }}</p>
-                <div class="tag-row">
-                  <span v-for="tag in project.tags.slice(0, 4)" :key="tag.id">{{ tag.name }}</span>
+                <h3 style="font-size: 24px; letter-spacing: -0.5px; margin-bottom: 12px; color: #0f172a;">{{ project.title }}</h3>
+                <p style="font-size: 15px; line-height: 1.6; color: #64748b; margin-bottom: 24px; flex-grow: 1;">{{ shortText(project.summary || project.problem_statement, 120) }}</p>
+                <div class="tag-row" style="margin-bottom: 24px;">
+                  <span v-for="tag in project.tags.slice(0, 3)" :key="tag.id" style="background: transparent; border: 1px solid #e2e8f0; color: #64748b; border-radius: 999px; padding: 4px 12px;">{{ tag.name }}</span>
                 </div>
-                <dl class="card-metrics">
-                  <div><dt>综合</dt><dd>{{ displayScore(project.composite_score) }}</dd></div>
-                  <div><dt>关注</dt><dd>{{ project.follow_count || 0 }}</dd></div>
-                  <div><dt>参与</dt><dd>{{ project.interest_count || 0 }}</dd></div>
-                </dl>
-                <div class="card-actions">
-                  <button class="primary-button" type="button" @click.stop="openProjectPreview(project)">查看详情</button>
-                  <button class="ghost-button" type="button" @click.stop="toggleFollow(project)">关注</button>
+                <div class="card-actions" style="margin-top: auto; border-top: 1px solid #f1f5f9; padding-top: 20px;">
+                  <div style="display: flex; gap: 16px; color: #94a3b8; font-size: 14px; font-weight: 500;">
+                    <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 18px;">star</span> {{ displayScore(project.composite_score) }}</span>
+                    <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 18px;">group</span> {{ project.interest_count || 0 }}</span>
+                  </div>
+                  <button class="primary-button" type="button" @click.stop="openProjectPreview(project)" style="border-radius: 999px; padding: 8px 20px;"><span class="material-symbols-rounded" style="font-size: 18px;">arrow_forward</span> 探索课题</button>
                 </div>
               </article>
             </div>

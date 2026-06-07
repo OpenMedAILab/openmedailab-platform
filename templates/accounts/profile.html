@@ -1,12 +1,14 @@
 {% extends "base.html" %}
 {% block title %}个人资料 - OpenMedAILab{% endblock %}
 {% block content %}
-<div class="card">
-  <h1>个人资料</h1>
-  <form method="post">
-    {% csrf_token %}
-    {{ form.as_p }}
-    <button type="submit">保存资料</button>
-  </form>
+<div style="max-width: 600px; margin: 40px auto;">
+  <div class="card" style="border-top: 4px solid var(--primary); padding: 40px 32px;">
+    <h1 style="text-align: center; margin-bottom: 24px; justify-content: center;"><span class="material-symbols-rounded" style="color: var(--primary); font-size: 32px;">manage_accounts</span> 个人资料设置</h1>
+    <form method="post">
+      {% csrf_token %}
+      {{ form.as_p }}
+      <button type="submit" style="width: 100%; margin-top: 16px; padding: 12px; font-size: 1.1rem;"><span class="material-symbols-rounded">save</span> 保存资料</button>
+    </form>
+  </div>
 </div>
 {% endblock %}

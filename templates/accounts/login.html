@@ -1,13 +1,15 @@
 {% extends "base.html" %}
 {% block title %}登录 - OpenMedAILab{% endblock %}
 {% block content %}
-<div class="card" style="max-width: 460px;">
-  <h1>登录</h1>
-  <form method="post">
-    {% csrf_token %}
-    {{ form.as_p }}
-    <button type="submit">登录</button>
-  </form>
-  <p class="muted">还没有账号？<a href="{% url 'register' %}">注册</a></p>
+<div style="max-width: 460px; margin: 40px auto;">
+  <div class="card" style="border-top: 4px solid var(--primary); padding: 40px 32px;">
+    <h1 style="text-align: center; margin-bottom: 24px; justify-content: center;"><span class="material-symbols-rounded" style="color: var(--primary); font-size: 32px;">login</span> 登录</h1>
+    <form method="post">
+      {% csrf_token %}
+      {{ form.as_p }}
+      <button type="submit" style="width: 100%; margin-top: 16px; padding: 12px; font-size: 1.1rem;"><span class="material-symbols-rounded">arrow_forward</span> 登录</button>
+    </form>
+    <p class="muted" style="text-align: center; margin-top: 24px;">还没有账号？ <a href="{% url 'register' %}" style="font-weight: 500;">注册</a></p>
+  </div>
 </div>
 {% endblock %}
