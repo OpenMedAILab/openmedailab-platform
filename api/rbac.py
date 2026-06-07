@@ -1,3 +1,6 @@
+from accounts.models import is_platform_admin_user
+
+
 ROLE_LABELS = {
     "guest": "访客",
     "doctor": "医生",
@@ -28,6 +31,7 @@ BASE_CAPABILITIES = {
     "funding_support": False,
     "manage_themes": False,
     "manage_projects": False,
+    "manage_users": False,
     "import_projects": False,
     "view_admin_console": False,
 }
@@ -67,6 +71,7 @@ ADMIN_PATCH = {
     "funding_support": True,
     "manage_themes": True,
     "manage_projects": True,
+    "manage_users": True,
     "import_projects": True,
     "view_admin_console": True,
 }
@@ -75,7 +80,7 @@ ADMIN_PATCH = {
 def role_key(user):
     if not user or not user.is_authenticated:
         return "guest"
-    if user.is_superuser or user.is_staff:
+    if is_platform_admin_user(user):
         return "admin"
     profile = getattr(user, "profile", None)
     return getattr(profile, "role_type", "other") or "other"

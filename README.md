@@ -69,6 +69,8 @@ http://127.0.0.1:8000/api/docs
 http://127.0.0.1:8000/api/openapi.json
 ```
 
+The JSON API implementation entry is `api/ninja_api.py`; `api/urls.py` mounts only this Ninja API. Do not add parallel `/api/` registration or auth logic in `api/views.py`.
+
 All API responses use the same envelope:
 
 ```json
@@ -94,6 +96,11 @@ GET  /api/themes/<slug>/space/
 POST /api/auth/register/
 POST /api/auth/login/
 POST /api/auth/logout/
+POST /api/auth/email-verification/request/
+POST /api/auth/email-verification/confirm/
+POST /api/auth/password-reset/request/
+POST /api/auth/password-reset/confirm/
+POST /api/auth/password/change-required/
 GET  /api/me/
 GET  /api/me/profile/
 PUT  /api/me/profile/
@@ -114,6 +121,8 @@ GET    /api/admin/themes/
 POST   /api/admin/themes/
 PATCH  /api/admin/themes/<id>/
 DELETE /api/admin/themes/<id>/
+GET    /api/admin/users/
+POST   /api/admin/users/<uid>/reset-password/
 GET    /api/admin/projects/
 POST   /api/admin/projects/
 PATCH  /api/admin/projects/<id>/
@@ -121,7 +130,44 @@ DELETE /api/admin/projects/<id>/
 POST   /api/admin/projects/import-json/
 ```
 
-Admin endpoints require RBAC capabilities returned by `/api/rbac/` and `/api/me/`. Staff or superuser accounts receive `manage_themes`, `manage_projects`, and `import_projects`.
+Registration keeps the existing `POST /api/auth/register/` path and fields: `username`, `email`, `display_name`, `role_type`, `password1`, and `password2`. Email is required, normalized to lowercase, and unique case-insensitively. Validation errors return field-level details in `error.details`, so the frontend can show errors beside the relevant form field.
+
+Each registered user receives an immutable public UID on `profile.uid`. UID prefixes are based on the selected identity at registration time:
+
+```text
+student=S, doctor=D, teacher=T, ai_engineer=E, statistician=M, sponsor=F, other=U
+```
+
+For example, a student with database id `25` receives `S00000025`. Changing profile identity later does not change the UID. `/api/me/` and `/api/me/profile/` include `profile.uid`, `profile.email_verified`, `profile.email_verified_at`, and `profile.must_change_password`.
+
+Email verification APIs:
+
+```text
+POST /api/auth/email-verification/request/
+POST /api/auth/email-verification/confirm/
+```
+
+Password reset APIs:
+
+```text
+POST /api/auth/password-reset/request/
+POST /api/auth/password-reset/confirm/
+POST /api/auth/password/change-required/
+GET  /api/admin/users/
+POST /api/admin/users/<uid>/reset-password/
+```
+
+The platform does not send password reset links by email. `POST /api/auth/password-reset/request/` only tells the user to contact the system administrator, and `POST /api/auth/password-reset/confirm/` returns `password_reset_disabled`. The platform administrator restores a user's password with `POST /api/admin/users/<uid>/reset-password/`; the returned default password is `username + 6 random digits`. When the user logs in with that default password, `profile.must_change_password` is `true`, business APIs return `password_change_required`, and the user must call `POST /api/auth/password/change-required/`. Successful password change logs the user out, and the user must log in again with the new password.
+
+Admin endpoints require RBAC capabilities returned by `/api/rbac/` and `/api/me/`. Only the unique platform administrator receives `manage_themes`, `manage_projects`, `manage_users`, and `import_projects`.
+
+The platform administrator is not created through public registration. Create or repair it with:
+
+```bash
+conda run -n openmedailab python manage.py ensure_platform_admin --username platform_admin --email admin@example.com --password '<strong-password>'
+```
+
+The platform administrator has fixed UID `ADM00000001`. The command fails if another staff/superuser account already exists, because the platform currently supports exactly one administrator account.
 
 Project JSON imports should follow the field contract from `GET /api/project-schema/`. The backend stores structured fields such as `problem_statement`, `research_goal`, `technical_route`, `data_requirements`, `evaluation_metrics`, `expected_outputs`, `compliance_notes`, project documents, and the original `source_payload`.
 

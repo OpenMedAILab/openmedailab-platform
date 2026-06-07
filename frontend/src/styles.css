@@ -313,6 +313,19 @@ textarea:focus {
   box-shadow: 0 0 0 4px rgba(15, 159, 154, 0.12);
 }
 
+.has-error input,
+.has-error select,
+.has-error textarea {
+  border-color: rgba(239, 68, 68, 0.8);
+  background: #fffafa;
+}
+
+.has-error input:focus,
+.has-error select:focus,
+.has-error textarea:focus {
+  box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.12);
+}
+
 .theme-strip {
   display: flex;
   gap: 10px;
@@ -495,6 +508,11 @@ textarea:focus {
 .primary-button:hover {
   transform: translateY(-2px);
   box-shadow: 0 6px 20px rgba(79, 70, 229, 0.4);
+}
+
+.primary-button:disabled:hover {
+  transform: none;
+  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.3);
 }
 
 .ghost-button,
@@ -951,6 +969,97 @@ code {
   width: min(420px, 100%);
   display: grid;
   gap: 12px;
+  text-align: left;
+}
+
+.auth-card h1 {
+  text-align: center;
+}
+
+.auth-card em {
+  color: var(--red);
+  font-style: normal;
+}
+
+.field-hint,
+.field-error,
+.form-error-summary,
+.form-success {
+  line-height: 1.5;
+}
+
+.field-hint {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.auth-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.7;
+  text-align: left;
+}
+
+.field-error {
+  display: grid;
+  gap: 2px;
+  color: #dc2626;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.field-error p,
+.form-error-summary p,
+.form-success {
+  margin: 0;
+}
+
+.form-error-summary,
+.form-success {
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.form-error-summary {
+  border: 1px solid rgba(239, 68, 68, 0.22);
+  background: #fff7f7;
+  color: #b91c1c;
+}
+
+.form-error-summary strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.form-success {
+  border: 1px solid rgba(16, 185, 129, 0.24);
+  background: #f0fdf4;
+  color: #047857;
+}
+
+.password-result {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.password-result code {
+  width: fit-content;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.auth-link {
+  justify-self: center;
+  min-height: 32px;
 }
 
 .toast {

@@ -58,6 +58,7 @@ MIDDLEWARE = [
     'api.middleware.SimpleCorsMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'api.middleware.PasswordChangeRequiredMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -150,6 +151,14 @@ LOGIN_REDIRECT_URL = "dashboard"
 LOGOUT_REDIRECT_URL = "home"
 
 OPENMEDAILAB_INITIAL_CREDITS = int(os.getenv("OPENMEDAILAB_INITIAL_CREDITS", "100"))
+OPENMEDAILAB_PLATFORM_ADMIN_USERNAME = os.getenv("OPENMEDAILAB_PLATFORM_ADMIN_USERNAME", "platform_admin")
+OPENMEDAILAB_PLATFORM_ADMIN_EMAIL = os.getenv("OPENMEDAILAB_PLATFORM_ADMIN_EMAIL", "admin@example.com")
+OPENMEDAILAB_EXPOSE_AUTH_DEBUG_TOKENS = os.getenv("OPENMEDAILAB_EXPOSE_AUTH_DEBUG_TOKENS", "0").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 OPENMEDAILAB_CORS_ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv(

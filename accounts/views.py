@@ -3,23 +3,15 @@ from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.shortcuts import redirect, render
 
-from credits.models import CreditLedger
-
 from .forms import RegisterForm, UserProfileForm
+from .services import create_registered_user
 
 
 def register(request):
     if request.method == "POST":
         form = RegisterForm(request.POST)
         if form.is_valid():
-            user = form.save()
-            CreditLedger.objects.create(
-                user=user,
-                action_type=CreditLedger.ActionType.REGISTER_BONUS,
-                amount=user.profile.credit_balance,
-                balance_after=user.profile.credit_balance,
-                reason="注册初始积分",
-            )
+            user = create_registered_user(form)
             login(request, user)
             messages.success(request, "注册成功，已进入你的工作台。")
             return redirect("dashboard")
