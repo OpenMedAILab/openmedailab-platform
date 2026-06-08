@@ -1,5 +1,7 @@
 import { createApp, computed, onBeforeUnmount, onMounted, reactive, watch } from "vue";
 import { api, initCsrf } from "./api.js";
+import { isPointInsideProfileHoverZone } from "./profileMenu.js";
+import { latestRelease, releaseHistory, sectionEntries } from "./release.js";
 
 const PAGE_SIZE = 9;
 
@@ -34,6 +36,8 @@ const state = reactive({
     page_size: PAGE_SIZE
   },
   currentProject: null,
+  currentProjectThemeSpace: null,
+  projectThemeSpaces: {},
   preview: {
     open: false,
     maximized: false,
@@ -43,6 +47,11 @@ const state = reactive({
   },
   themeSpace: null,
   dashboard: null,
+  favoriteProjectIds: [],
+  favoritesLoaded: false,
+  profileMenuOpen: false,
+  releaseModalOpen: false,
+  expandedReleaseVersions: [],
   schema: null,
   admin: {
     activeTab: "projects",
@@ -100,7 +109,10 @@ const App = {
         { name: "home", label: "课题库" },
         { name: "space", label: "文件空间" }
       ];
-      if (state.user) items.push({ name: "dashboard", label: "我的协作" });
+      if (state.user) {
+        items.push({ name: "dashboard", label: "我的协作" });
+        items.push({ name: "favorites", label: "我的收藏" });
+      }
       if (can("view_admin_console")) items.push({ name: "admin", label: "管理" });
       return items;
     });
@@ -108,11 +120,16 @@ const App = {
     const selectedSpaceSlug = computed(() => state.route.params.slug || selectedTheme.value?.slug || state.meta.themes[0]?.slug || "");
     const selectedAdminTheme = computed(() => state.admin.themes.find((theme) => theme.id === Number(state.admin.selectedThemeId)) || null);
     const roleCards = computed(() => roleCardsFor(capabilities.value));
+    const favoriteProjects = computed(() => (state.dashboard?.follows || []).map((item) => item.project));
+    const releaseLatest = computed(() => latestRelease(state.meta.release));
+    const releaseHistoryItems = computed(() => releaseHistory(state.meta.release));
+    const profilePointer = { x: 0, y: 0 };
 
     onMounted(async () => {
       window.addEventListener("hashchange", handleRouteChange);
       window.addEventListener("scroll", handleScroll, { passive: true });
       window.addEventListener("keydown", handleKeydown);
+      window.addEventListener("pointermove", handlePointerMove, { passive: true });
       await boot();
     });
 
@@ -120,6 +137,7 @@ const App = {
       window.removeEventListener("hashchange", handleRouteChange);
       window.removeEventListener("scroll", handleScroll);
       window.removeEventListener("keydown", handleKeydown);
+      window.removeEventListener("pointermove", handlePointerMove);
     });
 
     watch(
@@ -175,6 +193,9 @@ const App = {
       if (state.route.name === "dashboard") {
         await loadDashboard();
       }
+      if (state.route.name === "favorites") {
+        await loadFavorites({ force: true });
+      }
       if (state.route.name === "admin") {
         await loadAdmin();
       }
@@ -190,10 +211,14 @@ const App = {
       state.loadingMore = true;
       state.loading = reset;
       try {
+        if (state.user && !state.favoritesLoaded) {
+          await loadFavorites();
+        }
         const data = await api.projects(state.filters);
         const existing = new Set(state.projects.map((item) => item.id));
         const fresh = data.results.filter((item) => !existing.has(item.id));
         state.projects = reset ? data.results : [...state.projects, ...fresh];
+        applyProjectFollowState();
         state.pagination = data.pagination;
         state.hasMoreProjects = Boolean(data.pagination?.has_next);
       } catch (error) {
@@ -218,10 +243,16 @@ const App = {
         state.loading = true;
       }
       state.currentProject = null;
+      state.currentProjectThemeSpace = null;
       try {
         state.currentProject = await api.project(id);
+        if (state.user && !state.favoritesLoaded) {
+          await loadFavorites();
+        }
+        applyProjectFollowState(state.currentProject);
         state.forms.score.score = state.currentProject.viewer_state?.score?.score || 8;
         state.forms.score.comment = state.currentProject.viewer_state?.score?.comment || "";
+        await loadProjectThemeSpace(state.currentProject.theme?.slug);
       } catch (error) {
         showToast(error.message);
       } finally {
@@ -271,6 +302,22 @@ const App = {
       }
     }
 
+    async function loadProjectThemeSpace(slug) {
+      state.currentProjectThemeSpace = null;
+      if (!slug) return;
+      if (state.projectThemeSpaces[slug]) {
+        state.currentProjectThemeSpace = state.projectThemeSpaces[slug];
+        return;
+      }
+      try {
+        const data = await api.themeSpace(slug);
+        state.projectThemeSpaces[slug] = data;
+        state.currentProjectThemeSpace = data;
+      } catch (error) {
+        showToast(error.message);
+      }
+    }
+
     async function loadDashboard() {
       if (!state.user) {
         navigate("login");
@@ -278,12 +325,29 @@ const App = {
       }
       state.loading = true;
       try {
-        state.dashboard = await api.dashboard();
+        syncDashboard(await api.dashboard());
       } catch (error) {
         showToast(error.message);
       } finally {
         state.loading = false;
       }
+    }
+
+    async function loadFavorites({ force = false } = {}) {
+      if (!state.user) {
+        navigate("login");
+        return;
+      }
+      if (state.favoritesLoaded && !force) return;
+      const data = await api.dashboard();
+      syncDashboard(data);
+      applyProjectFollowState();
+    }
+
+    function syncDashboard(data) {
+      state.dashboard = data;
+      state.favoriteProjectIds = (data.follows || []).map((item) => item.project.id);
+      state.favoritesLoaded = true;
     }
 
     async function loadAdmin() {
@@ -410,6 +474,10 @@ const App = {
     }
 
     async function selectSpace(slug) {
+      if (state.preview.open) {
+        state.preview.open = false;
+        state.preview.maximized = false;
+      }
       navigate("space", { slug });
     }
 
@@ -417,6 +485,8 @@ const App = {
       try {
         state.user = await api.login(state.forms.login);
         state.rbac = state.user.rbac;
+        state.favoritesLoaded = false;
+        state.favoriteProjectIds = [];
         showToast("登录成功");
         navigate(requiresPasswordChange() ? "password-change" : "dashboard");
       } catch (error) {
@@ -470,6 +540,8 @@ const App = {
       try {
         state.user = await api.register(state.forms.register);
         state.rbac = state.user.rbac;
+        state.favoritesLoaded = false;
+        state.favoriteProjectIds = [];
         showToast("注册成功");
         navigate("dashboard");
       } catch (error) {
@@ -485,6 +557,9 @@ const App = {
       await api.logout();
       state.user = null;
       state.dashboard = null;
+      state.favoriteProjectIds = [];
+      state.favoritesLoaded = false;
+      state.profileMenuOpen = false;
       state.rbac = await api.rbac();
       showToast("已退出");
       navigate("home");
@@ -492,18 +567,61 @@ const App = {
 
     async function toggleFollow(project) {
       if (!ensureLogin()) return;
+      const wasFollowing = isProjectFollowing(project);
       try {
-        if (project.viewer_state?.is_following) {
+        if (wasFollowing) {
           await api.unfollow(project.id);
-          project.viewer_state.is_following = false;
-          showToast("已取消关注");
+          setProjectFollowing(project, false);
+          showToast("已取消收藏");
         } else {
           await api.follow(project.id);
-          project.viewer_state = { ...(project.viewer_state || {}), is_following: true };
-          showToast("已关注课题");
+          setProjectFollowing(project, true);
+          showToast("已收藏课题");
         }
       } catch (error) {
         showToast(error.message);
+      }
+    }
+
+    function isProjectFollowing(project) {
+      if (!project) return false;
+      return Boolean(project.viewer_state?.is_following || state.favoriteProjectIds.includes(project.id));
+    }
+
+    function applyProjectFollowState(project = null) {
+      if (project) {
+        project.viewer_state = { ...(project.viewer_state || {}), is_following: isProjectFollowing(project) };
+        return;
+      }
+      state.projects.forEach((item) => applyProjectFollowState(item));
+      if (state.currentProject) applyProjectFollowState(state.currentProject);
+    }
+
+    function setProjectFollowing(project, following) {
+      const id = project.id;
+      const previous = isProjectFollowing(project);
+      state.favoriteProjectIds = following
+        ? Array.from(new Set([...state.favoriteProjectIds, id]))
+        : state.favoriteProjectIds.filter((item) => item !== id);
+      const targets = new Set([project, ...state.projects.filter((item) => item.id === id)]);
+      if (state.currentProject?.id === id) {
+        targets.add(state.currentProject);
+      }
+      targets.forEach((item) => updateProjectInstance(item, following, previous));
+      if (state.dashboard) {
+        if (following && !state.dashboard.follows.some((item) => item.project.id === id)) {
+          state.dashboard.follows = [{ id: `local-${id}`, project, created_at: new Date().toISOString() }, ...state.dashboard.follows];
+        }
+        if (!following) {
+          state.dashboard.follows = state.dashboard.follows.filter((item) => item.project.id !== id);
+        }
+      }
+    }
+
+    function updateProjectInstance(project, following, previous) {
+      project.viewer_state = { ...(project.viewer_state || {}), is_following: following };
+      if (following !== previous && typeof project.follow_count === "number") {
+        project.follow_count = Math.max(0, project.follow_count + (following ? 1 : -1));
       }
     }
 
@@ -790,7 +908,20 @@ const App = {
     function handleKeydown(event) {
       if (event.key === "Escape" && state.preview.open) {
         closeProjectPreview();
+        return;
       }
+      if (event.key === "Escape" && state.releaseModalOpen) {
+        closeReleaseModal();
+        return;
+      }
+      if (event.key === "Escape" && state.profileMenuOpen) {
+        closeProfileMenu();
+      }
+    }
+
+    function handlePointerMove(event) {
+      profilePointer.x = event.clientX;
+      profilePointer.y = event.clientY;
     }
 
     function requiresPasswordChange() {
@@ -885,6 +1016,56 @@ const App = {
       state.formState[errorKey] = rest;
     }
 
+    function openProfileMenu() {
+      window.clearTimeout(openProfileMenu.closeTimer);
+      state.profileMenuOpen = true;
+    }
+
+    function scheduleCloseProfileMenu() {
+      window.clearTimeout(openProfileMenu.closeTimer);
+      openProfileMenu.closeTimer = window.setTimeout(() => {
+        if (isPointerInProfileHoverZone()) return;
+        state.profileMenuOpen = false;
+      }, 520);
+    }
+
+    function isPointerInProfileHoverZone() {
+      const menuRect = document.querySelector(".profile-menu")?.getBoundingClientRect();
+      const popoverRect = document.querySelector(".profile-popover")?.getBoundingClientRect();
+      return isPointInsideProfileHoverZone(profilePointer, menuRect, popoverRect);
+    }
+
+    function closeProfileMenu() {
+      window.clearTimeout(openProfileMenu.closeTimer);
+      state.profileMenuOpen = false;
+    }
+
+    function openReleaseModal() {
+      state.releaseModalOpen = true;
+    }
+
+    function closeReleaseModal() {
+      state.releaseModalOpen = false;
+    }
+
+    function toggleReleaseVersion(version) {
+      state.expandedReleaseVersions = state.expandedReleaseVersions.includes(version)
+        ? state.expandedReleaseVersions.filter((item) => item !== version)
+        : [...state.expandedReleaseVersions, version];
+    }
+
+    function isReleaseVersionExpanded(version) {
+      return state.expandedReleaseVersions.includes(version);
+    }
+
+    function releaseSectionLabel(section) {
+      return {
+        Added: "新增",
+        Changed: "调整",
+        Fixed: "修复"
+      }[section] || section;
+    }
+
     function showToast(message) {
       state.toast = message;
       window.clearTimeout(showToast.timer);
@@ -903,6 +1084,9 @@ const App = {
       selectedSpaceSlug,
       selectedAdminTheme,
       roleCards,
+      favoriteProjects,
+      releaseLatest,
+      releaseHistoryItems,
       can,
       navigate,
       openProjectPreview,
@@ -917,6 +1101,16 @@ const App = {
       register,
       logout,
       toggleFollow,
+      isProjectFollowing,
+      openProfileMenu,
+      scheduleCloseProfileMenu,
+      closeProfileMenu,
+      openReleaseModal,
+      closeReleaseModal,
+      toggleReleaseVersion,
+      isReleaseVersionExpanded,
+      releaseSectionLabel,
+      sectionEntries,
       submitScore,
       submitInterest,
       submitClaim,
@@ -978,13 +1172,41 @@ const App = {
             <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'home'">library_books</span>
             <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'space'">folder_open</span>
             <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'dashboard'">space_dashboard</span>
+            <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'favorites'">bookmark</span>
             <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'admin'">settings</span>
             {{ item.label }}
           </button>
         </nav>
         <div class="account-area">
           <span class="role-pill"><span class="material-symbols-rounded" style="font-size: 14px;">badge</span> {{ roleInfo.role_label }}</span>
-          <button v-if="state.user" class="text-button" type="button" @click="navigate('dashboard')"><span class="material-symbols-rounded" style="font-size: 18px;">person</span> {{ state.user.profile?.display_name || state.user.username }}</button>
+          <button class="version-button" type="button" @click="openReleaseModal">v{{ state.meta.release?.version || '0.0.0' }}</button>
+          <div
+            v-if="state.user"
+            class="profile-menu"
+            :class="{ open: state.profileMenuOpen }"
+            @mouseenter="openProfileMenu"
+            @mouseleave="scheduleCloseProfileMenu"
+            @focusin="openProfileMenu"
+          >
+            <button class="text-button profile-trigger" type="button" @click="navigate('dashboard'); closeProfileMenu(); $event.currentTarget.blur()">
+              <span class="material-symbols-rounded" style="font-size: 18px;">person</span>
+              <span>{{ state.user.profile?.display_name || state.user.username }}</span>
+            </button>
+            <div class="profile-popover" role="dialog" aria-label="个人信息" @mouseenter="openProfileMenu">
+              <strong>{{ state.user.profile?.display_name || state.user.username }}</strong>
+              <small>{{ state.user.profile?.uid || '未分配 UID' }} · {{ state.user.profile?.role_type_label || roleInfo.role_label }}</small>
+              <dl>
+                <div><dt>机构</dt><dd>{{ state.user.profile?.organization || '未填写机构' }}</dd></div>
+                <div><dt>邮箱</dt><dd>{{ state.user.email || state.user.profile?.contact_email || '未填写邮箱' }}</dd></div>
+                <div><dt>积分</dt><dd>{{ state.user.profile?.credit_balance ?? 0 }}</dd></div>
+                <div><dt>声誉</dt><dd>{{ state.user.profile?.reputation_score ?? 0 }}</dd></div>
+              </dl>
+              <div class="profile-actions">
+                <button class="ghost-button" type="button" @click="navigate('dashboard'); closeProfileMenu(); $event.currentTarget.blur()">我的协作</button>
+                <button class="ghost-button" type="button" @click="navigate('favorites'); closeProfileMenu(); $event.currentTarget.blur()">我的收藏</button>
+              </div>
+            </div>
+          </div>
           <button v-if="state.user" class="ghost-button" type="button" @click="logout"><span class="material-symbols-rounded" style="font-size: 18px;">logout</span> 退出</button>
           <template v-else>
             <button class="ghost-button" type="button" @click="navigate('login')"><span class="material-symbols-rounded" style="font-size: 18px;">login</span> 登录</button>
@@ -994,7 +1216,7 @@ const App = {
       </header>
 
       <main class="page">
-        <div v-if="state.toast" class="toast">{{ state.toast }}</div>
+        <div v-if="state.toast && !state.preview.open" class="toast">{{ state.toast }}</div>
         <section v-if="state.booting" class="empty-state">
           <div class="loader"></div>
           <h2>正在载入课题库</h2>
@@ -1002,22 +1224,30 @@ const App = {
 
         <template v-else>
           <section v-if="activeView === 'home' || activeView === 'projects'" class="library-view">
-            <div class="library-hero" style="text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 100px 20px;">
-              <div style="max-width: 800px;">
-                <span class="eyebrow" style="background: rgba(20, 184, 166, 0.1); color: #0d9488; padding: 8px 16px; border-radius: 999px; margin-bottom: 24px; display: inline-flex;"><span class="material-symbols-rounded" style="font-size: 18px;">biotech</span> 全新一代医学 AI 课题库</span>
-                <h1 style="font-size: clamp(48px, 6vw, 72px); letter-spacing: -2px; margin: 24px 0; line-height: 1.1; color: #0f172a; font-weight: 800;">
-                  探索前沿医学人工智能
-                </h1>
-                <p style="font-size: 20px; color: #64748b; max-width: 600px; margin: 0 auto; line-height: 1.6;">
-                  真实临床场景驱动，从数据到算法，寻找改变未来的医学 AI 协作机会。
-                </p>
+            <div class="library-hero">
+              <div>
+                <span class="eyebrow"><span class="material-symbols-rounded" style="font-size: 18px;">biotech</span> 医学 AI 开放课题库</span>
+                <h1>课题库</h1>
+                <p>探索前沿医学人工智能课题，从真实临床场景、数据需求和协作角色快速判断是否值得参与。</p>
               </div>
+              <dl class="hero-stats">
+                <div><dt>课题</dt><dd>{{ stats.total }}</dd></div>
+                <div><dt>主题</dt><dd>{{ stats.themes }}</dd></div>
+                <div><dt>收藏</dt><dd>{{ stats.follows }}</dd></div>
+              </dl>
             </div>
 
-            <div class="toolbar" style="margin-top: -32px; border: none; box-shadow: 0 20px 40px -10px rgba(0,0,0,0.08); background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(24px); border-radius: 24px; padding: 16px 24px; z-index: 10; position: relative;">
+            <div class="toolbar">
               <label class="search-box">
                 <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">search</span> 搜索</span>
                 <input v-model="state.filters.q" type="search" placeholder="输入疾病、模型、任务或期刊" @keyup.enter="applyFilters" />
+              </label>
+              <label>
+                <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">category</span> 主题</span>
+                <select v-model="state.filters.theme" @change="applyFilters">
+                  <option value="">全部主题</option>
+                  <option v-for="theme in state.meta.themes" :key="theme.slug" :value="theme.slug">{{ theme.name }}</option>
+                </select>
               </label>
               <label>
                 <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">moving</span> 阶段</span>
@@ -1037,7 +1267,7 @@ const App = {
                   <option value="project_no">课题编号</option>
                 </select>
               </label>
-              <button class="primary-button" type="button" @click="applyFilters" style="height: 40px; margin-top: auto;"><span class="material-symbols-rounded">filter_list</span> 筛选</button>
+              <button class="primary-button" type="button" @click="applyFilters"><span class="material-symbols-rounded">filter_list</span> 筛选</button>
             </div>
 
             <div class="theme-strip">
@@ -1067,27 +1297,45 @@ const App = {
                 v-for="project in state.projects"
                 :key="project.id"
                 :data-project-id="project.id"
-                class="project-card"
+                class="project-card project-list-card"
                 role="button"
                 tabindex="0"
                 @click="openProjectPreview(project)"
                 @keyup.enter="openProjectPreview(project)"
               >
-                <div class="card-topline" style="margin-bottom: 16px;">
-                  <span style="display: flex; align-items: center; gap: 6px; background: #f1f5f9; padding: 4px 10px; border-radius: 6px; color: #475569; font-weight: 600;"><span class="material-symbols-rounded" style="font-size: 16px; color: #0ea5e9;">category</span> {{ project.theme?.name || '未分类' }}</span>
-                  <span style="display: flex; align-items: center; gap: 6px; color: #14b8a6; font-weight: 600;"><span class="material-symbols-rounded" style="font-size: 16px;">moving</span> {{ project.stage_label }}</span>
-                </div>
-                <h3 style="font-size: 24px; letter-spacing: -0.5px; margin-bottom: 12px; color: #0f172a;">{{ project.title }}</h3>
-                <p style="font-size: 15px; line-height: 1.6; color: #64748b; margin-bottom: 24px; flex-grow: 1;">{{ shortText(project.summary || project.problem_statement, 120) }}</p>
-                <div class="tag-row" style="margin-bottom: 24px;">
-                  <span v-for="tag in project.tags.slice(0, 3)" :key="tag.id" style="background: transparent; border: 1px solid #e2e8f0; color: #64748b; border-radius: 999px; padding: 4px 12px;">{{ tag.name }}</span>
-                </div>
-                <div class="card-actions" style="margin-top: auto; border-top: 1px solid #f1f5f9; padding-top: 20px;">
-                  <div style="display: flex; gap: 16px; color: #94a3b8; font-size: 14px; font-weight: 500;">
-                    <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 18px;">star</span> {{ displayScore(project.composite_score) }}</span>
-                    <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 18px;">group</span> {{ project.interest_count || 0 }}</span>
+                <div class="project-list-main">
+                  <div class="card-topline">
+                    <span><span class="material-symbols-rounded" style="font-size: 16px;">category</span> {{ project.theme?.name || '未分类' }}</span>
+                    <span>{{ project.topic_id }}<template v-if="project.project_no"> · #{{ project.project_no }}</template></span>
+                    <span>{{ project.stage_label }}</span>
                   </div>
-                  <button class="primary-button" type="button" @click.stop="openProjectPreview(project)" style="border-radius: 999px; padding: 8px 20px;"><span class="material-symbols-rounded" style="font-size: 18px;">arrow_forward</span> 探索课题</button>
+                  <h3>{{ project.title }}</h3>
+                  <p>{{ shortText(project.summary || project.problem_statement, 160) }}</p>
+                  <div class="project-key-fields">
+                    <div><dt>研究目标</dt><dd>{{ shortText(project.research_goal, 80) }}</dd></div>
+                    <div><dt>数据需求</dt><dd>{{ shortText(formatList(project.data_requirements), 80) }}</dd></div>
+                    <div><dt>评价指标</dt><dd>{{ shortText(formatList(project.evaluation_metrics), 80) }}</dd></div>
+                  </div>
+                  <div class="tag-row">
+                    <span v-for="tag in project.tags.slice(0, 5)" :key="tag.id">{{ tag.name }}</span>
+                    <span v-for="role in (project.needed_roles || []).slice(0, 4)" :key="role">{{ role }}</span>
+                  </div>
+                </div>
+                <div class="project-list-side">
+                  <dl class="card-metrics">
+                    <div><dt>综合评分</dt><dd>{{ displayScore(project.composite_score) }}</dd></div>
+                    <div><dt>收藏</dt><dd>{{ project.follow_count || 0 }}</dd></div>
+                    <div><dt>参与</dt><dd>{{ project.interest_count || 0 }}</dd></div>
+                  </dl>
+                  <div class="card-actions">
+                    <button class="ghost-button follow-button" :class="{ active: isProjectFollowing(project) }" type="button" @click.stop="toggleFollow(project)">
+                      <span class="material-symbols-rounded" style="font-size: 18px;">bookmark</span>
+                      {{ isProjectFollowing(project) ? '已收藏' : '收藏' }}
+                    </button>
+                    <button class="primary-button" type="button" @click.stop="openProjectPreview(project)">
+                      <span class="material-symbols-rounded" style="font-size: 18px;">arrow_forward</span> 查看
+                    </button>
+                  </div>
                 </div>
               </article>
             </div>
@@ -1119,7 +1367,9 @@ const App = {
               <div class="score-panel">
                 <strong>{{ displayScore(state.currentProject.composite_score) }}</strong>
                 <span>综合评分</span>
-                <button class="primary-button" type="button" @click="toggleFollow(state.currentProject)">关注课题</button>
+                <button class="primary-button follow-button" :class="{ active: isProjectFollowing(state.currentProject) }" type="button" @click="toggleFollow(state.currentProject)">
+                  {{ isProjectFollowing(state.currentProject) ? '已收藏' : '收藏课题' }}
+                </button>
               </div>
             </div>
 
@@ -1151,7 +1401,26 @@ const App = {
 
             <div class="detail-grid">
               <article class="content-panel">
-                <h2>课题文件</h2>
+                <h2>主题文件域</h2>
+                <div v-if="state.currentProjectThemeSpace?.sections?.length" class="theme-file-sections">
+                  <div class="domain-section" v-for="section in state.currentProjectThemeSpace.sections" :key="section.name">
+                    <div class="domain-section-head">
+                      <h3>{{ section.name }}</h3>
+                      <span>{{ section.files.length }} 个文件</span>
+                    </div>
+                    <div class="file-list">
+                      <a v-for="file in section.files.slice(0, 8)" :key="file.id" :href="file.path" target="_blank" rel="noreferrer">
+                        <span>{{ file.file_type_label || fileTypeLabel(file.file_type) }}</span>
+                        <strong>{{ file.title }}</strong>
+                        <small>{{ file.description || file.path }}</small>
+                      </a>
+                      <p v-if="!section.files.length">这个栏目还没有文件。</p>
+                    </div>
+                  </div>
+                  <button v-if="state.currentProject.theme?.slug" class="ghost-button" type="button" @click="selectSpace(state.currentProject.theme.slug)">查看主题文件空间</button>
+                </div>
+                <p v-else>{{ state.currentProject.theme?.slug ? '该主题还没有登记数据资产文件。' : '该课题暂无所属主题，无法关联主题文件域。' }}</p>
+                <h2 class="subsection-title">课题原始文档</h2>
                 <div class="file-list">
                   <a v-for="doc in state.currentProject.documents" :key="doc.id" :href="doc.path" target="_blank" rel="noreferrer">
                     <span>{{ fileTypeLabel(doc.doc_type) }}</span>
@@ -1188,8 +1457,8 @@ const App = {
             <div class="section-head">
               <div>
                 <span class="eyebrow">主题数据文件域</span>
-                <h1>一个主题对应一个数据资产空间。</h1>
-                <p>这里登记数据集文件、数据字典、标注规范、伦理合规材料和模型实验资产。单个课题原文、PDF、网页不属于主题文件域。</p>
+                <h1>文件空间</h1>
+                <p>按主题集中登记数据集、数据字典、标注规范、伦理合规材料和模型实验资产。</p>
               </div>
             </div>
             <div class="theme-strip">
@@ -1206,43 +1475,66 @@ const App = {
             </div>
             <div v-if="state.themeSpace" class="space-layout">
               <article class="content-panel space-domain-panel">
-                <div class="panel-title-row">
+                <div class="space-domain-hero">
                   <div>
                     <h2>{{ state.themeSpace.theme.name }}</h2>
                     <p>{{ state.themeSpace.theme.description || state.themeSpace.theme.file_space?.storage_policy }}</p>
                   </div>
+                  <div class="space-access-card">
+                    <span>访问级别</span>
+                    <strong>{{ state.themeSpace.theme.file_space?.access_level || 'public_metadata' }}</strong>
+                  </div>
                 </div>
-                <dl class="card-metrics wide">
+                <dl class="space-summary-row">
                   <div><dt>关联课题</dt><dd>{{ state.themeSpace.project_count }}</dd></div>
-                  <div><dt>数据资产</dt><dd>{{ state.themeSpace.file_count }}</dd></div>
-                  <div><dt>访问级别</dt><dd>{{ state.themeSpace.theme.file_space?.access_level || 'public_metadata' }}</dd></div>
+                  <div><dt>登记文件</dt><dd>{{ state.themeSpace.file_count }}</dd></div>
+                  <div><dt>文件类型</dt><dd>{{ state.themeSpace.theme.file_space?.allowed_file_types?.length || 0 }}</dd></div>
                 </dl>
-                <div class="policy-box">
-                  <strong>文件域策略</strong>
-                  <p>{{ state.themeSpace.theme.file_space?.storage_policy || '只登记主题级数据资产元信息，不登记单个课题原文、PDF 或公开页面。' }}</p>
-                  <div class="tag-row">
-                    <span v-for="type in state.themeSpace.theme.file_space?.allowed_file_types || []" :key="type">{{ fileTypeLabel(type) }}</span>
+                <div class="space-domain-grid">
+                  <section class="policy-box">
+                    <strong>文件域策略</strong>
+                    <p>{{ state.themeSpace.theme.file_space?.storage_policy || '只登记主题级数据资产元信息，不登记单个课题原文、PDF 或公开页面。' }}</p>
+                  </section>
+                  <section class="space-type-panel">
+                    <strong>允许登记的资产类型</strong>
+                    <div class="tag-row compact-tags">
+                      <span v-for="type in state.themeSpace.theme.file_space?.allowed_file_types || []" :key="type">{{ fileTypeLabel(type) }}</span>
+                      <span v-if="!state.themeSpace.theme.file_space?.allowed_file_types?.length">暂未配置</span>
+                    </div>
+                  </section>
+                </div>
+                <div v-if="!state.themeSpace.file_count" class="space-empty-callout">
+                  <span class="material-symbols-rounded" style="font-size: 28px;">folder_open</span>
+                  <div>
+                    <strong>当前主题还没有登记数据资产文件</strong>
+                    <p>这里会展示数据集、数据字典、标注规范、合规材料和模型实验资产。管理员可在“管理 / 主题与文件域”中维护。</p>
                   </div>
                 </div>
-                <div class="domain-section" v-for="section in state.themeSpace.sections" :key="section.name">
-                  <div class="domain-section-head">
-                    <h3>{{ section.name }}</h3>
-                    <span>{{ section.files.length }} 个文件</span>
-                  </div>
-                  <div class="file-list">
-                    <a v-for="file in section.files" :key="file.id" :href="file.path" target="_blank" rel="noreferrer">
-                      <span>{{ fileTypeLabel(file.file_type) }}</span>
-                      <strong>{{ file.title }}</strong>
-                      <small>{{ file.description || file.path }}</small>
-                    </a>
-                    <p v-if="!section.files.length">这个栏目还没有文件。</p>
+                <div class="space-section-grid">
+                  <div class="domain-section" v-for="section in state.themeSpace.sections" :key="section.name">
+                    <div class="domain-section-head">
+                      <h3>{{ section.name }}</h3>
+                      <span>{{ section.files.length }} 个文件</span>
+                    </div>
+                    <div class="file-list compact-file-list">
+                      <a v-for="file in section.files" :key="file.id" :href="file.path" target="_blank" rel="noreferrer">
+                        <span>{{ fileTypeLabel(file.file_type) }}</span>
+                        <strong>{{ file.title }}</strong>
+                        <small>{{ file.description || file.path }}</small>
+                      </a>
+                      <p v-if="!section.files.length">待登记 {{ section.name }}。</p>
+                    </div>
                   </div>
                 </div>
-                <p v-if="!state.themeSpace.file_count">该主题还没有登记数据资产文件，管理员可在“管理 / 主题与文件域”中新增。</p>
               </article>
-              <aside class="side-panel">
-                <h2>关联课题</h2>
-                <p>这些课题属于当前主题，可直接打开查看详情。</p>
+              <aside class="side-panel space-side-panel">
+                <div class="side-panel-head">
+                  <div>
+                    <h2>关联课题</h2>
+                    <p>属于当前主题的课题，可直接打开查看详情。</p>
+                  </div>
+                  <strong>{{ state.themeSpace.project_count }}</strong>
+                </div>
                 <div class="space-project-list">
                   <button
                     v-for="project in state.themeSpace.projects"
@@ -1278,6 +1570,57 @@ const App = {
               <article class="content-panel"><h2>参与意向</h2><p>{{ state.dashboard.interests.length }} 条</p></article>
               <article class="content-panel"><h2>评分记录</h2><p>{{ state.dashboard.scores.length }} 条</p></article>
             </div>
+          </section>
+
+          <section v-else-if="activeView === 'favorites'" class="favorites-view">
+            <div class="section-head">
+              <div>
+                <span class="eyebrow">我的收藏</span>
+                <h1>收藏课题</h1>
+                <p>集中查看和管理你收藏的课题。</p>
+              </div>
+            </div>
+            <div v-if="favoriteProjects.length" class="project-grid favorite-project-grid">
+              <article
+                v-for="project in favoriteProjects"
+                :key="project.id"
+                :data-project-id="project.id"
+                class="project-card project-list-card"
+                role="button"
+                tabindex="0"
+                @click="openProjectPreview(project)"
+                @keyup.enter="openProjectPreview(project)"
+              >
+                <div class="project-list-main">
+                  <div class="card-topline">
+                    <span>{{ project.theme?.name || '未分类' }}</span>
+                    <span>{{ project.topic_id }}</span>
+                    <span>{{ project.stage_label }}</span>
+                  </div>
+                  <h3>{{ project.title }}</h3>
+                  <p>{{ shortText(project.summary || project.problem_statement, 180) }}</p>
+                  <div class="tag-row">
+                    <span v-for="tag in project.tags.slice(0, 5)" :key="tag.id">{{ tag.name }}</span>
+                  </div>
+                </div>
+                <div class="project-list-side">
+                  <dl class="card-metrics">
+                    <div><dt>综合评分</dt><dd>{{ displayScore(project.composite_score) }}</dd></div>
+                    <div><dt>收藏</dt><dd>{{ project.follow_count || 0 }}</dd></div>
+                    <div><dt>参与</dt><dd>{{ project.interest_count || 0 }}</dd></div>
+                  </dl>
+                  <div class="card-actions">
+                    <button class="ghost-button danger" type="button" @click.stop="toggleFollow(project)">取消收藏</button>
+                    <button class="primary-button" type="button" @click.stop="openProjectPreview(project)">查看</button>
+                  </div>
+                </div>
+              </article>
+            </div>
+            <section v-else class="empty-state favorites-empty">
+              <h2>还没有收藏课题</h2>
+              <p>在课题列表或详情页点击收藏后，会集中显示在这里。</p>
+              <button class="primary-button" type="button" @click="navigate('projects')">去课题库</button>
+            </section>
           </section>
 
           <section v-else-if="activeView === 'admin'" class="admin-view">
@@ -1748,8 +2091,48 @@ const App = {
           </section>
         </template>
 
+        <div v-if="state.releaseModalOpen" class="release-modal-backdrop" @click.self="closeReleaseModal">
+          <section class="release-modal" role="dialog" aria-modal="true" aria-label="更新日志">
+            <header class="release-modal-header">
+              <div>
+                <span class="eyebrow">系统版本</span>
+                <h2>v{{ state.meta.release?.version || '0.0.0' }}</h2>
+              </div>
+              <button class="ghost-button" type="button" @click="closeReleaseModal">关闭</button>
+            </header>
+            <div v-if="releaseLatest" class="release-current">
+              <h3>最新版本 {{ releaseLatest.version }}</h3>
+              <small>{{ releaseLatest.date }}</small>
+              <div class="release-section" v-for="[section, items] in sectionEntries(releaseLatest.sections)" :key="section">
+                <strong>{{ releaseSectionLabel(section) }}</strong>
+                <ul>
+                  <li v-for="item in items" :key="item">{{ item }}</li>
+                </ul>
+              </div>
+            </div>
+            <div v-if="releaseHistoryItems.length" class="release-history">
+              <h3>历史版本</h3>
+              <div class="release-history-item" v-for="item in releaseHistoryItems" :key="item.version">
+                <button class="text-button release-history-trigger" type="button" @click="toggleReleaseVersion(item.version)">
+                  v{{ item.version }} · {{ item.date }}
+                  <span class="material-symbols-rounded" style="font-size: 18px;">{{ isReleaseVersionExpanded(item.version) ? 'expand_less' : 'expand_more' }}</span>
+                </button>
+                <div v-if="isReleaseVersionExpanded(item.version)" class="release-history-detail">
+                  <div class="release-section" v-for="[section, items] in sectionEntries(item.sections)" :key="section">
+                    <strong>{{ releaseSectionLabel(section) }}</strong>
+                    <ul>
+                      <li v-for="entry in items" :key="entry">{{ entry }}</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+
         <div v-if="state.preview.open" class="project-modal-backdrop" @click.self="closeProjectPreview">
           <section class="project-modal" :class="{ maximized: state.preview.maximized }" role="dialog" aria-modal="true">
+            <div v-if="state.toast" class="toast modal-toast">{{ state.toast }}</div>
             <header class="project-modal-header">
               <div>
                 <span class="eyebrow">课题详情</span>
@@ -1782,7 +2165,9 @@ const App = {
                   <div class="score-panel">
                     <strong>{{ displayScore(state.currentProject.composite_score) }}</strong>
                     <span>综合评分</span>
-                    <button class="primary-button" type="button" @click="toggleFollow(state.currentProject)">关注课题</button>
+                    <button class="primary-button follow-button" :class="{ active: isProjectFollowing(state.currentProject) }" type="button" @click="toggleFollow(state.currentProject)">
+                      {{ isProjectFollowing(state.currentProject) ? '已收藏' : '收藏课题' }}
+                    </button>
                   </div>
                 </div>
 
@@ -1814,7 +2199,26 @@ const App = {
 
                 <div class="detail-grid modal-detail-grid">
                   <article class="content-panel">
-                    <h2>课题文件</h2>
+                    <h2>主题文件域</h2>
+                    <div v-if="state.currentProjectThemeSpace?.sections?.length" class="theme-file-sections">
+                      <div class="domain-section" v-for="section in state.currentProjectThemeSpace.sections" :key="section.name">
+                        <div class="domain-section-head">
+                          <h3>{{ section.name }}</h3>
+                          <span>{{ section.files.length }} 个文件</span>
+                        </div>
+                        <div class="file-list">
+                          <a v-for="file in section.files.slice(0, 8)" :key="file.id" :href="file.path" target="_blank" rel="noreferrer">
+                            <span>{{ file.file_type_label || fileTypeLabel(file.file_type) }}</span>
+                            <strong>{{ file.title }}</strong>
+                            <small>{{ file.description || file.path }}</small>
+                          </a>
+                          <p v-if="!section.files.length">这个栏目还没有文件。</p>
+                        </div>
+                      </div>
+                      <button v-if="state.currentProject.theme?.slug" class="ghost-button" type="button" @click="selectSpace(state.currentProject.theme.slug)">查看主题文件空间</button>
+                    </div>
+                    <p v-else>{{ state.currentProject.theme?.slug ? '该主题还没有登记数据资产文件。' : '该课题暂无所属主题，无法关联主题文件域。' }}</p>
+                    <h2 class="subsection-title">课题原始文档</h2>
                     <div class="file-list">
                       <a v-for="doc in state.currentProject.documents" :key="doc.id" :href="doc.path" target="_blank" rel="noreferrer">
                         <span>{{ fileTypeLabel(doc.doc_type) }}</span>
@@ -1989,7 +2393,7 @@ function parseRoute() {
   if (!parts.length) return { name: "home", params: {}, fullPath: location.hash || "#/" };
   if (parts[0] === "project" && parts[1]) return { name: "project", params: { id: parts[1] }, fullPath: location.hash };
   if (parts[0] === "space") return { name: "space", params: { slug: parts[1] || "" }, fullPath: location.hash };
-  const known = new Set(["home", "projects", "dashboard", "admin", "login", "register", "password-reset", "password-change"]);
+  const known = new Set(["home", "projects", "dashboard", "favorites", "admin", "login", "register", "password-reset", "password-change"]);
   return { name: known.has(parts[0]) ? parts[0] : "home", params: {}, fullPath: location.hash };
 }
 

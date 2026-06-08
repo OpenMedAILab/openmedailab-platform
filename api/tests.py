@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
+from django.conf import settings
 from django.test import Client, TestCase, override_settings
 
 from credits.models import CreditLedger
@@ -97,6 +98,26 @@ class ApiTests(TestCase):
         self.assertIn("data_dictionary", theme_file_types)
         self.assertNotIn("markdown", theme_file_types)
         self.assertNotIn("pdf", theme_file_types)
+
+    def test_release_version_and_changelog_are_exposed_consistently(self):
+        version = (settings.BASE_DIR / "VERSION").read_text(encoding="utf-8").strip()
+        changelog = (settings.BASE_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
+
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+        self.assertIn(f"## {version} - ", changelog)
+
+        schema_response = self.client.get("/api/openapi.json")
+        self.assertEqual(schema_response.status_code, 200)
+        self.assertEqual(schema_response.json()["info"]["version"], version)
+
+        meta_response = self.client.get("/api/meta/")
+        self.assertEqual(meta_response.status_code, 200)
+        release = meta_response.json()["data"]["release"]
+        self.assertEqual(release["version"], version)
+        self.assertEqual(release["latest"]["version"], version)
+        self.assertIn("date", release["latest"])
+        self.assertTrue(release["latest"]["sections"])
+        self.assertIsInstance(release["history"], list)
 
     def test_theme_file_space_api(self):
         self.theme.file_space = {"sections": ["数据集文件", "数据字典"]}

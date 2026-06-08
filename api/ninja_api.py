@@ -15,6 +15,7 @@ from ninja import NinjaAPI, Schema
 from ninja.errors import HttpError, ValidationError
 from ninja.security import SessionAuth
 
+from config.release import APP_VERSION, release_payload
 from accounts.forms import RegisterForm, UserProfileForm
 from accounts.models import RoleType, UserProfile
 from accounts.services import (
@@ -59,7 +60,7 @@ from .serializers import (
 
 api = NinjaAPI(
     title="OpenMedAILab API",
-    version="0.1.0",
+    version=APP_VERSION,
     description="前后端分离 JSON API。认证使用 Django cookie session；写操作需要 X-CSRFToken。",
     docs_url="/docs",
     openapi_url="/openapi.json",
@@ -243,6 +244,7 @@ def meta(request):
             "participation_roles": choice_payload(ParticipationRole.choices),
             "claim_types": choice_payload(ClaimType.choices),
             "sponsor_types": choice_payload(SponsorType.choices),
+            "release": release_payload(),
         }
     )
 
