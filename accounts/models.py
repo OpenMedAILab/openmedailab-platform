@@ -3,7 +3,6 @@ from django.contrib.auth.models import User
 from django.db import models
 from django.db.models.signals import post_save
 from django.dispatch import receiver
-from django.utils import timezone
 
 
 PLATFORM_ADMIN_UID = "ADM00000001"
@@ -67,7 +66,6 @@ class UserProfile(models.Model):
     available_hours_per_week = models.PositiveSmallIntegerField(default=0)
     contact_email = models.EmailField(blank=True)
     email_normalized = models.EmailField(unique=True, null=True, blank=True, db_index=True)
-    email_verified_at = models.DateTimeField(null=True, blank=True)
     must_change_password = models.BooleanField(default=False)
     contact_wechat = models.CharField(max_length=80, blank=True)
     bio = models.TextField(blank=True)
@@ -101,32 +99,3 @@ def create_user_profile(sender, instance, created, **kwargs):
             email_normalized=email_normalized or None,
             credit_balance=getattr(settings, "OPENMEDAILAB_INITIAL_CREDITS", 100),
         )
-
-
-class AccountToken(models.Model):
-    class Purpose(models.TextChoices):
-        EMAIL_VERIFICATION = "email_verification", "邮箱验证"
-        PASSWORD_RESET = "password_reset", "密码重置"
-
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="account_tokens")
-    token_hash = models.CharField(max_length=64, db_index=True)
-    purpose = models.CharField(max_length=32, choices=Purpose.choices)
-    expires_at = models.DateTimeField()
-    used_at = models.DateTimeField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ["-created_at"]
-        indexes = [
-            models.Index(fields=["purpose", "token_hash"]),
-            models.Index(fields=["user", "purpose", "used_at"]),
-            models.Index(fields=["expires_at"]),
-        ]
-
-    @property
-    def is_active(self):
-        return self.used_at is None and self.expires_at > timezone.now()
-
-    def mark_used(self):
-        self.used_at = timezone.now()
-        self.save(update_fields=["used_at"])
