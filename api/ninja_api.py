@@ -1,21 +1,28 @@
 from datetime import date, datetime
 from decimal import Decimal
+import sys
 from typing import Any, Optional
 
+from django.conf import settings
 from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.forms import SetPasswordForm
+from django.contrib.auth.models import User
+from django.core.mail import send_mail
 from django.core.paginator import Paginator
 from django.db.models import Q
 from django.http import Http404
 from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from django.utils.text import slugify
 from ninja import NinjaAPI, Schema
 from ninja.errors import HttpError, ValidationError
 from ninja.security import SessionAuth
 
 from accounts.forms import RegisterForm, UserProfileForm
-from accounts.models import RoleType
-from credits.models import CreditLedger
+from accounts.models import AccountToken, RoleType, UserProfile, normalize_email
+from accounts.services import create_registered_user, reset_user_to_default_password
+from accounts.tokens import create_account_token, get_active_token
 from interactions.forms import ProjectClaimIntentForm, ProjectInterestForm, ProjectScoreForm, SponsorIntentForm
 from interactions.models import (
     ClaimType,
@@ -124,6 +131,26 @@ class ClaimRequest(Schema):
 class SponsorRequest(Schema):
     sponsor_type: str
     note: Optional[str] = ""
+
+
+class EmailVerificationConfirmRequest(Schema):
+    token: str
+
+
+class PasswordResetRequest(Schema):
+    email: str
+
+
+class PasswordResetConfirmRequest(Schema):
+    uid: str
+    token: str
+    password1: str
+    password2: str
+
+
+class RequiredPasswordChangeRequest(Schema):
+    password1: str
+    password2: str
 
 
 class ThemeWriteRequest(Schema):
@@ -280,14 +307,7 @@ def register(request, payload: RegisterRequest):
     form = RegisterForm(data)
     if not form.is_valid():
         return fail("Registration failed.", status=422, code="validation_error", errors=form_errors(form))
-    user = form.save()
-    CreditLedger.objects.create(
-        user=user,
-        action_type=CreditLedger.ActionType.REGISTER_BONUS,
-        amount=user.profile.credit_balance,
-        balance_after=user.profile.credit_balance,
-        reason="注册初始积分",
-    )
+    user = create_registered_user(form)
     login(request, user)
     return 201, ok(user_payload(user))
 
@@ -305,6 +325,79 @@ def login_view(request, payload: LoginRequest):
 def logout_view(request):
     logout(request)
     return ok({"logged_out": True})
+
+
+@api.post("/auth/email-verification/request/", response={200: Envelope, 401: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Auth"])
+def email_verification_request(request):
+    auth_error = require_login(request)
+    if auth_error:
+        return auth_error
+    profile = request.user.profile
+    email = normalize_email(request.user.email or profile.contact_email)
+    if not email:
+        return fail("Email is required.", status=422, code="validation_error", errors={"email": [{"message": "邮箱不能为空。", "code": "required"}]})
+    if profile.email_verified_at:
+        return ok({"email_verified": True, "email_verified_at": profile.email_verified_at})
+    raw_token, _ = create_account_token(request.user, AccountToken.Purpose.EMAIL_VERIFICATION, ttl_minutes=24 * 60)
+    send_account_email(
+        subject="OpenMedAILab 邮箱验证",
+        message=f"请使用该验证码完成邮箱验证：{raw_token}",
+        recipient=email,
+    )
+    data = {"email_verified": False, "message": "验证邮件已发送。"}
+    if expose_auth_debug_tokens():
+        data["debug_token"] = raw_token
+    return ok(data)
+
+
+@api.post("/auth/email-verification/confirm/", response={200: Envelope, 422: ErrorEnvelope}, tags=["Auth"], auth=None)
+def email_verification_confirm(request, payload: EmailVerificationConfirmRequest):
+    token = get_active_token(payload.token, AccountToken.Purpose.EMAIL_VERIFICATION)
+    if not token:
+        return fail("Invalid or expired token.", status=422, code="invalid_token")
+    profile = token.user.profile
+    profile.email_verified_at = timezone.now()
+    profile.save(update_fields=["email_verified_at", "updated_at"])
+    token.mark_used()
+    return ok({"email_verified": True, "email_verified_at": profile.email_verified_at})
+
+
+@api.post("/auth/password-reset/request/", response={200: Envelope}, tags=["Auth"], auth=None)
+def password_reset_request(request, payload: PasswordResetRequest):
+    return ok({"message": "密码重置请联系系统管理员。系统管理员会恢复默认密码并要求你首次登录后修改密码。"})
+
+
+@api.post("/auth/password-reset/confirm/", response={400: ErrorEnvelope}, tags=["Auth"], auth=None)
+def password_reset_confirm(request, payload: PasswordResetConfirmRequest):
+    return fail("Email password reset is disabled. Please contact the system administrator.", status=400, code="password_reset_disabled")
+
+
+@api.post("/auth/password/change-required/", response={200: Envelope, 401: ErrorEnvelope, 400: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Auth"])
+def password_change_required(request, payload: RequiredPasswordChangeRequest):
+    auth_error = require_login(request)
+    if auth_error:
+        return auth_error
+    if not request.user.profile.must_change_password:
+        return fail("Password change is not required.", status=400, code="password_change_not_required")
+    form = SetPasswordForm(
+        request.user,
+        {"new_password1": payload.password1, "new_password2": payload.password2},
+    )
+    if not form.is_valid():
+        return fail("Password reset failed.", status=422, code="validation_error", errors=password_reset_form_errors(form))
+    if request.user.check_password(payload.password1):
+        return fail(
+            "Password reset failed.",
+            status=422,
+            code="validation_error",
+            errors={"password1": [{"message": "新密码不能与默认密码相同。", "code": "password_unchanged"}]},
+        )
+    form.save()
+    profile = request.user.profile
+    profile.must_change_password = False
+    profile.save(update_fields=["must_change_password", "updated_at"])
+    logout(request)
+    return ok({"password_changed": True, "logged_out": True})
 
 
 @api.get("/me/profile/", response={200: Envelope, 401: ErrorEnvelope}, tags=["Me"])
@@ -425,6 +518,50 @@ def dashboard(request):
     sponsors = SponsorIntent.objects.filter(user=request.user).select_related("project", "project__theme").prefetch_related("project__tags").order_by("-updated_at")
     scores = ProjectScore.objects.filter(user=request.user).select_related("project", "project__theme").prefetch_related("project__tags").order_by("-updated_at")
     return ok(dashboard_payload(request.user, follows, interests, claims, sponsors, scores))
+
+
+@api.get("/admin/users/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Admin"])
+def admin_user_list(request, q: str = "", page: int = 1, page_size: int = 50):
+    auth_error = require_capability(request, "manage_users")
+    if auth_error:
+        return auth_error
+    users = User.objects.select_related("profile").order_by("id")
+    q = q.strip()
+    if q:
+        users = users.filter(
+            Q(username__icontains=q)
+            | Q(email__icontains=q)
+            | Q(profile__uid__icontains=q)
+            | Q(profile__display_name__icontains=q)
+        ).distinct()
+    page_size = max(1, min(page_size, 200))
+    paginator = Paginator(users, page_size)
+    page_obj = paginator.get_page(page)
+    return ok(
+        {
+            "results": [user_payload(user) for user in page_obj.object_list],
+            "pagination": {
+                "page": page_obj.number,
+                "page_size": page_size,
+                "total_pages": paginator.num_pages,
+                "total_count": paginator.count,
+                "has_next": page_obj.has_next(),
+                "has_previous": page_obj.has_previous(),
+            },
+        }
+    )
+
+
+@api.post("/admin/users/{uid}/reset-password/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope}, tags=["Admin"])
+def admin_user_reset_password(request, uid: str):
+    auth_error = require_capability(request, "manage_users")
+    if auth_error:
+        return auth_error
+    profile = get_object_or_404(UserProfile.objects.select_related("user"), uid=uid)
+    default_password = reset_user_to_default_password(profile.user)
+    profile.refresh_from_db()
+    audit(request.user, "user.reset_password", "User", profile.user_id, after={"uid": uid, "must_change_password": True})
+    return ok({"user": user_payload(profile.user), "default_password": default_password})
 
 
 @api.get("/admin/themes/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Admin"])
@@ -819,6 +956,31 @@ def ok(data=None):
 
 def fail(message, status=400, code="bad_request", errors=None):
     return status, error_payload(message, code, errors)
+
+
+def send_account_email(subject, message, recipient):
+    send_mail(subject, message, None, [recipient], fail_silently=True)
+
+
+def expose_auth_debug_tokens():
+    return (
+        settings.DEBUG
+        or getattr(settings, "OPENMEDAILAB_EXPOSE_AUTH_DEBUG_TOKENS", False)
+        or "test" in sys.argv
+    )
+
+
+def password_reset_form_errors(form):
+    errors = form_errors(form)
+    mapped = {}
+    for key, value in errors.items():
+        if key == "new_password1":
+            mapped["password1"] = value
+        elif key == "new_password2":
+            mapped["password2"] = value
+        else:
+            mapped[key] = value
+    return mapped
 
 
 def error_payload(message, code="bad_request", errors=None):

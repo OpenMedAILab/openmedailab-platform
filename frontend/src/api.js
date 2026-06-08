@@ -41,6 +41,11 @@ export async function request(path, options = {}) {
   });
 
   const payload = await response.json().catch(() => null);
+  if (isCsrfFailure(response, payload) && isUnsafe && !options.skipCsrf && !options.csrfRetry) {
+    csrfToken = "";
+    await initCsrf();
+    return request(path, { ...options, csrfRetry: true });
+  }
   if (!response.ok || !payload?.ok) {
     const message = payload?.error?.message || `请求失败：${response.status}`;
     throw new ApiError(message, response, payload);
@@ -58,7 +63,12 @@ export const api = {
   profile: (payload) => request("/api/me/profile/", { method: "PATCH", body: payload }),
   login: (payload) => request("/api/auth/login/", { method: "POST", body: payload }),
   register: (payload) => request("/api/auth/register/", { method: "POST", body: payload }),
-  logout: () => request("/api/auth/logout/", { method: "POST", body: {} }),
+  requestEmailVerification: () => request("/api/auth/email-verification/request/", { method: "POST", body: {} }),
+  confirmEmailVerification: (payload) => request("/api/auth/email-verification/confirm/", { method: "POST", body: payload }),
+  requestPasswordReset: (payload) => request("/api/auth/password-reset/request/", { method: "POST", body: payload }),
+  confirmPasswordReset: (payload) => request("/api/auth/password-reset/confirm/", { method: "POST", body: payload }),
+  changeRequiredPassword: (payload) => request("/api/auth/password/change-required/", { method: "POST", body: payload }),
+  logout,
   projects: (params = {}) => request(`/api/projects/?${new URLSearchParams(cleanParams(params))}`),
   project: (id) => request(`/api/projects/${id}/`),
   follow: (id) => request(`/api/projects/${id}/follow/`, { method: "POST", body: {} }),
@@ -75,6 +85,8 @@ export const api = {
   adminCreateThemeFile: (payload) => request("/api/admin/theme-files/", { method: "POST", body: payload }),
   adminUpdateThemeFile: (id, payload) => request(`/api/admin/theme-files/${id}/`, { method: "PATCH", body: payload }),
   adminDeleteThemeFile: (id) => request(`/api/admin/theme-files/${id}/`, { method: "DELETE", body: {} }),
+  adminUsers: (params = {}) => request(`/api/admin/users/?${new URLSearchParams(cleanParams(params))}`),
+  adminResetUserPassword: (uid) => request(`/api/admin/users/${encodeURIComponent(uid)}/reset-password/`, { method: "POST", body: {} }),
   adminProjects: (params = {}) => request(`/api/admin/projects/?${new URLSearchParams(cleanParams(params))}`),
   adminProject: (id) => request(`/api/admin/projects/${id}/`),
   adminCreateProject: (payload) => request("/api/admin/projects/", { method: "POST", body: payload }),
@@ -85,4 +97,19 @@ export const api = {
 
 function cleanParams(params) {
   return Object.fromEntries(Object.entries(params).filter(([, value]) => value !== "" && value !== null && value !== undefined));
+}
+
+function isCsrfFailure(response, payload) {
+  return response.status === 403 && payload?.error?.code === "csrf_failed";
+}
+
+async function logout() {
+  try {
+    return await request("/api/auth/logout/", { method: "POST", body: {} });
+  } catch (error) {
+    if (error instanceof ApiError && error.response?.status === 401) {
+      return { logged_out: true, already_logged_out: true };
+    }
+    throw error;
+  }
 }

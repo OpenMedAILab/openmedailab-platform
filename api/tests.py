@@ -1,8 +1,13 @@
 import json
+import importlib.util
+from unittest.mock import patch
 
 from django.contrib.auth.models import User
+from django.core.management import call_command
 from django.test import Client, TestCase
 
+from accounts.models import AccountToken
+from credits.models import CreditLedger
 from interactions.models import ProjectFollow, ProjectInterest, ProjectScore
 from projects.models import Project, ProjectStage, Tag, Theme, ThemeFile
 
@@ -67,6 +72,13 @@ class ApiTests(TestCase):
         schema = schema_response.json()
         self.assertIn("/api/projects/", schema["paths"])
         self.assertIn("RegisterRequest", schema["components"]["schemas"])
+        self.assertIn("/api/auth/email-verification/request/", schema["paths"])
+        self.assertIn("/api/auth/email-verification/confirm/", schema["paths"])
+        self.assertIn("/api/auth/password-reset/request/", schema["paths"])
+        self.assertIn("/api/auth/password-reset/confirm/", schema["paths"])
+        self.assertIn("/api/auth/password/change-required/", schema["paths"])
+        self.assertIn("/api/admin/users/", schema["paths"])
+        self.assertIn("/api/admin/users/{uid}/reset-password/", schema["paths"])
         self.assertIn("/api/admin/projects/import-json/", schema["paths"])
         self.assertIn("/api/admin/theme-files/", schema["paths"])
         self.assertIn("/api/admin/projects/{project_id}/", schema["paths"])
@@ -124,7 +136,13 @@ class ApiTests(TestCase):
         self.assertEqual(response.json()["error"]["code"], "csrf_failed")
 
     def test_admin_can_manage_theme_and_import_project_json(self):
-        admin = User.objects.create_user(username="adminuser", password="StrongPass12345", is_staff=True)
+        call_command(
+            "ensure_platform_admin",
+            username="platform_admin",
+            email="admin@example.com",
+            password="StrongPass12345",
+        )
+        admin = User.objects.get(username="platform_admin")
         self.client.force_login(admin)
 
         theme_response = self.post_json(
@@ -221,7 +239,10 @@ class ApiTests(TestCase):
             },
         )
         self.assertEqual(register_response.status_code, 201)
-        self.assertEqual(register_response.json()["data"]["profile"]["credit_balance"], 100)
+        register_payload = register_response.json()["data"]
+        self.assertEqual(register_payload["profile"]["credit_balance"], 100)
+        self.assertEqual(register_payload["profile"]["uid"], f"S{register_payload['id']:08d}")
+        self.assertFalse(register_payload["profile"]["email_verified"])
 
         follow_response = self.post_json(f"/api/projects/{self.project.pk}/follow/", {})
         self.assertEqual(follow_response.status_code, 200)
@@ -244,6 +265,347 @@ class ApiTests(TestCase):
         self.assertEqual(len(dashboard_payload["follows"]), 1)
         self.assertEqual(len(dashboard_payload["scores"]), 1)
         self.assertEqual(len(dashboard_payload["interests"]), 1)
+
+    def test_register_validation_errors_include_field_details(self):
+        User.objects.create_user(username="existing", email="taken@example.com", password="StrongPass12345")
+
+        duplicate_username = self.post_json(
+            "/api/auth/register/",
+            {
+                "username": "existing",
+                "email": "fresh@example.com",
+                "display_name": "Duplicate",
+                "role_type": "student",
+                "password1": "StrongPass12345",
+                "password2": "StrongPass12345",
+            },
+        )
+        self.assertEqual(duplicate_username.status_code, 422)
+        self.assertIn("username", duplicate_username.json()["error"]["details"])
+
+        duplicate_email = self.post_json(
+            "/api/auth/register/",
+            {
+                "username": "freshuser",
+                "email": "TAKEN@example.com",
+                "display_name": "Duplicate Email",
+                "role_type": "student",
+                "password1": "StrongPass12345",
+                "password2": "StrongPass12345",
+            },
+        )
+        self.assertEqual(duplicate_email.status_code, 422)
+        self.assertIn("email", duplicate_email.json()["error"]["details"])
+
+        missing_email = self.post_json(
+            "/api/auth/register/",
+            {
+                "username": "missingemail",
+                "display_name": "Missing Email",
+                "role_type": "student",
+                "password1": "StrongPass12345",
+                "password2": "StrongPass12345",
+            },
+        )
+        self.assertEqual(missing_email.status_code, 422)
+        self.assertIn("email", missing_email.json()["error"]["details"])
+
+        invalid_email = self.post_json(
+            "/api/auth/register/",
+            {
+                "username": "bademail",
+                "email": "not-an-email",
+                "display_name": "Bad Email",
+                "role_type": "student",
+                "password1": "StrongPass12345",
+                "password2": "StrongPass12345",
+            },
+        )
+        self.assertEqual(invalid_email.status_code, 422)
+        self.assertIn("email", invalid_email.json()["error"]["details"])
+
+        weak_password = self.post_json(
+            "/api/auth/register/",
+            {
+                "username": "weakpass",
+                "email": "weak@example.com",
+                "display_name": "Weak",
+                "role_type": "student",
+                "password1": "123",
+                "password2": "123",
+            },
+        )
+        self.assertEqual(weak_password.status_code, 422)
+        self.assertIn("password2", weak_password.json()["error"]["details"])
+
+        mismatch = self.post_json(
+            "/api/auth/register/",
+            {
+                "username": "mismatch",
+                "email": "mismatch@example.com",
+                "display_name": "Mismatch",
+                "role_type": "student",
+                "password1": "StrongPass12345",
+                "password2": "OtherPass12345",
+            },
+        )
+        self.assertEqual(mismatch.status_code, 422)
+        self.assertIn("password2", mismatch.json()["error"]["details"])
+
+        invalid_role = self.post_json(
+            "/api/auth/register/",
+            {
+                "username": "badrole",
+                "email": "badrole@example.com",
+                "display_name": "Bad Role",
+                "role_type": "admin",
+                "password1": "StrongPass12345",
+                "password2": "StrongPass12345",
+            },
+        )
+        self.assertEqual(invalid_role.status_code, 422)
+        self.assertIn("role_type", invalid_role.json()["error"]["details"])
+
+    def test_profile_contact_email_keeps_global_email_unique(self):
+        User.objects.create_user(username="emailowner", email="owner@example.com", password="StrongPass12345")
+        user = User.objects.create_user(username="profileeditor", email="editor@example.com", password="StrongPass12345")
+        self.client.force_login(user)
+
+        response = self.patch_json("/api/me/profile/", {"contact_email": "OWNER@example.com"})
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("contact_email", response.json()["error"]["details"])
+
+    def test_register_uid_prefixes_and_uid_is_immutable(self):
+        role_prefixes = {
+            "student": "S",
+            "doctor": "D",
+            "teacher": "T",
+            "ai_engineer": "E",
+            "statistician": "M",
+            "sponsor": "F",
+            "other": "U",
+        }
+        for role, prefix in role_prefixes.items():
+            response = self.post_json(
+                "/api/auth/register/",
+                {
+                    "username": f"{role}user",
+                    "email": f"{role}@example.com",
+                    "display_name": role,
+                    "role_type": role,
+                    "password1": "StrongPass12345",
+                    "password2": "StrongPass12345",
+                },
+            )
+            self.assertEqual(response.status_code, 201)
+            profile = response.json()["data"]["profile"]
+            self.assertTrue(profile["uid"].startswith(prefix))
+
+        user = User.objects.get(username="studentuser")
+        self.client.force_login(user)
+        original_uid = user.profile.uid
+        profile_response = self.patch_json("/api/me/profile/", {"role_type": "doctor"})
+        self.assertEqual(profile_response.status_code, 200)
+        user.profile.refresh_from_db()
+        self.assertEqual(user.profile.uid, original_uid)
+
+    def test_email_verification_flow(self):
+        register_response = self.post_json(
+            "/api/auth/register/",
+            {
+                "username": "verifyuser",
+                "email": "verify@example.com",
+                "display_name": "Verify User",
+                "role_type": "student",
+                "password1": "StrongPass12345",
+                "password2": "StrongPass12345",
+            },
+        )
+        self.assertEqual(register_response.status_code, 201)
+        self.assertFalse(register_response.json()["data"]["profile"]["email_verified"])
+
+        request_response = self.post_json("/api/auth/email-verification/request/", {})
+        self.assertEqual(request_response.status_code, 200)
+        token = request_response.json()["data"]["debug_token"]
+
+        confirm_response = self.post_json("/api/auth/email-verification/confirm/", {"token": token})
+        self.assertEqual(confirm_response.status_code, 200)
+        self.assertTrue(confirm_response.json()["data"]["email_verified"])
+
+        invalid_response = self.post_json("/api/auth/email-verification/confirm/", {"token": "bad-token"})
+        self.assertEqual(invalid_response.status_code, 422)
+
+    def test_password_reset_request_directs_user_to_admin_without_email_token(self):
+        register_response = self.post_json(
+            "/api/auth/register/",
+            {
+                "username": "resetuser",
+                "email": "reset@example.com",
+                "display_name": "Reset User",
+                "role_type": "student",
+                "password1": "StrongPass12345",
+                "password2": "StrongPass12345",
+            },
+        )
+        self.assertEqual(register_response.status_code, 201)
+        self.client.logout()
+
+        missing_response = self.post_json("/api/auth/password-reset/request/", {"email": "missing@example.com"})
+        self.assertEqual(missing_response.status_code, 200)
+        self.assertNotIn("debug_token", missing_response.json()["data"])
+        self.assertIn("系统管理员", missing_response.json()["data"]["message"])
+
+        request_response = self.post_json("/api/auth/password-reset/request/", {"email": "RESET@example.com"})
+        self.assertEqual(request_response.status_code, 200)
+        self.assertNotIn("debug_token", request_response.json()["data"])
+        self.assertNotIn("uid", request_response.json()["data"])
+        self.assertFalse(AccountToken.objects.filter(purpose=AccountToken.Purpose.PASSWORD_RESET).exists())
+
+        confirm_response = self.post_json(
+            "/api/auth/password-reset/confirm/",
+            {"uid": "S00000001", "token": "disabled", "password1": "NewStrongPass12345", "password2": "NewStrongPass12345"},
+        )
+        self.assertEqual(confirm_response.status_code, 400)
+        self.assertEqual(confirm_response.json()["error"]["code"], "password_reset_disabled")
+
+    def test_admin_resets_password_to_default_and_user_must_change_before_using_system(self):
+        call_command(
+            "ensure_platform_admin",
+            username="platform_admin",
+            email="admin@example.com",
+            password="StrongPass12345",
+        )
+        user = User.objects.create_user(username="resetbyadmin", email="resetbyadmin@example.com", password="StrongPass12345")
+        uid = user.profile.uid
+
+        admin = User.objects.get(username="platform_admin")
+        self.client.force_login(admin)
+        list_response = self.client.get("/api/admin/users/?q=resetbyadmin")
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(list_response.json()["data"]["results"][0]["profile"]["uid"], uid)
+
+        reset_response = self.post_json(f"/api/admin/users/{uid}/reset-password/", {})
+        self.assertEqual(reset_response.status_code, 200)
+        reset_payload = reset_response.json()["data"]
+        default_password = reset_payload["default_password"]
+        self.assertRegex(default_password, r"^resetbyadmin\d{6}$")
+        self.assertTrue(reset_payload["user"]["profile"]["must_change_password"])
+
+        user.refresh_from_db()
+        self.assertTrue(user.profile.must_change_password)
+        self.assertTrue(user.check_password(default_password))
+
+        self.client.logout()
+        login_response = self.post_json("/api/auth/login/", {"username": "resetbyadmin", "password": default_password})
+        self.assertEqual(login_response.status_code, 200)
+        self.assertTrue(login_response.json()["data"]["profile"]["must_change_password"])
+
+        me_response = self.client.get("/api/me/")
+        self.assertEqual(me_response.status_code, 200)
+        blocked_response = self.client.get("/api/me/dashboard/")
+        self.assertEqual(blocked_response.status_code, 403)
+        self.assertEqual(blocked_response.json()["error"]["code"], "password_change_required")
+        public_blocked_response = self.client.get("/api/projects/")
+        self.assertEqual(public_blocked_response.status_code, 403)
+
+        weak_response = self.post_json(
+            "/api/auth/password/change-required/",
+            {"password1": "123", "password2": "123"},
+        )
+        self.assertEqual(weak_response.status_code, 422)
+        self.assertIn("password2", weak_response.json()["error"]["details"])
+
+        change_response = self.post_json(
+            "/api/auth/password/change-required/",
+            {"password1": "NewStrongPass12345", "password2": "NewStrongPass12345"},
+        )
+        self.assertEqual(change_response.status_code, 200)
+        self.assertTrue(change_response.json()["data"]["logged_out"])
+
+        user.refresh_from_db()
+        self.assertFalse(user.profile.must_change_password)
+        dashboard_after_logout = self.client.get("/api/me/dashboard/")
+        self.assertEqual(dashboard_after_logout.status_code, 401)
+        default_login = self.post_json("/api/auth/login/", {"username": "resetbyadmin", "password": default_password})
+        self.assertEqual(default_login.status_code, 400)
+        new_login = self.post_json("/api/auth/login/", {"username": "resetbyadmin", "password": "NewStrongPass12345"})
+        self.assertEqual(new_login.status_code, 200)
+        dashboard_response = self.client.get("/api/me/dashboard/")
+        self.assertEqual(dashboard_response.status_code, 200)
+
+    def test_regular_user_cannot_reset_another_users_password(self):
+        user = User.objects.create_user(username="targetuser", email="target@example.com", password="StrongPass12345")
+        normal = User.objects.create_user(username="normalresetter", email="normalresetter@example.com", password="StrongPass12345")
+        self.client.force_login(normal)
+
+        response = self.post_json(f"/api/admin/users/{user.profile.uid}/reset-password/", {})
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_register_rolls_back_when_credit_ledger_fails(self):
+        with self.assertRaises(RuntimeError):
+            with patch("accounts.services.CreditLedger.objects.create", side_effect=RuntimeError("ledger failed")):
+                self.post_json(
+                    "/api/auth/register/",
+                    {
+                        "username": "rollbackuser",
+                        "email": "rollback@example.com",
+                        "display_name": "Rollback User",
+                        "role_type": "student",
+                        "password1": "StrongPass12345",
+                        "password2": "StrongPass12345",
+                    },
+                )
+        self.assertFalse(User.objects.filter(username="rollbackuser").exists())
+
+    def test_register_rolls_back_when_uid_generation_fails(self):
+        with self.assertRaises(RuntimeError):
+            with patch("accounts.models.uid_for_user", side_effect=RuntimeError("uid failed")):
+                self.post_json(
+                    "/api/auth/register/",
+                    {
+                        "username": "uidrollback",
+                        "email": "uidrollback@example.com",
+                        "display_name": "UID Rollback",
+                        "role_type": "student",
+                        "password1": "StrongPass12345",
+                        "password2": "StrongPass12345",
+                    },
+                )
+        self.assertFalse(User.objects.filter(username="uidrollback").exists())
+
+    def test_repeated_register_request_does_not_duplicate_credit_ledger(self):
+        payload = {
+            "username": "singleledger",
+            "email": "singleledger@example.com",
+            "display_name": "Single Ledger",
+            "role_type": "student",
+            "password1": "StrongPass12345",
+            "password2": "StrongPass12345",
+        }
+        first_response = self.post_json("/api/auth/register/", payload)
+        self.assertEqual(first_response.status_code, 201)
+        self.client.logout()
+
+        second_response = self.post_json("/api/auth/register/", payload)
+        self.assertEqual(second_response.status_code, 422)
+        self.assertIn("username", second_response.json()["error"]["details"])
+
+        user = User.objects.get(username="singleledger")
+        self.assertEqual(User.objects.filter(email__iexact="singleledger@example.com").count(), 1)
+        self.assertEqual(
+            CreditLedger.objects.filter(user=user, action_type=CreditLedger.ActionType.REGISTER_BONUS).count(),
+            1,
+        )
+
+    def test_legacy_api_views_do_not_expose_register_implementation(self):
+        spec = importlib.util.find_spec("api.views")
+        if spec is None:
+            return
+        import api.views as legacy_views
+
+        self.assertFalse(hasattr(legacy_views, "register"))
 
     def test_login_api(self):
         User.objects.create_user(username="loginuser", password="StrongPass12345")

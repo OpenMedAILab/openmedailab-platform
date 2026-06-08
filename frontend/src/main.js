@@ -58,15 +58,28 @@ const state = reactive({
     themeFiles: [],
     themeFilePagination: {},
     themeFileForm: emptyThemeFileForm(),
+    users: [],
+    userPagination: {},
+    userFilters: { q: "", page: 1, page_size: 50 },
+    loadingUsers: false,
+    resettingUid: "",
+    passwordResetResult: null,
     importText: ""
   },
   forms: {
     login: { username: "", password: "" },
     register: { username: "", email: "", display_name: "", role_type: "student", password1: "", password2: "" },
+    passwordChange: { password1: "", password2: "" },
     score: { score: 8, comment: "" },
     interest: { role: "学生", available_hours_per_week: 4, experience: "", message: "" },
     claim: { claim_type: "literature", message: "" },
     sponsor: { sponsor_type: "compute", note: "" }
+  },
+  formState: {
+    registerSubmitting: false,
+    registerErrors: {},
+    passwordChangeSubmitting: false,
+    passwordChangeErrors: {}
   }
 });
 
@@ -82,6 +95,7 @@ const App = {
       interests: state.projects.reduce((sum, item) => sum + (item.interest_count || 0), 0)
     }));
     const navItems = computed(() => {
+      if (requiresPasswordChange()) return [];
       const items = [
         { name: "home", label: "课题库" },
         { name: "space", label: "文件空间" }
@@ -131,6 +145,10 @@ const App = {
         state.schema = schema;
         state.admin.importText = JSON.stringify({ themes: [], projects: [schema.example] }, null, 2);
         state.booting = false;
+        if (requiresPasswordChange() && state.route.name !== "password-change") {
+          navigate("password-change");
+          return;
+        }
         await loadRouteData();
       } catch (error) {
         showToast(error.message || "系统初始化失败");
@@ -141,6 +159,10 @@ const App = {
 
     async function loadRouteData() {
       if (state.booting) return;
+      if (requiresPasswordChange() && state.route.name !== "password-change") {
+        navigate("password-change");
+        return;
+      }
       if (["home", "projects"].includes(state.route.name)) {
         await loadProjects({ reset: true });
       }
@@ -273,7 +295,7 @@ const App = {
         if (!state.admin.selectedThemeId && themes.results.length) {
           state.admin.selectedThemeId = themes.results[0].id;
         }
-        await Promise.all([loadAdminProjects({ reset: true }), loadThemeFiles()]);
+        await Promise.all([loadAdminProjects({ reset: true }), loadThemeFiles(), loadAdminUsers({ reset: true })]);
       } catch (error) {
         showToast(error.message);
       } finally {
@@ -311,6 +333,49 @@ const App = {
       await loadAdminProjects();
     }
 
+    async function loadAdminUsers({ reset = false } = {}) {
+      if (!can("manage_users")) return;
+      if (reset) {
+        state.admin.userFilters.page = 1;
+        state.admin.users = [];
+        state.admin.passwordResetResult = null;
+      }
+      state.admin.loadingUsers = true;
+      try {
+        const data = await api.adminUsers(state.admin.userFilters);
+        state.admin.users = data.results;
+        state.admin.userPagination = data.pagination;
+      } catch (error) {
+        showToast(error.message);
+      } finally {
+        state.admin.loadingUsers = false;
+      }
+    }
+
+    async function searchAdminUsers() {
+      await loadAdminUsers({ reset: true });
+    }
+
+    async function resetUserPassword(user) {
+      if (!can("manage_users") || state.admin.resettingUid) return;
+      const uid = user.profile?.uid;
+      if (!uid) return;
+      const confirmed = window.confirm(`确认将「${user.username}」恢复为默认密码吗？`);
+      if (!confirmed) return;
+      state.admin.resettingUid = uid;
+      state.admin.passwordResetResult = null;
+      try {
+        const data = await api.adminResetUserPassword(uid);
+        state.admin.passwordResetResult = data;
+        await loadAdminUsers();
+        showToast("默认密码已生成，请线下告知用户。");
+      } catch (error) {
+        showToast(error.message);
+      } finally {
+        state.admin.resettingUid = "";
+      }
+    }
+
     async function applyFilters() {
       navigate("projects");
       await loadProjects({ reset: true });
@@ -330,20 +395,66 @@ const App = {
         state.user = await api.login(state.forms.login);
         state.rbac = state.user.rbac;
         showToast("登录成功");
-        navigate("dashboard");
+        navigate(requiresPasswordChange() ? "password-change" : "dashboard");
       } catch (error) {
         showToast(error.message);
       }
     }
 
+    async function changeRequiredPassword() {
+      if (state.formState.passwordChangeSubmitting) return;
+      state.formState.passwordChangeErrors = {};
+      const form = state.forms.passwordChange;
+      if (!form.password1) {
+        state.formState.passwordChangeErrors = { password1: ["请输入新密码。"] };
+        showToast("请输入新密码。");
+        return;
+      }
+      if (form.password1 !== form.password2) {
+        state.formState.passwordChangeErrors = { password2: ["两次输入的密码不一致。"] };
+        showToast("两次输入的密码不一致。");
+        return;
+      }
+      state.formState.passwordChangeSubmitting = true;
+      try {
+        await api.changeRequiredPassword(form);
+        state.user = null;
+        state.dashboard = null;
+        state.forms.login.password = "";
+        state.forms.passwordChange = { password1: "", password2: "" };
+        state.rbac = await api.rbac();
+        showToast("密码已修改，请使用新密码重新登录。");
+        navigate("login");
+      } catch (error) {
+        const errors = errorsFromApi(error);
+        state.formState.passwordChangeErrors = errors;
+        showToast(firstErrorMessage(errors, error.message));
+      } finally {
+        state.formState.passwordChangeSubmitting = false;
+      }
+    }
+
     async function register() {
+      if (state.formState.registerSubmitting) return;
+      state.formState.registerErrors = {};
+      const clientErrors = validateRegisterForm();
+      if (hasAnyErrors(clientErrors)) {
+        state.formState.registerErrors = clientErrors;
+        showToast(firstErrorMessage(clientErrors, "请检查注册信息。"));
+        return;
+      }
+      state.formState.registerSubmitting = true;
       try {
         state.user = await api.register(state.forms.register);
         state.rbac = state.user.rbac;
         showToast("注册成功");
         navigate("dashboard");
       } catch (error) {
-        showToast(error.message);
+        const errors = errorsFromApi(error);
+        state.formState.registerErrors = errors;
+        showToast(firstErrorMessage(errors, error.message));
+      } finally {
+        state.formState.registerSubmitting = false;
       }
     }
 
@@ -593,8 +704,11 @@ const App = {
       }
     }
 
-    function setAdminTab(tab) {
+    async function setAdminTab(tab) {
       state.admin.activeTab = tab;
+      if (tab === "users") {
+        await loadAdminUsers({ reset: true });
+      }
     }
 
     function useExampleJson() {
@@ -656,6 +770,98 @@ const App = {
       }
     }
 
+    function requiresPasswordChange() {
+      return Boolean(state.user?.profile?.must_change_password);
+    }
+
+    function validateRegisterForm() {
+      const form = state.forms.register;
+      const errors = {};
+      const email = form.email.trim();
+      if (!form.username.trim()) errors.username = ["请输入用户名。"];
+      if (!email) {
+        errors.email = ["请输入邮箱。"];
+      } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        errors.email = ["请输入有效的邮箱地址。"];
+      }
+      if (!form.role_type) errors.role_type = ["请选择身份。"];
+      if (!form.password1) {
+        errors.password1 = ["请输入密码。"];
+      } else if (form.password1.length < 8) {
+        errors.password1 = ["密码至少需要 8 个字符。"];
+      }
+      if (!form.password2) {
+        errors.password2 = ["请再次输入密码。"];
+      } else if (form.password1 && form.password1 !== form.password2) {
+        errors.password2 = ["两次输入的密码不一致。"];
+      }
+      return errors;
+    }
+
+    function errorsFromApi(error) {
+      const details = error?.payload?.error?.details;
+      if (!details || typeof details !== "object" || Array.isArray(details)) return {};
+      return Object.fromEntries(
+        Object.entries(details).map(([field, value]) => [field, normalizeErrorMessages(value)])
+      );
+    }
+
+    function normalizeErrorMessages(value) {
+      const values = Array.isArray(value) ? value : [value];
+      return values
+        .map((item) => {
+          if (!item) return "";
+          if (typeof item === "string") return item;
+          if (item.message) return item.message;
+          if (item.msg) return item.msg;
+          if (item.code) return item.code;
+          return String(item);
+        })
+        .filter(Boolean);
+    }
+
+    function hasAnyErrors(errors) {
+      return Object.values(errors || {}).some((messages) => messages.length > 0);
+    }
+
+    function firstErrorMessage(errors, fallback = "请求失败") {
+      for (const messages of Object.values(errors || {})) {
+        if (messages?.length) return messages[0];
+      }
+      return fallback;
+    }
+
+    function fieldErrors(errorKey, field) {
+      return state.formState[errorKey]?.[field] || [];
+    }
+
+    function hasFieldError(errorKey, field) {
+      return fieldErrors(errorKey, field).length > 0;
+    }
+
+    function fieldErrorId(formName, field) {
+      return `${formName}-${field}-error`;
+    }
+
+    function describedBy(formName, errorKey, field, hintId = "") {
+      const ids = [];
+      if (hintId) ids.push(hintId);
+      if (hasFieldError(errorKey, field)) ids.push(fieldErrorId(formName, field));
+      return ids.length ? ids.join(" ") : null;
+    }
+
+    function formSummaryErrors(errorKey) {
+      const errors = state.formState[errorKey] || {};
+      return [...(errors.__all__ || []), ...(errors.non_field_errors || [])];
+    }
+
+    function clearFieldError(errorKey, field) {
+      const errors = state.formState[errorKey] || {};
+      if (!errors[field]) return;
+      const { [field]: _removed, ...rest } = errors;
+      state.formState[errorKey] = rest;
+    }
+
     function showToast(message) {
       state.toast = message;
       window.clearTimeout(showToast.timer);
@@ -684,6 +890,7 @@ const App = {
       selectSpace,
       loadMoreProjects,
       login,
+      changeRequiredPassword,
       register,
       logout,
       toggleFollow,
@@ -704,6 +911,8 @@ const App = {
       deactivateThemeFile,
       selectAdminTheme,
       setAdminTab,
+      searchAdminUsers,
+      resetUserPassword,
       useExampleJson,
       importJson,
       archiveProject,
@@ -714,7 +923,13 @@ const App = {
       roleCountEntries,
       formatList,
       fileTypeLabel,
-      stageLabel
+      stageLabel,
+      fieldErrors,
+      hasFieldError,
+      fieldErrorId,
+      describedBy,
+      formSummaryErrors,
+      clearFieldError
     };
   },
   template: `
@@ -1054,6 +1269,7 @@ const App = {
               <div class="admin-tabs" role="tablist" aria-label="管理功能">
                 <button type="button" :class="{ active: state.admin.activeTab === 'projects' }" @click="setAdminTab('projects')">课题管理</button>
                 <button type="button" :class="{ active: state.admin.activeTab === 'themes' }" @click="setAdminTab('themes')">主题与文件域</button>
+                <button type="button" :class="{ active: state.admin.activeTab === 'users' }" @click="setAdminTab('users')">用户管理</button>
                 <button type="button" :class="{ active: state.admin.activeTab === 'import' }" @click="setAdminTab('import')">JSON 导入</button>
                 <button type="button" :class="{ active: state.admin.activeTab === 'schema' }" @click="setAdminTab('schema')">字段契约</button>
               </div>
@@ -1249,6 +1465,48 @@ const App = {
                 </article>
               </section>
 
+              <section v-else-if="state.admin.activeTab === 'users'" class="content-panel">
+                <div class="panel-title-row">
+                  <div>
+                    <h2>用户管理</h2>
+                    <p>管理员可按 UID、用户名或邮箱查找用户，并恢复默认密码。</p>
+                  </div>
+                </div>
+                <div v-if="state.admin.passwordResetResult" class="form-success password-result" role="status">
+                  <strong>{{ state.admin.passwordResetResult.user.username }} 的默认密码</strong>
+                  <code>{{ state.admin.passwordResetResult.default_password }}</code>
+                  <span>请线下告知用户。用户登录后必须修改新密码并重新登录。</span>
+                </div>
+                <div class="admin-filter-row">
+                  <input v-model="state.admin.userFilters.q" type="search" placeholder="搜索 UID、用户名、邮箱或昵称" @keyup.enter="searchAdminUsers" />
+                  <button class="ghost-button" type="button" @click="searchAdminUsers">查询</button>
+                </div>
+                <div class="admin-table user-table">
+                  <div class="admin-table-head">
+                    <span>用户</span>
+                    <span>UID</span>
+                    <span>身份</span>
+                    <span>状态</span>
+                    <span>操作</span>
+                  </div>
+                  <div class="admin-table-row" v-for="user in state.admin.users" :key="user.id">
+                    <span>
+                      <strong>{{ user.username }}</strong>
+                      <small>{{ user.email || user.profile?.contact_email || '未填写邮箱' }}</small>
+                    </span>
+                    <span>{{ user.profile?.uid || '-' }}</span>
+                    <span>{{ user.profile?.role_type_label || '注册用户' }}</span>
+                    <span>{{ user.profile?.must_change_password ? '待修改默认密码' : '正常' }}</span>
+                    <span class="button-row">
+                      <button class="ghost-button danger" type="button" :disabled="state.admin.resettingUid === user.profile?.uid" @click="resetUserPassword(user)">
+                        {{ state.admin.resettingUid === user.profile?.uid ? '正在重置' : '恢复默认密码' }}
+                      </button>
+                    </span>
+                  </div>
+                </div>
+                <p v-if="!state.admin.loadingUsers && !state.admin.users.length">没有找到匹配用户。</p>
+              </section>
+
               <section v-else-if="state.admin.activeTab === 'import'" class="content-panel">
                 <div class="panel-title-row">
                   <div>
@@ -1286,25 +1544,181 @@ const App = {
           <section v-else-if="activeView === 'login'" class="auth-view">
             <form class="auth-card" @submit.prevent="login">
               <h1>登录</h1>
-              <input v-model="state.forms.login.username" type="text" placeholder="用户名" autocomplete="username" />
-              <input v-model="state.forms.login.password" type="password" placeholder="密码" autocomplete="current-password" />
-              <button class="primary-button" type="submit">登录</button>
+              <label for="login-username">
+                <span>用户名</span>
+                <input id="login-username" v-model="state.forms.login.username" name="username" type="text" placeholder="用户名" autocomplete="username" />
+              </label>
+              <label for="login-password">
+                <span>密码</span>
+                <input id="login-password" v-model="state.forms.login.password" name="password" type="password" placeholder="密码" autocomplete="current-password" />
+              </label>
+              <button class="primary-button" type="submit"><span class="material-symbols-rounded" style="font-size: 18px;">login</span> 登录</button>
+              <button class="text-button auth-link" type="button" @click="navigate('password-reset')">忘记密码</button>
+            </form>
+          </section>
+
+          <section v-else-if="activeView === 'password-change'" class="auth-view">
+            <form class="auth-card" @submit.prevent="changeRequiredPassword" novalidate>
+              <h1>修改默认密码</h1>
+              <p class="auth-note">当前账号使用管理员恢复的默认密码登录。请设置新密码，系统会自动退出，你需要用新密码重新登录后才能继续使用。</p>
+              <label for="change-password1" :class="{ 'has-error': hasFieldError('passwordChangeErrors', 'password1') }">
+                <span>新密码 <em aria-hidden="true">*</em></span>
+                <input
+                  id="change-password1"
+                  v-model="state.forms.passwordChange.password1"
+                  name="password1"
+                  type="password"
+                  autocomplete="new-password"
+                  required
+                  :aria-invalid="hasFieldError('passwordChangeErrors', 'password1') ? 'true' : 'false'"
+                  :aria-describedby="describedBy('password-change', 'passwordChangeErrors', 'password1', 'change-password-help')"
+                  @input="clearFieldError('passwordChangeErrors', 'password1')"
+                />
+                <small id="change-password-help" class="field-hint">至少 8 个字符，不能继续使用管理员给出的默认密码。</small>
+                <div v-if="hasFieldError('passwordChangeErrors', 'password1')" :id="fieldErrorId('password-change', 'password1')" class="field-error" role="alert">
+                  <p v-for="message in fieldErrors('passwordChangeErrors', 'password1')" :key="message">{{ message }}</p>
+                </div>
+              </label>
+              <label for="change-password2" :class="{ 'has-error': hasFieldError('passwordChangeErrors', 'password2') }">
+                <span>确认新密码 <em aria-hidden="true">*</em></span>
+                <input
+                  id="change-password2"
+                  v-model="state.forms.passwordChange.password2"
+                  name="password2"
+                  type="password"
+                  autocomplete="new-password"
+                  required
+                  :aria-invalid="hasFieldError('passwordChangeErrors', 'password2') ? 'true' : 'false'"
+                  :aria-describedby="describedBy('password-change', 'passwordChangeErrors', 'password2')"
+                  @input="clearFieldError('passwordChangeErrors', 'password2')"
+                />
+                <div v-if="hasFieldError('passwordChangeErrors', 'password2')" :id="fieldErrorId('password-change', 'password2')" class="field-error" role="alert">
+                  <p v-for="message in fieldErrors('passwordChangeErrors', 'password2')" :key="message">{{ message }}</p>
+                </div>
+              </label>
+              <button class="primary-button" type="submit" :disabled="state.formState.passwordChangeSubmitting">
+                <span class="material-symbols-rounded" style="font-size: 18px;">lock_reset</span>
+                {{ state.formState.passwordChangeSubmitting ? '正在修改' : '修改并重新登录' }}
+              </button>
+              <button class="text-button auth-link" type="button" @click="logout">退出登录</button>
             </form>
           </section>
 
           <section v-else-if="activeView === 'register'" class="auth-view">
-            <form class="auth-card" @submit.prevent="register">
+            <form class="auth-card" @submit.prevent="register" novalidate>
               <h1>注册</h1>
-              <input v-model="state.forms.register.username" type="text" placeholder="用户名" autocomplete="username" />
-              <input v-model="state.forms.register.email" type="email" placeholder="邮箱" />
-              <input v-model="state.forms.register.display_name" type="text" placeholder="昵称" />
-              <select v-model="state.forms.register.role_type">
-                <option v-for="role in state.meta.profile_roles" :key="role.value" :value="role.value">{{ role.label }}</option>
-              </select>
-              <input v-model="state.forms.register.password1" type="password" placeholder="密码" autocomplete="new-password" />
-              <input v-model="state.forms.register.password2" type="password" placeholder="确认密码" autocomplete="new-password" />
-              <button class="primary-button" type="submit">创建账号</button>
+              <div v-if="formSummaryErrors('registerErrors').length" class="form-error-summary" role="alert">
+                <strong>注册信息需要调整</strong>
+                <p v-for="message in formSummaryErrors('registerErrors')" :key="message">{{ message }}</p>
+              </div>
+              <label for="register-username" :class="{ 'has-error': hasFieldError('registerErrors', 'username') }">
+                <span>用户名 <em aria-hidden="true">*</em></span>
+                <input
+                  id="register-username"
+                  v-model="state.forms.register.username"
+                  name="username"
+                  type="text"
+                  placeholder="用户名"
+                  autocomplete="username"
+                  required
+                  :aria-invalid="hasFieldError('registerErrors', 'username') ? 'true' : 'false'"
+                  :aria-describedby="describedBy('register', 'registerErrors', 'username')"
+                  @input="clearFieldError('registerErrors', 'username')"
+                />
+                <div v-if="hasFieldError('registerErrors', 'username')" :id="fieldErrorId('register', 'username')" class="field-error" role="alert">
+                  <p v-for="message in fieldErrors('registerErrors', 'username')" :key="message">{{ message }}</p>
+                </div>
+              </label>
+              <label for="register-email" :class="{ 'has-error': hasFieldError('registerErrors', 'email') }">
+                <span>邮箱 <em aria-hidden="true">*</em></span>
+                <input
+                  id="register-email"
+                  v-model="state.forms.register.email"
+                  name="email"
+                  type="email"
+                  placeholder="邮箱"
+                  autocomplete="email"
+                  required
+                  :aria-invalid="hasFieldError('registerErrors', 'email') ? 'true' : 'false'"
+                  :aria-describedby="describedBy('register', 'registerErrors', 'email')"
+                  @input="clearFieldError('registerErrors', 'email')"
+                />
+                <div v-if="hasFieldError('registerErrors', 'email')" :id="fieldErrorId('register', 'email')" class="field-error" role="alert">
+                  <p v-for="message in fieldErrors('registerErrors', 'email')" :key="message">{{ message }}</p>
+                </div>
+              </label>
+              <label for="register-display-name">
+                <span>昵称</span>
+                <input id="register-display-name" v-model="state.forms.register.display_name" name="display_name" type="text" placeholder="昵称" autocomplete="name" />
+              </label>
+              <label for="register-role" :class="{ 'has-error': hasFieldError('registerErrors', 'role_type') }">
+                <span>身份 <em aria-hidden="true">*</em></span>
+                <select
+                  id="register-role"
+                  v-model="state.forms.register.role_type"
+                  name="role_type"
+                  required
+                  :aria-invalid="hasFieldError('registerErrors', 'role_type') ? 'true' : 'false'"
+                  :aria-describedby="describedBy('register', 'registerErrors', 'role_type')"
+                  @change="clearFieldError('registerErrors', 'role_type')"
+                >
+                  <option v-for="role in state.meta.profile_roles" :key="role.value" :value="role.value">{{ role.label }}</option>
+                </select>
+                <div v-if="hasFieldError('registerErrors', 'role_type')" :id="fieldErrorId('register', 'role_type')" class="field-error" role="alert">
+                  <p v-for="message in fieldErrors('registerErrors', 'role_type')" :key="message">{{ message }}</p>
+                </div>
+              </label>
+              <label for="register-password1" :class="{ 'has-error': hasFieldError('registerErrors', 'password1') }">
+                <span>密码 <em aria-hidden="true">*</em></span>
+                <input
+                  id="register-password1"
+                  v-model="state.forms.register.password1"
+                  name="password1"
+                  type="password"
+                  placeholder="密码"
+                  autocomplete="new-password"
+                  required
+                  :aria-invalid="hasFieldError('registerErrors', 'password1') ? 'true' : 'false'"
+                  :aria-describedby="describedBy('register', 'registerErrors', 'password1', 'register-password-help')"
+                  @input="clearFieldError('registerErrors', 'password1')"
+                />
+                <small id="register-password-help" class="field-hint">至少 8 个字符，建议包含字母和数字。</small>
+                <div v-if="hasFieldError('registerErrors', 'password1')" :id="fieldErrorId('register', 'password1')" class="field-error" role="alert">
+                  <p v-for="message in fieldErrors('registerErrors', 'password1')" :key="message">{{ message }}</p>
+                </div>
+              </label>
+              <label for="register-password2" :class="{ 'has-error': hasFieldError('registerErrors', 'password2') }">
+                <span>确认密码 <em aria-hidden="true">*</em></span>
+                <input
+                  id="register-password2"
+                  v-model="state.forms.register.password2"
+                  name="password2"
+                  type="password"
+                  placeholder="确认密码"
+                  autocomplete="new-password"
+                  required
+                  :aria-invalid="hasFieldError('registerErrors', 'password2') ? 'true' : 'false'"
+                  :aria-describedby="describedBy('register', 'registerErrors', 'password2')"
+                  @input="clearFieldError('registerErrors', 'password2')"
+                />
+                <div v-if="hasFieldError('registerErrors', 'password2')" :id="fieldErrorId('register', 'password2')" class="field-error" role="alert">
+                  <p v-for="message in fieldErrors('registerErrors', 'password2')" :key="message">{{ message }}</p>
+                </div>
+              </label>
+              <button class="primary-button" type="submit" :disabled="state.formState.registerSubmitting">
+                <span class="material-symbols-rounded" style="font-size: 18px;">person_add</span>
+                {{ state.formState.registerSubmitting ? '正在创建' : '创建账号' }}
+              </button>
             </form>
+          </section>
+
+          <section v-else-if="activeView === 'password-reset'" class="auth-view">
+            <div class="auth-card">
+              <h1>找回密码</h1>
+              <p class="auth-note">平台不通过邮箱发送重置链接。请联系系统管理员，由管理员将你的账号恢复为默认密码。</p>
+              <p class="auth-note">拿到默认密码后回到登录页登录，系统会强制要求你修改新密码；修改成功后需要重新登录。</p>
+              <button class="text-button auth-link" type="button" @click="navigate('login')">返回登录</button>
+            </div>
           </section>
         </template>
 
@@ -1549,7 +1963,7 @@ function parseRoute() {
   if (!parts.length) return { name: "home", params: {}, fullPath: location.hash || "#/" };
   if (parts[0] === "project" && parts[1]) return { name: "project", params: { id: parts[1] }, fullPath: location.hash };
   if (parts[0] === "space") return { name: "space", params: { slug: parts[1] || "" }, fullPath: location.hash };
-  const known = new Set(["home", "projects", "dashboard", "admin", "login", "register"]);
+  const known = new Set(["home", "projects", "dashboard", "admin", "login", "register", "password-reset", "password-change"]);
   return { name: known.has(parts[0]) ? parts[0] : "home", params: {}, fullPath: location.hash };
 }
 
