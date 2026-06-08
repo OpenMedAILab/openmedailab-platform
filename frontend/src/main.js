@@ -360,7 +360,7 @@ const App = {
       if (!can("manage_users") || state.admin.resettingUid) return;
       const uid = user.profile?.uid;
       if (!uid) return;
-      const confirmed = window.confirm(`确认将「${user.username}」恢复为默认密码吗？`);
+      const confirmed = window.confirm(`确认将「${user.username}」恢复为系统默认密码吗？`);
       if (!confirmed) return;
       state.admin.resettingUid = uid;
       state.admin.passwordResetResult = null;
@@ -368,11 +368,34 @@ const App = {
         const data = await api.adminResetUserPassword(uid);
         state.admin.passwordResetResult = data;
         await loadAdminUsers();
-        showToast("默认密码已生成，请线下告知用户。");
+        showToast("已恢复为系统统一默认密码，请线下告知用户。");
       } catch (error) {
         showToast(error.message);
       } finally {
         state.admin.resettingUid = "";
+      }
+    }
+
+    async function copyDefaultPassword() {
+      const password = state.admin.passwordResetResult?.default_password;
+      if (!password) return;
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(password);
+        } else {
+          const textarea = document.createElement("textarea");
+          textarea.value = password;
+          textarea.setAttribute("readonly", "");
+          textarea.style.position = "fixed";
+          textarea.style.opacity = "0";
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand("copy");
+          document.body.removeChild(textarea);
+        }
+        showToast("默认密码已复制。");
+      } catch (error) {
+        showToast("复制失败，请手动复制。");
       }
     }
 
@@ -913,6 +936,7 @@ const App = {
       setAdminTab,
       searchAdminUsers,
       resetUserPassword,
+      copyDefaultPassword,
       useExampleJson,
       importJson,
       archiveProject,
@@ -1469,12 +1493,13 @@ const App = {
                 <div class="panel-title-row">
                   <div>
                     <h2>用户管理</h2>
-                    <p>管理员可按 UID、用户名或邮箱查找用户，并恢复默认密码。</p>
+                    <p>管理员可按 UID、用户名或邮箱查找用户，并恢复为系统统一默认密码。</p>
                   </div>
                 </div>
                 <div v-if="state.admin.passwordResetResult" class="form-success password-result" role="status">
-                  <strong>{{ state.admin.passwordResetResult.user.username }} 的默认密码</strong>
+                  <strong>{{ state.admin.passwordResetResult.user.username }} 的系统默认密码</strong>
                   <code>{{ state.admin.passwordResetResult.default_password }}</code>
+                  <button class="ghost-button" type="button" @click="copyDefaultPassword">复制</button>
                   <span>请线下告知用户。用户登录后必须修改新密码并重新登录。</span>
                 </div>
                 <div class="admin-filter-row">
@@ -1498,8 +1523,9 @@ const App = {
                     <span>{{ user.profile?.role_type_label || '注册用户' }}</span>
                     <span>{{ user.profile?.must_change_password ? '待修改默认密码' : '正常' }}</span>
                     <span class="button-row">
-                      <button class="ghost-button danger" type="button" :disabled="state.admin.resettingUid === user.profile?.uid" @click="resetUserPassword(user)">
-                        {{ state.admin.resettingUid === user.profile?.uid ? '正在重置' : '恢复默认密码' }}
+                      <span v-if="user.id === state.user?.id" class="self-reset-note">当前管理员</span>
+                      <button v-else class="ghost-button danger" type="button" :disabled="state.admin.resettingUid === user.profile?.uid" @click="resetUserPassword(user)">
+                        {{ state.admin.resettingUid === user.profile?.uid ? '正在恢复' : '恢复为系统默认密码' }}
                       </button>
                     </span>
                   </div>
@@ -1560,7 +1586,7 @@ const App = {
           <section v-else-if="activeView === 'password-change'" class="auth-view">
             <form class="auth-card" @submit.prevent="changeRequiredPassword" novalidate>
               <h1>修改默认密码</h1>
-              <p class="auth-note">当前账号使用管理员恢复的默认密码登录。请设置新密码，系统会自动退出，你需要用新密码重新登录后才能继续使用。</p>
+              <p class="auth-note">当前账号使用管理员恢复的系统默认密码登录。请设置新密码，系统会自动退出，你需要用新密码重新登录后才能继续使用。</p>
               <label for="change-password1" :class="{ 'has-error': hasFieldError('passwordChangeErrors', 'password1') }">
                 <span>新密码 <em aria-hidden="true">*</em></span>
                 <input
@@ -1574,7 +1600,7 @@ const App = {
                   :aria-describedby="describedBy('password-change', 'passwordChangeErrors', 'password1', 'change-password-help')"
                   @input="clearFieldError('passwordChangeErrors', 'password1')"
                 />
-                <small id="change-password-help" class="field-hint">至少 8 个字符，不能继续使用管理员给出的默认密码。</small>
+                <small id="change-password-help" class="field-hint">至少 8 个字符，不能继续使用系统默认密码。</small>
                 <div v-if="hasFieldError('passwordChangeErrors', 'password1')" :id="fieldErrorId('password-change', 'password1')" class="field-error" role="alert">
                   <p v-for="message in fieldErrors('passwordChangeErrors', 'password1')" :key="message">{{ message }}</p>
                 </div>
@@ -1715,8 +1741,8 @@ const App = {
           <section v-else-if="activeView === 'password-reset'" class="auth-view">
             <div class="auth-card">
               <h1>找回密码</h1>
-              <p class="auth-note">平台不通过邮箱发送重置链接。请联系系统管理员，由管理员将你的账号恢复为默认密码。</p>
-              <p class="auth-note">拿到默认密码后回到登录页登录，系统会强制要求你修改新密码；修改成功后需要重新登录。</p>
+              <p class="auth-note">平台不通过邮箱发送重置链接。请联系系统管理员，由管理员将你的账号恢复为系统默认密码。</p>
+              <p class="auth-note">拿到系统默认密码后回到登录页登录，系统会强制要求你修改新密码；修改成功后需要重新登录。</p>
               <button class="text-button auth-link" type="button" @click="navigate('login')">返回登录</button>
             </div>
           </section>

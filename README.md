@@ -96,10 +96,6 @@ GET  /api/themes/<slug>/space/
 POST /api/auth/register/
 POST /api/auth/login/
 POST /api/auth/logout/
-POST /api/auth/email-verification/request/
-POST /api/auth/email-verification/confirm/
-POST /api/auth/password-reset/request/
-POST /api/auth/password-reset/confirm/
 POST /api/auth/password/change-required/
 GET  /api/me/
 GET  /api/me/profile/
@@ -138,26 +134,25 @@ Each registered user receives an immutable public UID on `profile.uid`. UID pref
 student=S, doctor=D, teacher=T, ai_engineer=E, statistician=M, sponsor=F, other=U
 ```
 
-For example, a student with database id `25` receives `S00000025`. Changing profile identity later does not change the UID. `/api/me/` and `/api/me/profile/` include `profile.uid`, `profile.email_verified`, `profile.email_verified_at`, and `profile.must_change_password`.
+For example, a student with database id `25` receives `S00000025`. Changing profile identity later does not change the UID. `/api/me/` and `/api/me/profile/` include `profile.uid` and `profile.must_change_password`.
 
-Email verification APIs:
-
-```text
-POST /api/auth/email-verification/request/
-POST /api/auth/email-verification/confirm/
-```
-
-Password reset APIs:
+Password recovery APIs:
 
 ```text
-POST /api/auth/password-reset/request/
-POST /api/auth/password-reset/confirm/
 POST /api/auth/password/change-required/
 GET  /api/admin/users/
 POST /api/admin/users/<uid>/reset-password/
 ```
 
-The platform does not send password reset links by email. `POST /api/auth/password-reset/request/` only tells the user to contact the system administrator, and `POST /api/auth/password-reset/confirm/` returns `password_reset_disabled`. The platform administrator restores a user's password with `POST /api/admin/users/<uid>/reset-password/`; the returned default password is `username + 6 random digits`. When the user logs in with that default password, `profile.must_change_password` is `true`, business APIs return `password_change_required`, and the user must call `POST /api/auth/password/change-required/`. Successful password change logs the user out, and the user must log in again with the new password.
+The platform does not send password reset links by email and does not expose email verification or email password reset APIs. Users who forget passwords must contact the system administrator. The platform administrator restores a user's password with `POST /api/admin/users/<uid>/reset-password/`; the returned default password is the system-wide `OPENMEDAILAB_DEFAULT_PASSWORD`, configured only on the backend. When the user logs in with that default password, `profile.must_change_password` is `true`, business APIs return `password_change_required`, and the user must call `POST /api/auth/password/change-required/`. The new password cannot equal the system default password. Successful password change logs the user out, and the user must log in again with the new password.
+
+Set the system default password through the backend environment:
+
+```bash
+OPENMEDAILAB_DEFAULT_PASSWORD='<strong-default-password>'
+```
+
+If `OPENMEDAILAB_DEFAULT_PASSWORD` is empty or does not pass Django password validators, administrator password recovery returns a validation error.
 
 Admin endpoints require RBAC capabilities returned by `/api/rbac/` and `/api/me/`. Only the unique platform administrator receives `manage_themes`, `manage_projects`, `manage_users`, and `import_projects`.
 

@@ -1,6 +1,7 @@
 from django import forms
 from django.contrib.auth.forms import UserCreationForm
 from django.contrib.auth.models import User
+from django.db import transaction
 
 from .models import RoleType, UserProfile, normalize_email, uid_for_user
 
@@ -74,3 +75,15 @@ class UserProfileForm(forms.ModelForm):
         ):
             raise forms.ValidationError("该邮箱已经注册。", code="unique")
         return email
+
+    def save(self, commit=True):
+        profile = super().save(commit=False)
+        email = normalize_email(self.cleaned_data.get("contact_email", ""))
+        profile.contact_email = email
+        profile.email_normalized = email or None
+        if commit:
+            with transaction.atomic():
+                profile.user.email = email
+                profile.user.save(update_fields=["email"])
+                profile.save()
+        return profile

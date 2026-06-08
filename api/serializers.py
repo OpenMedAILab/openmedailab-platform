@@ -38,8 +38,6 @@ def profile_payload(profile):
         "skills": profile.skills,
         "available_hours_per_week": profile.available_hours_per_week,
         "contact_email": profile.contact_email,
-        "email_verified": profile.email_verified_at is not None,
-        "email_verified_at": profile.email_verified_at,
         "must_change_password": profile.must_change_password,
         "contact_wechat": profile.contact_wechat,
         "bio": profile.bio,

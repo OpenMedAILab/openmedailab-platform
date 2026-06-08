@@ -4,9 +4,8 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 
-from accounts.models import AccountToken
 from credits.models import CreditLedger
 from interactions.models import ProjectFollow, ProjectInterest, ProjectScore
 from projects.models import Project, ProjectStage, Tag, Theme, ThemeFile
@@ -72,10 +71,10 @@ class ApiTests(TestCase):
         schema = schema_response.json()
         self.assertIn("/api/projects/", schema["paths"])
         self.assertIn("RegisterRequest", schema["components"]["schemas"])
-        self.assertIn("/api/auth/email-verification/request/", schema["paths"])
-        self.assertIn("/api/auth/email-verification/confirm/", schema["paths"])
-        self.assertIn("/api/auth/password-reset/request/", schema["paths"])
-        self.assertIn("/api/auth/password-reset/confirm/", schema["paths"])
+        self.assertNotIn("/api/auth/email-verification/request/", schema["paths"])
+        self.assertNotIn("/api/auth/email-verification/confirm/", schema["paths"])
+        self.assertNotIn("/api/auth/password-reset/request/", schema["paths"])
+        self.assertNotIn("/api/auth/password-reset/confirm/", schema["paths"])
         self.assertIn("/api/auth/password/change-required/", schema["paths"])
         self.assertIn("/api/admin/users/", schema["paths"])
         self.assertIn("/api/admin/users/{uid}/reset-password/", schema["paths"])
@@ -242,7 +241,8 @@ class ApiTests(TestCase):
         register_payload = register_response.json()["data"]
         self.assertEqual(register_payload["profile"]["credit_balance"], 100)
         self.assertEqual(register_payload["profile"]["uid"], f"S{register_payload['id']:08d}")
-        self.assertFalse(register_payload["profile"]["email_verified"])
+        self.assertNotIn("email_verified", register_payload["profile"])
+        self.assertNotIn("email_verified_at", register_payload["profile"])
 
         follow_response = self.post_json(f"/api/projects/{self.project.pk}/follow/", {})
         self.assertEqual(follow_response.status_code, 200)
@@ -376,6 +376,19 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertIn("contact_email", response.json()["error"]["details"])
 
+    def test_profile_contact_email_updates_user_email_and_normalized_profile_email(self):
+        user = User.objects.create_user(username="emailsync", email="old@example.com", password="StrongPass12345")
+        self.client.force_login(user)
+
+        response = self.patch_json("/api/me/profile/", {"contact_email": "NewAddress@Example.COM"})
+
+        self.assertEqual(response.status_code, 200)
+        user.refresh_from_db()
+        user.profile.refresh_from_db()
+        self.assertEqual(user.email, "newaddress@example.com")
+        self.assertEqual(user.profile.contact_email, "newaddress@example.com")
+        self.assertEqual(user.profile.email_normalized, "newaddress@example.com")
+
     def test_register_uid_prefixes_and_uid_is_immutable(self):
         role_prefixes = {
             "student": "S",
@@ -410,65 +423,7 @@ class ApiTests(TestCase):
         user.profile.refresh_from_db()
         self.assertEqual(user.profile.uid, original_uid)
 
-    def test_email_verification_flow(self):
-        register_response = self.post_json(
-            "/api/auth/register/",
-            {
-                "username": "verifyuser",
-                "email": "verify@example.com",
-                "display_name": "Verify User",
-                "role_type": "student",
-                "password1": "StrongPass12345",
-                "password2": "StrongPass12345",
-            },
-        )
-        self.assertEqual(register_response.status_code, 201)
-        self.assertFalse(register_response.json()["data"]["profile"]["email_verified"])
-
-        request_response = self.post_json("/api/auth/email-verification/request/", {})
-        self.assertEqual(request_response.status_code, 200)
-        token = request_response.json()["data"]["debug_token"]
-
-        confirm_response = self.post_json("/api/auth/email-verification/confirm/", {"token": token})
-        self.assertEqual(confirm_response.status_code, 200)
-        self.assertTrue(confirm_response.json()["data"]["email_verified"])
-
-        invalid_response = self.post_json("/api/auth/email-verification/confirm/", {"token": "bad-token"})
-        self.assertEqual(invalid_response.status_code, 422)
-
-    def test_password_reset_request_directs_user_to_admin_without_email_token(self):
-        register_response = self.post_json(
-            "/api/auth/register/",
-            {
-                "username": "resetuser",
-                "email": "reset@example.com",
-                "display_name": "Reset User",
-                "role_type": "student",
-                "password1": "StrongPass12345",
-                "password2": "StrongPass12345",
-            },
-        )
-        self.assertEqual(register_response.status_code, 201)
-        self.client.logout()
-
-        missing_response = self.post_json("/api/auth/password-reset/request/", {"email": "missing@example.com"})
-        self.assertEqual(missing_response.status_code, 200)
-        self.assertNotIn("debug_token", missing_response.json()["data"])
-        self.assertIn("系统管理员", missing_response.json()["data"]["message"])
-
-        request_response = self.post_json("/api/auth/password-reset/request/", {"email": "RESET@example.com"})
-        self.assertEqual(request_response.status_code, 200)
-        self.assertNotIn("debug_token", request_response.json()["data"])
-        self.assertNotIn("uid", request_response.json()["data"])
-        self.assertFalse(AccountToken.objects.filter(purpose=AccountToken.Purpose.PASSWORD_RESET).exists())
-
-        confirm_response = self.post_json(
-            "/api/auth/password-reset/confirm/",
-            {"uid": "S00000001", "token": "disabled", "password1": "NewStrongPass12345", "password2": "NewStrongPass12345"},
-        )
-        self.assertEqual(confirm_response.status_code, 400)
-        self.assertEqual(confirm_response.json()["error"]["code"], "password_reset_disabled")
-
+    @override_settings(OPENMEDAILAB_DEFAULT_PASSWORD="SystemDefaultPass12345")
     def test_admin_resets_password_to_default_and_user_must_change_before_using_system(self):
         call_command(
             "ensure_platform_admin",
@@ -477,6 +432,7 @@ class ApiTests(TestCase):
             password="StrongPass12345",
         )
         user = User.objects.create_user(username="resetbyadmin", email="resetbyadmin@example.com", password="StrongPass12345")
+        other_user = User.objects.create_user(username="otherreset", email="otherreset@example.com", password="StrongPass12345")
         uid = user.profile.uid
 
         admin = User.objects.get(username="platform_admin")
@@ -489,8 +445,13 @@ class ApiTests(TestCase):
         self.assertEqual(reset_response.status_code, 200)
         reset_payload = reset_response.json()["data"]
         default_password = reset_payload["default_password"]
-        self.assertRegex(default_password, r"^resetbyadmin\d{6}$")
+        self.assertEqual(default_password, "SystemDefaultPass12345")
+        self.assertNotIn("resetbyadmin", default_password)
         self.assertTrue(reset_payload["user"]["profile"]["must_change_password"])
+
+        other_reset_response = self.post_json(f"/api/admin/users/{other_user.profile.uid}/reset-password/", {})
+        self.assertEqual(other_reset_response.status_code, 200)
+        self.assertEqual(other_reset_response.json()["data"]["default_password"], default_password)
 
         user.refresh_from_db()
         self.assertTrue(user.profile.must_change_password)
@@ -516,6 +477,13 @@ class ApiTests(TestCase):
         self.assertEqual(weak_response.status_code, 422)
         self.assertIn("password2", weak_response.json()["error"]["details"])
 
+        unchanged_response = self.post_json(
+            "/api/auth/password/change-required/",
+            {"password1": default_password, "password2": default_password},
+        )
+        self.assertEqual(unchanged_response.status_code, 422)
+        self.assertIn("password1", unchanged_response.json()["error"]["details"])
+
         change_response = self.post_json(
             "/api/auth/password/change-required/",
             {"password1": "NewStrongPass12345", "password2": "NewStrongPass12345"},
@@ -533,6 +501,43 @@ class ApiTests(TestCase):
         self.assertEqual(new_login.status_code, 200)
         dashboard_response = self.client.get("/api/me/dashboard/")
         self.assertEqual(dashboard_response.status_code, 200)
+
+    @override_settings(OPENMEDAILAB_DEFAULT_PASSWORD="")
+    def test_admin_reset_password_requires_configured_system_default_password(self):
+        call_command(
+            "ensure_platform_admin",
+            username="platform_admin",
+            email="admin@example.com",
+            password="StrongPass12345",
+        )
+        user = User.objects.create_user(username="emptydefault", email="emptydefault@example.com", password="StrongPass12345")
+        admin = User.objects.get(username="platform_admin")
+        self.client.force_login(admin)
+
+        response = self.post_json(f"/api/admin/users/{user.profile.uid}/reset-password/", {})
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["code"], "default_password_not_configured")
+        self.assertEqual(response.json()["error"]["message"], "系统默认密码未配置。")
+
+    @override_settings(OPENMEDAILAB_DEFAULT_PASSWORD="SystemDefaultPass12345")
+    def test_platform_admin_cannot_reset_own_password(self):
+        call_command(
+            "ensure_platform_admin",
+            username="platform_admin",
+            email="admin@example.com",
+            password="StrongPass12345",
+        )
+        admin = User.objects.get(username="platform_admin")
+        self.client.force_login(admin)
+
+        response = self.post_json(f"/api/admin/users/{admin.profile.uid}/reset-password/", {})
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["code"], "self_reset_forbidden")
+        self.assertEqual(response.json()["error"]["message"], "管理员不能恢复自己的密码。")
+        admin.refresh_from_db()
+        self.assertFalse(admin.profile.must_change_password)
 
     def test_regular_user_cannot_reset_another_users_password(self):
         user = User.objects.create_user(username="targetuser", email="target@example.com", password="StrongPass12345")

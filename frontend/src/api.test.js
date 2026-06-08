@@ -83,6 +83,21 @@ test("logout resolves when the server session is already expired", async () => {
   ]);
 });
 
+test("auth api does not expose email verification or email password reset methods", async () => {
+  globalThis.window = { OPENMEDAILAB_API_BASE: "" };
+  globalThis.location = { port: "5173" };
+  globalThis.fetch = async () => {
+    throw new Error("No network calls expected");
+  };
+
+  const { api } = await import(`./api.js?removed-auth-email-flows=${Date.now()}`);
+
+  assert.equal(api.requestEmailVerification, undefined);
+  assert.equal(api.confirmEmailVerification, undefined);
+  assert.equal(api.requestPasswordReset, undefined);
+  assert.equal(api.confirmPasswordReset, undefined);
+});
+
 function jsonResponse(status, payload) {
   return {
     ok: status >= 200 && status < 300,

@@ -1,28 +1,28 @@
 from datetime import date, datetime
 from decimal import Decimal
-import sys
 from typing import Any, Optional
 
-from django.conf import settings
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.forms import SetPasswordForm
 from django.contrib.auth.models import User
-from django.core.mail import send_mail
 from django.core.paginator import Paginator
 from django.db.models import Q
 from django.http import Http404
 from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404
-from django.utils import timezone
 from django.utils.text import slugify
 from ninja import NinjaAPI, Schema
 from ninja.errors import HttpError, ValidationError
 from ninja.security import SessionAuth
 
 from accounts.forms import RegisterForm, UserProfileForm
-from accounts.models import AccountToken, RoleType, UserProfile, normalize_email
-from accounts.services import create_registered_user, reset_user_to_default_password
-from accounts.tokens import create_account_token, get_active_token
+from accounts.models import RoleType, UserProfile
+from accounts.services import (
+    DefaultPasswordConfigError,
+    create_registered_user,
+    get_system_default_password,
+    reset_user_to_default_password,
+)
 from interactions.forms import ProjectClaimIntentForm, ProjectInterestForm, ProjectScoreForm, SponsorIntentForm
 from interactions.models import (
     ClaimType,
@@ -131,21 +131,6 @@ class ClaimRequest(Schema):
 class SponsorRequest(Schema):
     sponsor_type: str
     note: Optional[str] = ""
-
-
-class EmailVerificationConfirmRequest(Schema):
-    token: str
-
-
-class PasswordResetRequest(Schema):
-    email: str
-
-
-class PasswordResetConfirmRequest(Schema):
-    uid: str
-    token: str
-    password1: str
-    password2: str
 
 
 class RequiredPasswordChangeRequest(Schema):
@@ -327,51 +312,6 @@ def logout_view(request):
     return ok({"logged_out": True})
 
 
-@api.post("/auth/email-verification/request/", response={200: Envelope, 401: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Auth"])
-def email_verification_request(request):
-    auth_error = require_login(request)
-    if auth_error:
-        return auth_error
-    profile = request.user.profile
-    email = normalize_email(request.user.email or profile.contact_email)
-    if not email:
-        return fail("Email is required.", status=422, code="validation_error", errors={"email": [{"message": "邮箱不能为空。", "code": "required"}]})
-    if profile.email_verified_at:
-        return ok({"email_verified": True, "email_verified_at": profile.email_verified_at})
-    raw_token, _ = create_account_token(request.user, AccountToken.Purpose.EMAIL_VERIFICATION, ttl_minutes=24 * 60)
-    send_account_email(
-        subject="OpenMedAILab 邮箱验证",
-        message=f"请使用该验证码完成邮箱验证：{raw_token}",
-        recipient=email,
-    )
-    data = {"email_verified": False, "message": "验证邮件已发送。"}
-    if expose_auth_debug_tokens():
-        data["debug_token"] = raw_token
-    return ok(data)
-
-
-@api.post("/auth/email-verification/confirm/", response={200: Envelope, 422: ErrorEnvelope}, tags=["Auth"], auth=None)
-def email_verification_confirm(request, payload: EmailVerificationConfirmRequest):
-    token = get_active_token(payload.token, AccountToken.Purpose.EMAIL_VERIFICATION)
-    if not token:
-        return fail("Invalid or expired token.", status=422, code="invalid_token")
-    profile = token.user.profile
-    profile.email_verified_at = timezone.now()
-    profile.save(update_fields=["email_verified_at", "updated_at"])
-    token.mark_used()
-    return ok({"email_verified": True, "email_verified_at": profile.email_verified_at})
-
-
-@api.post("/auth/password-reset/request/", response={200: Envelope}, tags=["Auth"], auth=None)
-def password_reset_request(request, payload: PasswordResetRequest):
-    return ok({"message": "密码重置请联系系统管理员。系统管理员会恢复默认密码并要求你首次登录后修改密码。"})
-
-
-@api.post("/auth/password-reset/confirm/", response={400: ErrorEnvelope}, tags=["Auth"], auth=None)
-def password_reset_confirm(request, payload: PasswordResetConfirmRequest):
-    return fail("Email password reset is disabled. Please contact the system administrator.", status=400, code="password_reset_disabled")
-
-
 @api.post("/auth/password/change-required/", response={200: Envelope, 401: ErrorEnvelope, 400: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Auth"])
 def password_change_required(request, payload: RequiredPasswordChangeRequest):
     auth_error = require_login(request)
@@ -385,6 +325,17 @@ def password_change_required(request, payload: RequiredPasswordChangeRequest):
     )
     if not form.is_valid():
         return fail("Password reset failed.", status=422, code="validation_error", errors=password_reset_form_errors(form))
+    try:
+        system_default_password = get_system_default_password()
+    except DefaultPasswordConfigError:
+        system_default_password = None
+    if system_default_password and payload.password1 == system_default_password:
+        return fail(
+            "Password reset failed.",
+            status=422,
+            code="validation_error",
+            errors={"password1": [{"message": "新密码不能与系统默认密码相同。", "code": "password_unchanged"}]},
+        )
     if request.user.check_password(payload.password1):
         return fail(
             "Password reset failed.",
@@ -552,13 +503,18 @@ def admin_user_list(request, q: str = "", page: int = 1, page_size: int = 50):
     )
 
 
-@api.post("/admin/users/{uid}/reset-password/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope}, tags=["Admin"])
+@api.post("/admin/users/{uid}/reset-password/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
 def admin_user_reset_password(request, uid: str):
     auth_error = require_capability(request, "manage_users")
     if auth_error:
         return auth_error
     profile = get_object_or_404(UserProfile.objects.select_related("user"), uid=uid)
-    default_password = reset_user_to_default_password(profile.user)
+    if profile.user_id == request.user.id:
+        return fail("管理员不能恢复自己的密码。", status=422, code="self_reset_forbidden")
+    try:
+        default_password = reset_user_to_default_password(profile.user)
+    except DefaultPasswordConfigError as exc:
+        return fail(str(exc), status=422, code="default_password_not_configured")
     profile.refresh_from_db()
     audit(request.user, "user.reset_password", "User", profile.user_id, after={"uid": uid, "must_change_password": True})
     return ok({"user": user_payload(profile.user), "default_password": default_password})
@@ -956,18 +912,6 @@ def ok(data=None):
 
 def fail(message, status=400, code="bad_request", errors=None):
     return status, error_payload(message, code, errors)
-
-
-def send_account_email(subject, message, recipient):
-    send_mail(subject, message, None, [recipient], fail_silently=True)
-
-
-def expose_auth_debug_tokens():
-    return (
-        settings.DEBUG
-        or getattr(settings, "OPENMEDAILAB_EXPOSE_AUTH_DEBUG_TOKENS", False)
-        or "test" in sys.argv
-    )
 
 
 def password_reset_form_errors(form):
