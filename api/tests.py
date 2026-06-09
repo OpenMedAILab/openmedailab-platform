@@ -7,9 +7,9 @@ from django.core.management import call_command
 from django.conf import settings
 from django.test import Client, TestCase, override_settings
 
-from credits.models import CreditLedger
-from interactions.models import ProjectFollow, ProjectInterest, ProjectScore
-from projects.models import Project, ProjectStage, Tag, Theme, ThemeFile
+from credits.models import Contribution, ContributionStatus, CreditLedger
+from interactions.models import InteractionStatus, ProjectClaimIntent, ProjectFollow, ProjectInterest, ProjectScore, SponsorIntent
+from projects.models import AuditLog, Project, ProjectStage, ProjectTask, Tag, Theme, ThemeFile
 
 
 class ApiTests(TestCase):
@@ -44,6 +44,17 @@ class ApiTests(TestCase):
 
     def patch_json(self, path, data):
         return self.client.patch(path, data=json.dumps(data), content_type="application/json")
+
+    def login_platform_admin(self):
+        call_command(
+            "ensure_platform_admin",
+            username="platform_admin",
+            email="admin@example.com",
+            password="StrongPass12345",
+        )
+        admin = User.objects.get(username="platform_admin")
+        self.client.force_login(admin)
+        return admin
 
     def test_project_list_and_detail_api(self):
         list_response = self.client.get("/api/projects/?q=RAG&page_size=10")
@@ -82,6 +93,13 @@ class ApiTests(TestCase):
         self.assertIn("/api/admin/projects/import-json/", schema["paths"])
         self.assertIn("/api/admin/theme-files/", schema["paths"])
         self.assertIn("/api/admin/projects/{project_id}/", schema["paths"])
+        self.assertIn("/api/projects/{project_id}/status-card/", schema["paths"])
+        self.assertIn("/api/admin/overview/", schema["paths"])
+        self.assertIn("/api/admin/interactions/", schema["paths"])
+        self.assertIn("/api/admin/tasks/", schema["paths"])
+        self.assertIn("/api/admin/contributions/{contribution_id}/review/", schema["paths"])
+        self.assertIn("/api/admin/audit-logs/", schema["paths"])
+        self.assertIn("/api/me/contributions/", schema["paths"])
 
         docs_response = self.client.get("/api/docs")
         self.assertEqual(docs_response.status_code, 200)
@@ -245,6 +263,266 @@ class ApiTests(TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "permission_denied")
+
+    def test_project_status_card_exposes_uid_only_for_authenticated_viewer(self):
+        student = User.objects.create_user(username="studentuid", email="studentuid@example.com", password="StrongPass12345")
+        doctor = User.objects.create_user(username="doctoruid", email="doctoruid@example.com", password="StrongPass12345")
+        pending = User.objects.create_user(username="pendinguid", email="pendinguid@example.com", password="StrongPass12345")
+        follower = User.objects.create_user(username="followeruid", email="followeruid@example.com", password="StrongPass12345")
+        ProjectInterest.objects.create(
+            user=student,
+            project=self.project,
+            role="学生",
+            available_hours_per_week=4,
+            status=InteractionStatus.APPROVED,
+        )
+        ProjectClaimIntent.objects.create(user=doctor, project=self.project, claim_type="leader", status=InteractionStatus.RECORDED)
+        SponsorIntent.objects.create(user=student, project=self.project, sponsor_type="compute", status=InteractionStatus.APPROVED)
+        ProjectInterest.objects.create(
+            user=pending,
+            project=self.project,
+            role="医生",
+            available_hours_per_week=2,
+            status=InteractionStatus.PENDING,
+        )
+
+        anonymous_response = self.client.get(f"/api/projects/{self.project.pk}/status-card/")
+        self.assertEqual(anonymous_response.status_code, 200)
+        anonymous = anonymous_response.json()["data"]
+        self.assertEqual(anonymous["participants"]["count"], 2)
+        self.assertEqual(anonymous["participants"]["uids"], [])
+        self.assertFalse(anonymous["participants"]["uids_visible"])
+
+        self.client.force_login(student)
+        ProjectFollow.objects.create(user=student, project=self.project)
+        response = self.client.get(f"/api/projects/{self.project.pk}/status-card/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["data"]
+        self.assertIn("uid", payload["viewer_state"])
+        self.assertEqual(payload["viewer_state"]["uid"], student.profile.uid)
+        self.assertTrue(payload["viewer_state"]["is_following"])
+        self.assertIn("activity_labels", payload["viewer_state"])
+        self.assertIn("已收藏", payload["viewer_state"]["activity_labels"])
+        self.assertTrue(payload["participants"]["uids_visible"])
+        self.assertEqual(set(payload["participants"]["uids"]), {student.profile.uid, doctor.profile.uid})
+        self.assertNotIn("studentuid@example.com", json.dumps(payload, ensure_ascii=False))
+        self.assertNotIn("studentuid", json.dumps(payload, ensure_ascii=False))
+
+        self.client.force_login(follower)
+        ProjectFollow.objects.create(user=follower, project=self.project)
+        follower_response = self.client.get(f"/api/projects/{self.project.pk}/status-card/")
+        self.assertEqual(follower_response.status_code, 200)
+        follower_payload = follower_response.json()["data"]
+        self.assertEqual(follower_payload["status_uids"]["highlight_uid"], follower.profile.uid)
+        self.assertIn(follower.profile.uid, follower_payload["status_uids"]["uids"])
+        self.assertEqual(follower_payload["participants"]["count"], 2)
+
+    def test_admin_reviews_interactions_and_writes_audit_log(self):
+        applicant = User.objects.create_user(username="applicant", email="applicant@example.com", password="StrongPass12345")
+        interest = ProjectInterest.objects.create(
+            user=applicant,
+            project=self.project,
+            role="学生",
+            available_hours_per_week=6,
+            message="申请参与",
+        )
+
+        self.client.force_login(applicant)
+        forbidden_response = self.client.get("/api/admin/interactions/")
+        self.assertEqual(forbidden_response.status_code, 403)
+
+        admin = self.login_platform_admin()
+        list_response = self.client.get("/api/admin/interactions/?status=pending")
+        self.assertEqual(list_response.status_code, 200)
+        rows = list_response.json()["data"]["results"]
+        self.assertEqual(rows[0]["type"], "interest")
+        self.assertEqual(rows[0]["user"]["uid"], applicant.profile.uid)
+        self.assertNotIn("applicant@example.com", json.dumps(rows[0], ensure_ascii=False))
+        self.assertNotIn("applicant", json.dumps(rows[0], ensure_ascii=False))
+
+        review_response = self.patch_json(
+            f"/api/admin/interactions/interest/{interest.pk}/status/",
+            {"status": "approved", "review_note": "匹配学生协作角色"},
+        )
+
+        self.assertEqual(review_response.status_code, 200)
+        interest.refresh_from_db()
+        self.assertEqual(interest.status, InteractionStatus.APPROVED)
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="interaction.review",
+                target_type="ProjectInterest",
+                target_id=str(interest.pk),
+                after__review_note="匹配学生协作角色",
+            ).exists()
+        )
+        audit_response = self.client.get("/api/admin/audit-logs/?action=interaction.review")
+        self.assertEqual(audit_response.status_code, 200)
+        audit_entry = audit_response.json()["data"]["results"][0]
+        self.assertEqual(audit_entry["action_label"], "审核协作意向")
+        self.assertIn(applicant.profile.uid, audit_entry["summary"])
+        self.assertIn("已通过", audit_entry["summary"])
+        self.assertNotIn('{"id"', audit_entry["summary"])
+
+    def test_user_can_withdraw_own_interaction_but_not_others(self):
+        owner = User.objects.create_user(username="owner", email="owner@example.com", password="StrongPass12345")
+        other = User.objects.create_user(username="other", email="other@example.com", password="StrongPass12345")
+        interest = ProjectInterest.objects.create(
+            user=owner,
+            project=self.project,
+            role="学生",
+            available_hours_per_week=3,
+            status=InteractionStatus.PENDING,
+        )
+
+        self.client.force_login(other)
+        forbidden_response = self.patch_json(f"/api/me/interactions/interest/{interest.pk}/withdraw/", {})
+        self.assertEqual(forbidden_response.status_code, 404)
+
+        self.client.force_login(owner)
+        response = self.patch_json(f"/api/me/interactions/interest/{interest.pk}/withdraw/", {})
+
+        self.assertEqual(response.status_code, 200)
+        interest.refresh_from_db()
+        self.assertEqual(interest.status, InteractionStatus.WITHDRAWN)
+
+    def test_task_contribution_credit_lifecycle(self):
+        assignee = User.objects.create_user(username="worker", email="worker@example.com", password="StrongPass12345")
+        starting_balance = assignee.profile.credit_balance
+        admin = self.login_platform_admin()
+
+        create_response = self.post_json(
+            "/api/admin/tasks/",
+            {
+                "project_id": self.project.pk,
+                "title": "整理数据字典",
+                "description": "梳理主题文件域的数据字段。",
+                "task_type": "data_dictionary",
+                "required_role": "学生",
+                "difficulty": 2,
+                "credit_reward": 25,
+            },
+        )
+        self.assertEqual(create_response.status_code, 201)
+        task_id = create_response.json()["data"]["id"]
+
+        assign_response = self.post_json(f"/api/admin/tasks/{task_id}/assign/", {"uid": assignee.profile.uid})
+        self.assertEqual(assign_response.status_code, 200)
+        self.assertEqual(assign_response.json()["data"]["status"], ProjectTask.TaskStatus.CLAIMED)
+        self.assertEqual(assign_response.json()["data"]["progress_percent"], 25)
+        self.assertEqual(assign_response.json()["data"]["participant_uids"], [assignee.profile.uid])
+        self.assertNotIn("worker@example.com", json.dumps(assign_response.json()["data"], ensure_ascii=False))
+        self.assertNotIn("worker", json.dumps(assign_response.json()["data"], ensure_ascii=False))
+
+        self.client.force_login(assignee)
+        dashboard_response = self.client.get("/api/me/dashboard/")
+        self.assertEqual(dashboard_response.status_code, 200)
+        self.assertEqual(dashboard_response.json()["data"]["tasks"][0]["id"], task_id)
+        self.assertEqual(dashboard_response.json()["data"]["tasks"][0]["participant_uids"], [assignee.profile.uid])
+
+        progress_response = self.patch_json(f"/api/me/tasks/{task_id}/status/", {"status": "in_progress"})
+        self.assertEqual(progress_response.status_code, 200)
+        self.assertEqual(progress_response.json()["data"]["progress_percent"], 60)
+
+        contribution_response = self.post_json(
+            "/api/me/contributions/",
+            {
+                "project_id": self.project.pk,
+                "task_id": task_id,
+                "title": "数据字典初稿",
+                "description": "已经完成主要字段说明。",
+                "file_path": "workspace/data-dictionary.md",
+            },
+        )
+        self.assertEqual(contribution_response.status_code, 201)
+        contribution_id = contribution_response.json()["data"]["id"]
+        self.assertEqual(ProjectTask.objects.get(pk=task_id).status, ProjectTask.TaskStatus.REVIEW)
+
+        self.client.force_login(admin)
+        review_response = self.patch_json(
+            f"/api/admin/contributions/{contribution_id}/review/",
+            {"status": "approved", "review_comment": "可进入主题文件域", "grant_reward": True},
+        )
+
+        self.assertEqual(review_response.status_code, 200)
+        contribution = Contribution.objects.get(pk=contribution_id)
+        assignee.profile.refresh_from_db()
+        self.assertEqual(contribution.status, ContributionStatus.APPROVED)
+        self.assertEqual(review_response.json()["data"]["user"]["uid"], assignee.profile.uid)
+        self.assertNotIn("worker@example.com", json.dumps(review_response.json()["data"], ensure_ascii=False))
+        self.assertNotIn("worker", json.dumps(review_response.json()["data"], ensure_ascii=False))
+        self.assertEqual(assignee.profile.credit_balance, starting_balance + 25)
+        self.assertTrue(
+            CreditLedger.objects.filter(
+                user=assignee,
+                task_id=task_id,
+                action_type=CreditLedger.ActionType.TASK_REWARD,
+                amount=25,
+            ).exists()
+        )
+        self.assertEqual(ProjectTask.objects.get(pk=task_id).status, ProjectTask.TaskStatus.DONE)
+        self.assertTrue(AuditLog.objects.filter(action="contribution.review", target_id=str(contribution_id)).exists())
+
+        duplicate_review_response = self.patch_json(
+            f"/api/admin/contributions/{contribution_id}/review/",
+            {"status": "approved", "review_comment": "重复审核不应重复发奖", "grant_reward": True},
+        )
+        self.assertEqual(duplicate_review_response.status_code, 200)
+        assignee.profile.refresh_from_db()
+        self.assertEqual(assignee.profile.credit_balance, starting_balance + 25)
+        self.assertEqual(
+            CreditLedger.objects.filter(
+                user=assignee,
+                task_id=task_id,
+                action_type=CreditLedger.ActionType.TASK_REWARD,
+            ).count(),
+            1,
+        )
+        self.assertFalse(duplicate_review_response.json()["data"]["reviewer"].get("username"))
+
+    def test_admin_overview_user_detail_credits_and_audit_logs_are_permissioned(self):
+        user = User.objects.create_user(username="detailuser", email="detail@example.com", password="StrongPass12345")
+        ProjectFollow.objects.create(user=user, project=self.project)
+        CreditLedger.objects.create(
+            user=user,
+            project=self.project,
+            action_type=CreditLedger.ActionType.ADMIN_ADJUST,
+            amount=5,
+            balance_after=user.profile.credit_balance + 5,
+            reason="手动补录",
+        )
+        AuditLog.objects.create(action="manual.test", target_type="Project", target_id=str(self.project.pk), after={"note": "验收"})
+
+        self.client.force_login(user)
+        self.assertEqual(self.client.get("/api/admin/overview/").status_code, 403)
+        self.assertEqual(self.client.get(f"/api/admin/users/{user.profile.uid}/").status_code, 403)
+        self.assertEqual(self.client.get("/api/admin/audit-logs/").status_code, 403)
+        self.assertEqual(self.client.get("/api/admin/credits/").status_code, 403)
+
+        self.login_platform_admin()
+        overview_response = self.client.get("/api/admin/overview/")
+        self.assertEqual(overview_response.status_code, 200)
+        self.assertGreaterEqual(overview_response.json()["data"]["counts"]["users"], 2)
+
+        detail_response = self.client.get(f"/api/admin/users/{user.profile.uid}/")
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertEqual(detail_response.json()["data"]["user"]["profile"]["uid"], user.profile.uid)
+        self.assertEqual(len(detail_response.json()["data"]["follows"]), 1)
+
+        credits_response = self.client.get(f"/api/admin/credits/?uid={user.profile.uid}")
+        self.assertEqual(credits_response.status_code, 200)
+        self.assertEqual(credits_response.json()["data"]["results"][0]["reason"], "手动补录")
+        self.assertEqual(credits_response.json()["data"]["results"][0]["user"]["uid"], user.profile.uid)
+        self.assertNotIn("detail@example.com", json.dumps(credits_response.json()["data"]["results"][0], ensure_ascii=False))
+
+        audit_response = self.client.get("/api/admin/audit-logs/?action=manual.test")
+        self.assertEqual(audit_response.status_code, 200)
+        audit_entry = audit_response.json()["data"]["results"][0]
+        self.assertEqual(audit_entry["after"]["note"], "验收")
+        self.assertEqual(audit_entry["action_label"], "manual.test")
+        self.assertEqual(audit_entry["summary"], "验收")
 
     def test_register_login_and_interactions(self):
         register_response = self.post_json(

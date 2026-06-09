@@ -25,6 +25,13 @@ def user_payload(user):
     }
 
 
+def uid_only_user_payload(user):
+    if not user:
+        return None
+    profile = getattr(user, "profile", None)
+    return {"uid": getattr(profile, "uid", None)}
+
+
 def profile_payload(profile):
     return {
         "uid": profile.uid,
@@ -235,7 +242,189 @@ def follow_payload(follow):
     }
 
 
-def dashboard_payload(user, follows, interests, claims, sponsors, scores):
+TASK_PROGRESS_BY_STATUS = {
+    "todo": 0,
+    "claimed": 25,
+    "in_progress": 60,
+    "review": 85,
+    "done": 100,
+    "cancelled": 0,
+}
+
+
+def task_progress_percent(task):
+    return TASK_PROGRESS_BY_STATUS.get(task.status, 0)
+
+
+def task_participant_uids(task):
+    profile = getattr(getattr(task, "assignee", None), "profile", None)
+    return [profile.uid] if profile and profile.uid else []
+
+
+def task_payload(task):
+    participant_uids = task_participant_uids(task)
+    return {
+        "id": task.id,
+        "project": project_summary_payload(task.project),
+        "title": task.title,
+        "description": task.description,
+        "task_type": task.task_type,
+        "required_role": task.required_role,
+        "difficulty": task.difficulty,
+        "status": task.status,
+        "status_label": task.get_status_display(),
+        "assignee_uid": participant_uids[0] if participant_uids else None,
+        "participant_uids": participant_uids,
+        "progress_percent": task_progress_percent(task),
+        "deadline": task.deadline,
+        "credit_deposit": task.credit_deposit,
+        "credit_reward": task.credit_reward,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
+
+
+def contribution_payload(contribution):
+    return {
+        "id": contribution.id,
+        "user": uid_only_user_payload(contribution.user),
+        "project": project_summary_payload(contribution.project),
+        "task": task_payload(contribution.task) if contribution.task else None,
+        "title": contribution.title,
+        "description": contribution.description,
+        "file_path": contribution.file_path,
+        "status": contribution.status,
+        "status_label": contribution.get_status_display(),
+        "reviewer": uid_only_user_payload(contribution.reviewer) if contribution.reviewer else None,
+        "review_comment": contribution.review_comment,
+        "created_at": contribution.created_at,
+        "reviewed_at": contribution.reviewed_at,
+    }
+
+
+def credit_ledger_payload(entry):
+    return {
+        "id": entry.id,
+        "user": uid_only_user_payload(entry.user),
+        "project": project_summary_payload(entry.project) if entry.project else None,
+        "task": task_payload(entry.task) if entry.task else None,
+        "action_type": entry.action_type,
+        "action_type_label": entry.get_action_type_display(),
+        "amount": entry.amount,
+        "balance_after": entry.balance_after,
+        "reason": entry.reason,
+        "created_by": uid_only_user_payload(entry.created_by) if entry.created_by else None,
+        "created_at": entry.created_at,
+    }
+
+
+def audit_log_payload(entry):
+    return {
+        "id": entry.id,
+        "actor": uid_only_user_payload(entry.actor) if entry.actor else None,
+        "action": entry.action,
+        "action_label": audit_action_label(entry.action),
+        "target_type": entry.target_type,
+        "target_id": entry.target_id,
+        "summary": audit_log_summary(entry),
+        "before": entry.before,
+        "after": entry.after,
+        "created_at": entry.created_at,
+    }
+
+
+AUDIT_ACTION_LABELS = {
+    "interaction.review": "审核协作意向",
+    "interaction.withdraw": "撤回协作意向",
+    "task.create": "创建任务",
+    "task.update": "更新任务",
+    "task.cancel": "取消任务",
+    "task.assign": "分配任务",
+    "task.status": "更新任务状态",
+    "task.user_status": "用户更新任务",
+    "task.submit_for_review": "任务提交审核",
+    "contribution.submit": "提交贡献",
+    "contribution.review": "审核贡献",
+    "user.reset_password": "恢复默认密码",
+    "theme.create": "创建主题",
+    "theme.update": "更新主题",
+    "theme.deactivate": "停用主题",
+    "theme_file.create": "创建主题文件",
+    "theme_file.update": "更新主题文件",
+    "theme_file.deactivate": "停用主题文件",
+    "project.create": "创建课题",
+    "project.update": "更新课题",
+    "project.upsert": "更新课题",
+    "project.archive": "归档课题",
+    "project.import_json": "导入课题",
+}
+
+
+def audit_action_label(action):
+    return AUDIT_ACTION_LABELS.get(action, action)
+
+
+def audit_log_summary(entry):
+    data = entry.after or entry.before or {}
+    if not isinstance(data, dict):
+        return audit_action_label(entry.action)
+
+    note = first_present(data, "review_note", "reason", "note")
+    if entry.action.startswith("interaction."):
+        user_uid = user_uid_from_payload(data)
+        project = data.get("project") or {}
+        project_label = project.get("topic_id") or project.get("title")
+        parts = [
+            data.get("type_label") or audit_action_label(entry.action),
+            data.get("subtype_label") or data.get("subtype"),
+            data.get("status_label"),
+            user_uid,
+            project_label,
+            note,
+        ]
+        return compact_join(parts) or audit_action_label(entry.action)
+
+    if note:
+        return str(note)
+
+    project = data.get("project") if isinstance(data.get("project"), dict) else {}
+    parts = [
+        data.get("title") or data.get("name") or project.get("title") or project.get("topic_id"),
+        data.get("status_label") or data.get("stage_label"),
+        data.get("uid") or user_uid_from_payload(data),
+    ]
+    summary = compact_join(parts)
+    if summary:
+        return summary
+    return f"{audit_action_label(entry.action)} · {entry.target_type} #{entry.target_id}".strip()
+
+
+def first_present(data, *keys):
+    for key in keys:
+        value = data.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def nested_value(data, *keys):
+    value = data
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def user_uid_from_payload(data):
+    return nested_value(data, "user", "uid") or nested_value(data, "user", "profile", "uid")
+
+
+def compact_join(parts):
+    return " · ".join(str(part) for part in parts if part not in (None, ""))
+
+
+def admin_user_detail_payload(user, follows, interests, claims, sponsors, scores, tasks, contributions, credits):
     return {
         "user": user_payload(user),
         "follows": [follow_payload(item) for item in follows],
@@ -249,4 +438,27 @@ def dashboard_payload(user, follows, interests, claims, sponsors, scores):
             }
             for item in scores
         ],
+        "tasks": [task_payload(item) for item in tasks],
+        "contributions": [contribution_payload(item) for item in contributions],
+        "credits": [credit_ledger_payload(item) for item in credits],
+    }
+
+
+def dashboard_payload(user, follows, interests, claims, sponsors, scores, tasks=None, contributions=None, credits=None):
+    return {
+        "user": user_payload(user),
+        "follows": [follow_payload(item) for item in follows],
+        "interests": [interest_payload(item) for item in interests],
+        "claims": [claim_payload(item) for item in claims],
+        "sponsors": [sponsor_payload(item) for item in sponsors],
+        "scores": [
+            {
+                **score_payload(item),
+                "project": project_summary_payload(item.project),
+            }
+            for item in scores
+        ],
+        "tasks": [task_payload(item) for item in (tasks or [])],
+        "contributions": [contribution_payload(item) for item in (contributions or [])],
+        "credits": [credit_ledger_payload(item) for item in (credits or [])],
     }
