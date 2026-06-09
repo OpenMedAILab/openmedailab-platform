@@ -52,6 +52,7 @@ const state = reactive({
   profileMenuOpen: false,
   releaseModalOpen: false,
   expandedReleaseVersions: [],
+  heroTitleScrollProgress: 0,
   schema: null,
   admin: {
     activeTab: "projects",
@@ -123,6 +124,16 @@ const App = {
     const favoriteProjects = computed(() => (state.dashboard?.follows || []).map((item) => item.project));
     const releaseLatest = computed(() => latestRelease(state.meta.release));
     const releaseHistoryItems = computed(() => releaseHistory(state.meta.release));
+    const heroTitleStyle = computed(() => {
+      const progress = state.heroTitleScrollProgress;
+      return {
+        "--hero-title-scroll": progress.toFixed(3),
+        "--hero-title-opacity": (1 - progress * 0.72).toFixed(3),
+        "--hero-title-background-x": `${Math.round(progress * 40)}%`,
+        "--hero-title-y": `${Math.round(progress * -10)}px`,
+        "--hero-title-mask-stop": `${Math.round(100 - progress * 58)}%`
+      };
+    });
     const profilePointer = { x: 0, y: 0 };
 
     onMounted(async () => {
@@ -130,6 +141,7 @@ const App = {
       window.addEventListener("scroll", handleScroll, { passive: true });
       window.addEventListener("keydown", handleKeydown);
       window.addEventListener("pointermove", handlePointerMove, { passive: true });
+      updateHeroTitleScrollProgress();
       await boot();
     });
 
@@ -893,16 +905,27 @@ const App = {
       const previousName = state.route.name;
       state.route = parseRoute();
       if (state.route.name !== previousName) {
+        state.heroTitleScrollProgress = 0;
         window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "auto" }));
       }
     }
 
     function handleScroll() {
+      updateHeroTitleScrollProgress();
       if (!["home", "projects"].includes(state.route.name)) return;
       const remaining = document.documentElement.scrollHeight - window.innerHeight - window.scrollY;
       if (remaining < 420) {
         loadMoreProjects();
       }
+    }
+
+    function updateHeroTitleScrollProgress() {
+      if (!["home", "projects"].includes(state.route.name)) {
+        state.heroTitleScrollProgress = 0;
+        return;
+      }
+      const progress = Math.min(1, Math.max(0, window.scrollY / 260));
+      state.heroTitleScrollProgress = Number(progress.toFixed(3));
     }
 
     function handleKeydown(event) {
@@ -1087,6 +1110,7 @@ const App = {
       favoriteProjects,
       releaseLatest,
       releaseHistoryItems,
+      heroTitleStyle,
       can,
       navigate,
       openProjectPreview,
@@ -1227,8 +1251,11 @@ const App = {
             <div class="library-hero">
               <div>
                 <span class="eyebrow"><span class="material-symbols-rounded" style="font-size: 18px;">biotech</span> 医学 AI 开放课题库</span>
-                <h1>课题库</h1>
-                <p>探索前沿医学人工智能课题，从真实临床场景、数据需求和协作角色快速判断是否值得参与。</p>
+                <h1 class="hero-title" :style="heroTitleStyle">
+                  <span>让医学问题，</span>
+                  <span>等到它的盖世英雄</span>
+                </h1>
+                <p>真实临床场景，开放协作验证。发现课题、理解数据需求，找到一起推动答案的人。</p>
               </div>
               <dl class="hero-stats">
                 <div><dt>课题</dt><dd>{{ stats.total }}</dd></div>
