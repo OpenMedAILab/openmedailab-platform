@@ -34,6 +34,11 @@ BASE_CAPABILITIES = {
     "manage_users": False,
     "import_projects": False,
     "view_admin_console": False,
+    "review_interactions": False,
+    "manage_tasks": False,
+    "review_contributions": False,
+    "manage_credits": False,
+    "view_audit_logs": False,
 }
 
 
@@ -74,6 +79,11 @@ ADMIN_PATCH = {
     "manage_users": True,
     "import_projects": True,
     "view_admin_console": True,
+    "review_interactions": True,
+    "manage_tasks": True,
+    "review_contributions": True,
+    "manage_credits": True,
+    "view_audit_logs": True,
 }
 
 

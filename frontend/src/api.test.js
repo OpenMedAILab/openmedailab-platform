@@ -98,6 +98,34 @@ test("auth api does not expose email verification or email password reset method
   assert.equal(api.confirmPasswordReset, undefined);
 });
 
+test("workspace lifecycle api wrappers are exposed", async () => {
+  globalThis.window = { OPENMEDAILAB_API_BASE: "" };
+  globalThis.location = { port: "5173" };
+  globalThis.fetch = async () => {
+    throw new Error("No network calls expected");
+  };
+
+  const { api } = await import(`./api.js?workspace-lifecycle=${Date.now()}`);
+
+  [
+    "projectStatusCard",
+    "updateMeTaskStatus",
+    "createMeContribution",
+    "withdrawInteraction",
+    "adminOverview",
+    "adminInteractions",
+    "reviewAdminInteraction",
+    "adminTasks",
+    "createAdminTask",
+    "assignAdminTask",
+    "updateAdminTaskStatus",
+    "adminContributions",
+    "reviewAdminContribution",
+    "adminCredits",
+    "adminAuditLogs"
+  ].forEach((method) => assert.equal(typeof api[method], "function", `${method} should be exposed`));
+});
+
 function jsonResponse(status, payload) {
   return {
     ok: status >= 200 && status < 300,
