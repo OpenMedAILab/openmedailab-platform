@@ -11,14 +11,11 @@
   <div style="margin-bottom: 24px;">
     {% for tag in project.tags.all %}<span class="pill" style="background: #f1f5f9; border-style: dashed;">#{{ tag.name }}</span>{% endfor %}
   </div>
-  <div class="card" style="background: var(--bg-color); box-shadow: none; border: 1px solid var(--border); padding: 20px; margin-bottom: 32px; display: flex; gap: 32px; flex-wrap: wrap;">
-    <div style="display: flex; flex-direction: column; gap: 4px;"><span class="muted" style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">smart_toy</span> 初始评分</span><strong style="font-size: 1.2rem;">{{ project.llm_score|default:"-" }}</strong></div>
-    <div style="display: flex; flex-direction: column; gap: 4px;"><span class="muted" style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">star</span> 社区评分</span><strong style="font-size: 1.2rem;">{{ project.community_score|default:"-" }}</strong></div>
-    <div style="display: flex; flex-direction: column; gap: 4px;"><span class="muted" style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">assessment</span> 综合评分</span><strong style="font-size: 1.2rem;">{{ project.composite_score|default:"-" }}</strong></div>
-    <div style="display: flex; flex-direction: column; gap: 4px;"><span class="muted" style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">menu_book</span> 推荐期刊</span><strong style="font-size: 1.2rem;">{{ project.recommended_journal|default:"-" }}</strong></div>
+  <div class="card" style="background: var(--bg-color); box-shadow: none; border: 1px solid var(--border); padding: 20px; margin-bottom: 32px; display: grid; gap: 16px;">
+    <div><strong>科学问题</strong><p class="muted">{{ project.problem_statement|default:"待补充" }}</p></div>
+    <div><strong>临床终点</strong><p class="muted">{{ project.clinical_endpoint|default:"待补充" }}</p></div>
+    <div><strong>已有基础</strong><p class="muted">{{ project.existing_foundation|default:"待补充" }}</p></div>
   </div>
-  <p style="font-size: 1.1rem; line-height: 1.8;">{{ project.summary }}</p>
-  {% if project.source_pdf_path %}<p class="muted" style="margin-top: 16px;"><span class="material-symbols-rounded" style="vertical-align: middle;">picture_as_pdf</span> PDF 路径：{{ project.source_pdf_path }}</p>{% endif %}
 </article>
 
 <section class="grid grid-2" style="margin-top: 24px;">
@@ -101,11 +98,6 @@
   </div>
 </section>
 {% endif %}
-
-<section style="margin-top: 32px;">
-  <h2><span class="material-symbols-rounded">article</span> Markdown 原文</h2>
-  <div class="markdown-body">{{ project.body_markdown|default:"暂无 Markdown 正文。" }}</div>
-</section>
 
 <section class="grid grid-2" style="margin-top: 32px;">
   <div class="card">

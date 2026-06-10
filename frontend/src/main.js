@@ -1,7 +1,7 @@
 import { createApp, computed, onBeforeUnmount, onMounted, reactive, watch } from "vue";
 import { api, initCsrf } from "./api.js";
 import { isPointInsideProfileHoverZone } from "./profileMenu.js";
-import { parseProjectMarkdown, qualityCheckProjectPayload } from "./projectMarkdown.js";
+import { parseProjectJsonImport, qualityCheckProjectPayload } from "./projectJsonImport.js";
 import { latestRelease, releaseHistory, sectionEntries } from "./release.js";
 
 const PAGE_SIZE = 9;
@@ -43,7 +43,6 @@ const state = reactive({
     theme: "",
     tag: "",
     stage: "",
-    has_pdf: "",
     sort: "recommended",
     page: 1,
     page_size: PAGE_SIZE
@@ -77,7 +76,6 @@ const state = reactive({
     tone: "default"
   },
   expandedReleaseVersions: [],
-  heroTitleScrollProgress: 0,
   schema: null,
   admin: {
     activeTab: "overview",
@@ -96,6 +94,24 @@ const state = reactive({
     themeFiles: [],
     themeFilePagination: {},
     themeFileForm: emptyThemeFileForm(),
+    fileManager: {
+      loading: false,
+      rootSaving: false,
+      currentPath: "",
+      rootPath: "",
+      baseRoot: "",
+      breadcrumbs: [],
+      entries: [],
+      selected: null,
+      editorOpen: false,
+      editorPath: "",
+      editorName: "",
+      editorContent: "",
+      serverDirectory: "",
+      newDirectoryName: "",
+      newFileName: "",
+      uploading: false
+    },
     users: [],
     userPagination: {},
     userFilters: { q: "", page: 1, page_size: 50 },
@@ -133,10 +149,11 @@ const state = reactive({
     auditPagination: {},
     auditFilters: { action: "", target_type: "", page: 1, page_size: 50 },
     loadingAuditLogs: false,
-    markdownImport: {
+    jsonImport: {
       rows: [],
       applying: false,
-      fileCount: 0
+      fileCount: 0,
+      previewOpen: false
     }
   },
   forms: {
@@ -212,30 +229,28 @@ const App = {
       { title: "课题", value: state.admin.overview?.counts?.projects || 0, tab: "projects" },
       { title: "任务审批", value: state.admin.overview?.counts?.pending_interactions || 0, tab: "interactions" },
       { title: "任务结果", value: state.admin.overview?.counts?.submitted_contributions || 0, tab: "contributions" },
-      { title: "主题文件域", value: state.admin.overview?.counts?.themes || 0, tab: "themes" },
+      { title: "主题文件空间", value: state.admin.overview?.counts?.themes || 0, tab: "themes" },
       { title: "审计日志", value: state.admin.overview?.counts?.audit_logs || 0, tab: "audit" }
     ]);
     const releaseLatest = computed(() => latestRelease(state.meta.release));
     const releaseHistoryItems = computed(() => releaseHistory(state.meta.release));
-    const heroTitleStyle = computed(() => {
-      const progress = state.heroTitleScrollProgress;
-      return {
-        "--hero-title-scroll": progress.toFixed(3),
-        "--hero-title-opacity": (1 - progress * 0.72).toFixed(3),
-        "--hero-title-background-x": `${Math.round(progress * 40)}%`,
-        "--hero-title-y": `${Math.round(progress * -10)}px`,
-        "--hero-title-mask-stop": `${Math.round(100 - progress * 58)}%`
-      };
-    });
     const profilePointer = { x: 0, y: 0 };
     let confirmDialogResolver = null;
+    const modalOpen = computed(() => Boolean(
+      state.preview.open ||
+      state.releaseModalOpen ||
+      state.confirmDialog.open ||
+      state.admin.projectFormOpen ||
+      state.admin.taskProjectDetail.open ||
+      state.contributionModal.open ||
+      state.admin.fileManager.editorOpen
+    ));
 
     onMounted(async () => {
       window.addEventListener("hashchange", handleRouteChange);
       window.addEventListener("scroll", handleScroll, { passive: true });
       window.addEventListener("keydown", handleKeydown);
       window.addEventListener("pointermove", handlePointerMove, { passive: true });
-      updateHeroTitleScrollProgress();
       await boot();
     });
 
@@ -244,7 +259,16 @@ const App = {
       window.removeEventListener("scroll", handleScroll);
       window.removeEventListener("keydown", handleKeydown);
       window.removeEventListener("pointermove", handlePointerMove);
+      document.body.classList.remove("modal-open");
     });
+
+    watch(
+      modalOpen,
+      (open) => {
+        document.body.classList.toggle("modal-open", open);
+      },
+      { immediate: true }
+    );
 
     watch(
       () => state.route.fullPath,
@@ -508,7 +532,7 @@ const App = {
         .sort((a, b) => {
           const priorityDiff = (RELATION_STATUS_PRIORITY[b.status] || 0) - (RELATION_STATUS_PRIORITY[a.status] || 0);
           if (priorityDiff) return priorityDiff;
-          return String(a.project.topic_id || "").localeCompare(String(b.project.topic_id || ""));
+          return Number(a.project.topic_id || 0) - Number(b.project.topic_id || 0);
         });
     }
 
@@ -1219,16 +1243,16 @@ const App = {
       if (!can("manage_projects")) return;
       try {
         const formPayload = projectFormPayload(state.admin.projectForm);
-        if (!formPayload.topic_id || !formPayload.title || !formPayload.theme) {
-          showToast("课题 ID、标题和主题不能为空");
+        if (!formPayload.title || !formPayload.theme) {
+          showToast("标题和主题不能为空");
+          return;
+        }
+        const quality = qualityCheckProjectPayload(formPayload);
+        if (quality.errors.length) {
+          showToast(quality.errors.join("；"));
           return;
         }
         if (publish) {
-          const quality = qualityCheckProjectPayload(formPayload);
-          if (quality.errors.length) {
-            showToast(quality.errors.join("；"));
-            return;
-          }
           if (quality.warnings.length) {
             const confirmed = await openConfirmDialog({
               title: "确认发布课题",
@@ -1279,7 +1303,11 @@ const App = {
     async function selectAdminTheme(themeId) {
       state.admin.selectedThemeId = Number(themeId);
       state.admin.themeFileForm = emptyThemeFileForm(Number(themeId));
+      const theme = state.admin.themes.find((item) => item.id === Number(themeId));
+      state.admin.fileManager.serverDirectory = theme?.file_space?.server_directory || theme?.slug || "";
+      state.admin.fileManager.currentPath = "";
       await loadThemeFiles();
+      await loadAdminFileSpace("");
     }
 
     async function loadThemeFiles() {
@@ -1365,6 +1393,189 @@ const App = {
       }
     }
 
+    async function loadAdminFileSpace(path = state.admin.fileManager.currentPath || "") {
+      if (!can("manage_themes") || !state.admin.selectedThemeId) {
+        state.admin.fileManager.entries = [];
+        return;
+      }
+      state.admin.fileManager.loading = true;
+      try {
+        const data = await api.adminFileSpace({ theme_id: state.admin.selectedThemeId, path });
+        state.admin.fileManager.currentPath = data.relative_path || "";
+        state.admin.fileManager.rootPath = data.root_path || "";
+        state.admin.fileManager.baseRoot = data.base_root || "";
+        state.admin.fileManager.breadcrumbs = data.breadcrumbs || [];
+        state.admin.fileManager.entries = data.entries || [];
+        state.admin.fileManager.selected = null;
+        const theme = data.theme || selectedAdminTheme.value;
+        state.admin.fileManager.serverDirectory = theme?.file_space?.server_directory || state.admin.fileManager.rootPath || "";
+      } catch (error) {
+        showToast(error.message || "文件空间读取失败");
+      } finally {
+        state.admin.fileManager.loading = false;
+      }
+    }
+
+    async function saveFileSpaceRoot() {
+      if (!can("manage_themes") || !state.admin.selectedThemeId) return;
+      state.admin.fileManager.rootSaving = true;
+      try {
+        const data = await api.adminUpdateThemeFileSpaceRoot(state.admin.selectedThemeId, {
+          server_directory: state.admin.fileManager.serverDirectory
+        });
+        const index = state.admin.themes.findIndex((theme) => theme.id === Number(state.admin.selectedThemeId));
+        if (index >= 0) state.admin.themes[index] = data.theme;
+        showToast("文件空间目录已保存");
+        await loadAdminFileSpace("");
+      } catch (error) {
+        showToast(error.message || "文件空间目录保存失败");
+      } finally {
+        state.admin.fileManager.rootSaving = false;
+      }
+    }
+
+    function selectFileSpaceEntry(entry) {
+      state.admin.fileManager.selected = entry;
+    }
+
+    function openFileSpaceEntry(entry) {
+      selectFileSpaceEntry(entry);
+      if (entry.type === "directory") {
+        loadAdminFileSpace(entry.path);
+      } else {
+        openFileSpaceEditor(entry);
+      }
+    }
+
+    async function openFileSpaceEditor(entry = state.admin.fileManager.selected) {
+      if (!entry || entry.type !== "file") return;
+      try {
+        const data = await api.adminReadFileSpaceFile({ theme_id: state.admin.selectedThemeId, path: entry.path });
+        state.admin.fileManager.editorOpen = true;
+        state.admin.fileManager.editorPath = entry.path;
+        state.admin.fileManager.editorName = data.entry?.name || entry.name;
+        state.admin.fileManager.editorContent = data.content || "";
+      } catch (error) {
+        showToast(error.message || "文件无法在线编辑");
+      }
+    }
+
+    function closeFileSpaceEditor() {
+      state.admin.fileManager.editorOpen = false;
+      state.admin.fileManager.editorPath = "";
+      state.admin.fileManager.editorName = "";
+      state.admin.fileManager.editorContent = "";
+    }
+
+    async function saveFileSpaceEditor() {
+      try {
+        await api.adminUpdateFileSpaceItem({
+          theme_id: state.admin.selectedThemeId,
+          path: state.admin.fileManager.editorPath,
+          new_name: state.admin.fileManager.editorName,
+          content: state.admin.fileManager.editorContent
+        });
+        showToast("文件已保存");
+        closeFileSpaceEditor();
+        await loadAdminFileSpace();
+        await loadThemeFiles();
+      } catch (error) {
+        showToast(error.message || "文件保存失败");
+      }
+    }
+
+    async function createFileSpaceDirectory() {
+      const name = state.admin.fileManager.newDirectoryName.trim();
+      if (!name) {
+        showToast("请输入目录名称");
+        return;
+      }
+      try {
+        await api.adminCreateFileSpaceDirectory({
+          theme_id: state.admin.selectedThemeId,
+          path: state.admin.fileManager.currentPath,
+          name
+        });
+        state.admin.fileManager.newDirectoryName = "";
+        showToast("目录已创建");
+        await loadAdminFileSpace();
+      } catch (error) {
+        showToast(error.message || "目录创建失败");
+      }
+    }
+
+    async function createFileSpaceFile() {
+      const name = state.admin.fileManager.newFileName.trim();
+      if (!name) {
+        showToast("请输入文件名称");
+        return;
+      }
+      try {
+        await api.adminCreateFileSpaceFile({
+          theme_id: state.admin.selectedThemeId,
+          path: state.admin.fileManager.currentPath,
+          name,
+          content: ""
+        });
+        state.admin.fileManager.newFileName = "";
+        showToast("文件已创建");
+        await loadAdminFileSpace();
+        await loadThemeFiles();
+      } catch (error) {
+        showToast(error.message || "文件创建失败");
+      }
+    }
+
+    async function deleteFileSpaceEntry(entry = state.admin.fileManager.selected) {
+      if (!entry) return;
+      const confirmed = await openConfirmDialog({
+        title: "确认删除",
+        message: `确认删除「${entry.name}」吗？该操作会删除服务器文件或目录。`,
+        confirmText: "删除",
+        tone: "danger"
+      });
+      if (!confirmed) return;
+      try {
+        await api.adminDeleteFileSpaceItem({ theme_id: state.admin.selectedThemeId, path: entry.path });
+        showToast("已删除");
+        await loadAdminFileSpace();
+        await loadThemeFiles();
+      } catch (error) {
+        showToast(error.message || "删除失败");
+      }
+    }
+
+    async function handleFileSpaceUpload(event) {
+      const files = Array.from(event.target.files || []);
+      event.target.value = "";
+      if (!files.length || !state.admin.selectedThemeId) return;
+      state.admin.fileManager.uploading = true;
+      try {
+        const formData = new FormData();
+        formData.append("theme_id", String(state.admin.selectedThemeId));
+        formData.append("path", state.admin.fileManager.currentPath || "");
+        files.forEach((file) => {
+          formData.append("files", file);
+          formData.append("relative_paths", file.webkitRelativePath || file.name);
+        });
+        await api.adminUploadFileSpaceFiles(formData);
+        showToast(`已上传 ${files.length} 个文件`);
+        await loadAdminFileSpace();
+        await loadThemeFiles();
+      } catch (error) {
+        showToast(error.message || "上传失败");
+      } finally {
+        state.admin.fileManager.uploading = false;
+      }
+    }
+
+    function formatFileSize(size) {
+      if (size === null || size === undefined) return "";
+      if (size < 1024) return `${size} B`;
+      if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+      return `${(size / 1024 / 1024).toFixed(1)} MB`;
+    }
+
     async function loadAdminInteractions({ reset = false } = {}) {
       if (!can("review_interactions")) return;
       if (reset) state.admin.interactionFilters.page = 1;
@@ -1399,7 +1610,7 @@ const App = {
         for (const project of rows) unique.set(project.id, project);
         state.admin.taskProjects = Array.from(unique.values()).sort((a, b) => {
           const updated = String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
-          return updated || String(a.topic_id || "").localeCompare(String(b.topic_id || ""));
+          return updated || Number(a.topic_id || 0) - Number(b.topic_id || 0);
         });
       } catch (error) {
         showToast(error.message || "任务管理课题读取失败");
@@ -1743,74 +1954,95 @@ const App = {
       await loadActiveAdminTab();
     }
 
-    function clearMarkdownImport() {
-      state.admin.markdownImport.rows = [];
-      state.admin.markdownImport.fileCount = 0;
-      showToast("Markdown 导入提示已清除");
+    function clearJsonImport() {
+      state.admin.jsonImport.rows = [];
+      state.admin.jsonImport.fileCount = 0;
+      state.admin.jsonImport.previewOpen = false;
+      showToast("JSON/JSONL 导入提示已清除");
     }
 
-    async function copyMarkdownTemplate() {
-      const template = state.schema?.markdown_template || "";
+    function downloadJsonlTemplate() {
+      const template = state.schema?.jsonl_template || "";
       if (!template) {
         showToast("模板暂未加载");
         return;
       }
-      try {
-        if (navigator.clipboard?.writeText) {
-          await navigator.clipboard.writeText(template);
-          showToast("Markdown 模板已复制");
-        } else {
-          showToast("当前浏览器不支持自动复制");
-        }
-      } catch (error) {
-        showToast(error.message || "复制失败");
-      }
+      const blob = new Blob([template], { type: "application/x-ndjson;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "openmedailab-project-template.jsonl";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      showToast("JSONL 模板已下载");
     }
 
-    async function handleMarkdownFiles(event) {
-      const files = Array.from(event.target.files || []).filter((file) => file.name.toLowerCase().endsWith(".md"));
-      state.admin.markdownImport.fileCount = files.length;
-      state.admin.markdownImport.rows = [];
+    async function handleJsonFiles(event) {
+      const files = Array.from(event.target.files || []).filter((file) => {
+        const name = file.name.toLowerCase();
+        return name.endsWith(".json") || name.endsWith(".jsonl");
+      });
+      state.admin.jsonImport.fileCount = files.length;
+      state.admin.jsonImport.rows = [];
+      state.admin.jsonImport.previewOpen = false;
       if (!files.length) {
-        showToast("请选择 .md 文件");
+        showToast("请选择 .json 或 .jsonl 文件");
         return;
       }
       const rows = [];
       for (const file of files) {
-        rows.push(await buildMarkdownImportRow(file));
+        rows.push(...(await buildJsonImportRows(file)));
       }
-      state.admin.markdownImport.rows = rows;
+      markDuplicateJsonImportRows(rows);
+      state.admin.jsonImport.rows = rows;
+      state.admin.jsonImport.previewOpen = true;
       event.target.value = "";
     }
 
-    async function buildMarkdownImportRow(file) {
+    async function buildJsonImportRows(file) {
       const sourcePath = file.webkitRelativePath || file.name;
       const text = await file.text();
-      const parsed = parseProjectMarkdown(text, sourcePath);
-      parsed.payload.content_hash = await sha256Hex(text);
-      const row = {
-        id: `${sourcePath}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      let parsedRows = [];
+      try {
+        parsedRows = parseProjectJsonImport(text, sourcePath);
+      } catch (error) {
+        parsedRows = [
+          {
+            templateVersion: "json-v1",
+            payload: { topic_id: "", theme: "", title: "" },
+            errors: [error.message || "JSON 解析失败"],
+            warnings: []
+          }
+        ];
+      }
+      const rows = parsedRows.map((parsed, index) => ({
+        id: `${sourcePath}-${index}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
         fileName: file.name,
-        sourcePath,
+        sourcePath: parsed.sourcePath || `${sourcePath}#${index + 1}`,
         ...parsed,
+        parseErrors: parsed.errors.filter((error) => !qualityCheckProjectPayload(parsed.payload).errors.includes(error)),
+        batchErrors: [],
         existingProjectId: null,
         actionLabel: parsed.errors.length ? "需修复" : "创建草稿"
-      };
-      await refreshMarkdownImportRow(row);
-      return row;
+      }));
+      for (const row of rows) {
+        await refreshJsonImportRow(row);
+      }
+      return rows;
     }
 
-    async function refreshMarkdownImportRow(row) {
-      row.errors = row.templateVersion !== "v1" ? [`暂不支持模板版本 ${row.templateVersion}`] : [];
-      row.errors = [...row.errors, ...qualityCheckProjectPayload(row.payload).errors];
+    async function refreshJsonImportRow(row) {
+      row.errors = [...(row.parseErrors || []), ...(row.batchErrors || []), ...qualityCheckProjectPayload(row.payload).errors];
       row.payload.stage = "draft";
       row.payload.is_public = false;
       row.existingProjectId = null;
       row.actionLabel = row.errors.length ? "需修复" : "创建草稿";
       if (row.errors.length) return;
       try {
-        const duplicates = await findMarkdownImportDuplicates(row.payload);
-        const existing = duplicates.find((item) => item.topic_id === row.payload.topic_id);
+        const duplicates = await findJsonImportDuplicates(row.payload);
+        const existing = duplicates.find((item) => Number(item.topic_id) === Number(row.payload.topic_id));
         const warnings = duplicateWarningsForImport(row.payload, duplicates);
         row.warnings = [...new Set([...qualityCheckProjectPayload(row.payload).warnings, ...warnings])];
         if (existing) {
@@ -1823,14 +2055,57 @@ const App = {
       }
     }
 
-    async function applyMarkdownImport() {
-      if (!can("manage_projects")) return;
-      const rows = state.admin.markdownImport.rows.filter((row) => !row.errors.length);
-      if (!rows.length) {
-        showToast("没有可提交的 Markdown 课题");
+    function markDuplicateJsonImportRows(rows) {
+      rows.forEach((row) => {
+        row.batchErrors = [];
+      });
+      const seen = new Map();
+      for (const row of rows) {
+        const key = String(row.payload.topic_id || "");
+        if (!key) continue;
+        if (!seen.has(key)) {
+          seen.set(key, row);
+          continue;
+        }
+        row.batchErrors = [...(row.batchErrors || []), `本次导入中 id ${key} 重复`];
+        row.errors = [...(row.errors || []), `本次导入中 id ${key} 重复`];
+        const first = seen.get(key);
+        first.batchErrors = [...(first.batchErrors || []), `本次导入中 id ${key} 重复`];
+        first.errors = [...(first.errors || []), `本次导入中 id ${key} 重复`];
+        row.actionLabel = "需修复";
+        first.actionLabel = "需修复";
+      }
+    }
+
+    async function refreshAllJsonImportRows() {
+      markDuplicateJsonImportRows(state.admin.jsonImport.rows);
+      for (const row of state.admin.jsonImport.rows) {
+        await refreshJsonImportRow(row);
+      }
+    }
+
+    function openJsonImportPreview() {
+      if (!state.admin.jsonImport.rows.length) {
+        showToast("请先选择 JSON/JSONL 文件");
         return;
       }
-      state.admin.markdownImport.applying = true;
+      state.admin.jsonImport.previewOpen = true;
+    }
+
+    function closeJsonImportPreview() {
+      if (state.admin.jsonImport.applying) return;
+      state.admin.jsonImport.previewOpen = false;
+    }
+
+    async function applyJsonImport() {
+      if (!can("manage_projects")) return;
+      await refreshAllJsonImportRows();
+      const rows = state.admin.jsonImport.rows.filter((row) => !row.errors.length);
+      if (!rows.length) {
+        showToast("没有可提交的 JSON 课题");
+        return;
+      }
+      state.admin.jsonImport.applying = true;
       let created = 0;
       let updated = 0;
       let failed = 0;
@@ -1853,14 +2128,15 @@ const App = {
             row.actionLabel = "提交失败";
           }
         }
-        showToast(`Markdown 导入完成：新增 ${created}，更新 ${updated}，失败 ${failed}`);
+        showToast(`JSON/JSONL 导入完成：新增 ${created}，更新 ${updated}，失败 ${failed}`);
+        if (!failed) state.admin.jsonImport.previewOpen = false;
         await loadAdminProjects({ reset: true });
         await loadProjects({ reset: true });
         const [meta, themes] = await Promise.all([api.meta(), api.adminThemes()]);
         state.meta = meta;
         state.admin.themes = themes.results;
       } finally {
-        state.admin.markdownImport.applying = false;
+        state.admin.jsonImport.applying = false;
       }
     }
 
@@ -1878,7 +2154,7 @@ const App = {
       const confirmedName = window.prompt("请确认主题名称", name);
       if (!confirmedName?.trim()) throw new Error("主题名称不能为空");
       const slug = window.prompt("主题 slug（可留空自动生成）", uniqueSlugHint(confirmedName));
-      const description = window.prompt("主题说明", "由 Markdown 导入确认创建") || "";
+      const description = window.prompt("主题说明", "由 JSON/JSONL 导入确认创建") || "";
       const theme = await api.adminCreateTheme({ name: confirmedName.trim(), slug: String(slug || "").trim(), description });
       state.admin.themes = [...state.admin.themes, theme];
       return theme;
@@ -1933,7 +2209,6 @@ const App = {
       state.route = parseRoute();
       if (state.route.name !== previousName) {
         closeRouteScopedOverlays();
-        state.heroTitleScrollProgress = 0;
         window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "auto" }));
       }
     }
@@ -1963,21 +2238,11 @@ const App = {
     }
 
     function handleScroll() {
-      updateHeroTitleScrollProgress();
       if (!["home", "projects"].includes(state.route.name)) return;
       const remaining = document.documentElement.scrollHeight - window.innerHeight - window.scrollY;
       if (remaining < 420) {
         loadMoreProjects();
       }
-    }
-
-    function updateHeroTitleScrollProgress() {
-      if (!["home", "projects"].includes(state.route.name)) {
-        state.heroTitleScrollProgress = 0;
-        return;
-      }
-      const progress = Math.min(1, Math.max(0, window.scrollY / 260));
-      state.heroTitleScrollProgress = Number(progress.toFixed(3));
     }
 
     function handleKeydown(event) {
@@ -2177,7 +2442,6 @@ const App = {
       adminOverviewCards,
       releaseLatest,
       releaseHistoryItems,
-      heroTitleStyle,
       can,
       navigate,
       openProjectPreview,
@@ -2252,6 +2516,18 @@ const App = {
       saveThemeFile,
       deactivateThemeFile,
       selectAdminTheme,
+      loadAdminFileSpace,
+      saveFileSpaceRoot,
+      selectFileSpaceEntry,
+      openFileSpaceEntry,
+      openFileSpaceEditor,
+      closeFileSpaceEditor,
+      saveFileSpaceEditor,
+      createFileSpaceDirectory,
+      createFileSpaceFile,
+      deleteFileSpaceEntry,
+      handleFileSpaceUpload,
+      formatFileSize,
       setAdminTab,
       searchAdminUsers,
       resetUserPassword,
@@ -2278,18 +2554,20 @@ const App = {
       auditTargetLabel,
       auditSummary,
       formatAuditTime,
-      clearMarkdownImport,
-      copyMarkdownTemplate,
-      handleMarkdownFiles,
-      refreshMarkdownImportRow,
-      applyMarkdownImport,
+      clearJsonImport,
+      downloadJsonlTemplate,
+      handleJsonFiles,
+      refreshJsonImportRow,
+      refreshAllJsonImportRows,
+      openJsonImportPreview,
+      closeJsonImportPreview,
+      applyJsonImport,
       archiveProject,
       searchAdminProjects,
       loadMoreAdminProjects,
       displayScore,
       shortText,
       roleCountEntries,
-      formatList,
       fileTypeLabel,
       stageLabel,
       fieldErrors,
@@ -2305,10 +2583,9 @@ const App = {
     <div class="app-shell">
       <header class="topbar">
         <button class="brand" @click="navigate('home')" type="button">
-          <span class="brand-mark">OM</span>
+          <img class="brand-mark" src="/static/brand/openmedailab-logo.png" alt="OpenMedAILab" />
           <span>
             <strong>OpenMedAILab</strong>
-            <small>医学 AI 开放课题协作平台</small>
           </span>
         </button>
         <nav class="main-nav" aria-label="主导航">
@@ -2374,22 +2651,6 @@ const App = {
 
         <template v-else>
           <section v-if="activeView === 'home' || activeView === 'projects'" class="library-view">
-            <div class="library-hero">
-              <div>
-                <span class="eyebrow"><span class="material-symbols-rounded" style="font-size: 18px;">biotech</span> 医学 AI 开放课题库</span>
-                <h1 class="hero-title" :style="heroTitleStyle">
-                  <span>让医学问题，</span>
-                  <span>等到它的盖世英雄</span>
-                </h1>
-                <p>真实临床场景，开放协作验证。发现课题、理解数据需求，找到一起推动答案的人。</p>
-              </div>
-              <dl class="hero-stats">
-                <div><dt>课题</dt><dd>{{ stats.total }}</dd></div>
-                <div><dt>主题</dt><dd>{{ stats.themes }}</dd></div>
-                <div><dt>收藏</dt><dd>{{ stats.follows }}</dd></div>
-              </dl>
-            </div>
-
             <div class="toolbar">
               <label class="search-box">
                 <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">search</span> 搜索</span>
@@ -2413,11 +2674,9 @@ const App = {
                 <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">sort</span> 排序</span>
                 <select v-model="state.filters.sort" @change="applyFilters">
                   <option value="recommended">综合推荐</option>
-                  <option value="llm_score">初始评分</option>
-                  <option value="community_score">社区评分</option>
                   <option value="follows">关注热度</option>
                   <option value="updated">最近更新</option>
-                  <option value="project_no">课题编号</option>
+                  <option value="project_id">课题 ID</option>
                 </select>
               </label>
               <button class="primary-button" type="button" @click="applyFilters"><span class="material-symbols-rounded">filter_list</span> 筛选</button>
@@ -2442,7 +2701,14 @@ const App = {
                 <h2>{{ selectedTheme ? selectedTheme.name : '全部课题' }}</h2>
                 <p>{{ selectedTheme?.description || '向下滚动会自动加载更多课题。' }}</p>
               </div>
-              <button v-if="selectedTheme" class="ghost-button" type="button" @click="selectSpace(selectedTheme.slug)">查看主题文件空间</button>
+              <div class="section-head-actions">
+                <dl class="inline-stats" aria-label="课题库统计">
+                  <div><dt>课题</dt><dd>{{ stats.total }}</dd></div>
+                  <div><dt>主题</dt><dd>{{ stats.themes }}</dd></div>
+                  <div><dt>收藏</dt><dd>{{ stats.follows }}</dd></div>
+                </dl>
+                <button v-if="selectedTheme" class="ghost-button" type="button" @click="selectSpace(selectedTheme.slug)">查看主题文件空间</button>
+              </div>
             </div>
 
             <div class="project-grid">
@@ -2463,24 +2729,22 @@ const App = {
                 <div class="project-list-main">
                   <div class="card-topline">
                     <span><span class="material-symbols-rounded" style="font-size: 16px;">category</span> {{ project.theme?.name || '未分类' }}</span>
-                    <span>{{ project.topic_id }}<template v-if="project.project_no"> · #{{ project.project_no }}</template></span>
+                    <span>ID {{ project.topic_id }}</span>
                     <span>{{ project.stage_label }}</span>
                   </div>
                   <h3>{{ project.title }}</h3>
-                  <p>{{ shortText(project.summary || project.problem_statement, 160) }}</p>
+                  <p>{{ shortText(project.problem_statement, 100) }}</p>
                   <div class="project-key-fields">
-                    <div><dt>研究目标</dt><dd>{{ shortText(project.research_goal, 80) }}</dd></div>
-                    <div><dt>数据需求</dt><dd>{{ shortText(formatList(project.data_requirements), 80) }}</dd></div>
-                    <div><dt>评价指标</dt><dd>{{ shortText(formatList(project.evaluation_metrics), 80) }}</dd></div>
+                    <div><dt>科学问题</dt><dd>{{ shortText(project.problem_statement, 100) }}</dd></div>
+                    <div><dt>临床终点</dt><dd>{{ shortText(project.clinical_endpoint, 100) }}</dd></div>
+                    <div><dt>已有基础</dt><dd>{{ shortText(project.existing_foundation, 100) }}</dd></div>
                   </div>
                   <div class="tag-row">
                     <span v-for="tag in project.tags.slice(0, 5)" :key="tag.id">{{ tag.name }}</span>
-                    <span v-for="role in (project.needed_roles || []).slice(0, 4)" :key="role">{{ role }}</span>
                   </div>
                 </div>
                 <div class="project-list-side">
                   <dl class="card-metrics">
-                    <div><dt>综合评分</dt><dd>{{ displayScore(project.composite_score) }}</dd></div>
                     <div><dt>收藏</dt><dd>{{ project.follow_count || 0 }}</dd></div>
                     <div><dt>参与</dt><dd>{{ project.interest_count || 0 }}</dd></div>
                   </dl>
@@ -2548,14 +2812,15 @@ const App = {
               <div>
                 <span class="eyebrow">{{ state.currentProject.theme?.name || '未分类' }} · {{ state.currentProject.stage_label }}</span>
                 <h1>{{ state.currentProject.title }}</h1>
-                <p>{{ state.currentProject.summary }}</p>
+                <p v-if="state.currentProject.title_en" class="english-title">{{ state.currentProject.title_en }}</p>
+                <p>{{ state.currentProject.problem_statement }}</p>
                 <div class="tag-row">
                   <span v-for="tag in state.currentProject.tags" :key="tag.id">{{ tag.name }}</span>
                 </div>
               </div>
               <div class="score-panel">
-                <strong>{{ displayScore(state.currentProject.composite_score) }}</strong>
-                <span>综合评分</span>
+                <strong>ID {{ state.currentProject.topic_id }}</strong>
+                <span>课题编号</span>
                 <button v-if="shouldShowFollowButton(state.currentProject)" class="primary-button follow-button" :class="{ active: isProjectFollowing(state.currentProject) }" type="button" @click="toggleFollow(state.currentProject)">
                   {{ isProjectFollowing(state.currentProject) ? '已收藏' : '收藏课题' }}
                 </button>
@@ -2567,12 +2832,8 @@ const App = {
                 <h2>结构化课题信息</h2>
                 <div class="info-list">
                   <section><h3>科学问题</h3><p>{{ state.currentProject.problem_statement || '待补充' }}</p></section>
-                  <section><h3>研究目标</h3><p>{{ state.currentProject.research_goal || '待补充' }}</p></section>
-                  <section><h3>技术路线</h3><p>{{ state.currentProject.technical_route || '待补充' }}</p></section>
-                  <section><h3>数据需求</h3><p>{{ formatList(state.currentProject.data_requirements) }}</p></section>
-                  <section><h3>评价指标</h3><p>{{ formatList(state.currentProject.evaluation_metrics) }}</p></section>
-                  <section><h3>预期成果</h3><p>{{ formatList(state.currentProject.expected_outputs) }}</p></section>
-                  <section><h3>合规说明</h3><p>{{ state.currentProject.compliance_notes || '第一版默认不允许上传可识别患者数据。' }}</p></section>
+                  <section><h3>临床终点</h3><p>{{ state.currentProject.clinical_endpoint || '待补充' }}</p></section>
+                  <section><h3>已有基础</h3><p>{{ state.currentProject.existing_foundation || '待补充' }}</p></section>
                 </div>
               </article>
 
@@ -2590,7 +2851,7 @@ const App = {
 
             <div class="detail-grid">
               <article class="content-panel">
-                <h2>主题文件域</h2>
+                <h2>主题文件空间</h2>
                 <div v-if="state.currentProjectThemeSpace?.sections?.length" class="theme-file-sections">
                   <div class="domain-section" v-for="section in state.currentProjectThemeSpace.sections" :key="section.name">
                     <div class="domain-section-head">
@@ -2608,16 +2869,7 @@ const App = {
                   </div>
                   <button v-if="state.currentProject.theme?.slug" class="ghost-button" type="button" @click="selectSpace(state.currentProject.theme.slug)">查看主题文件空间</button>
                 </div>
-                <p v-else>{{ state.currentProject.theme?.slug ? '该主题还没有登记数据资产文件。' : '该课题暂无所属主题，无法关联主题文件域。' }}</p>
-                <h2 class="subsection-title">课题原始文档</h2>
-                <div class="file-list">
-                  <a v-for="doc in state.currentProject.documents" :key="doc.id" :href="doc.path" target="_blank" rel="noreferrer">
-                    <span>{{ fileTypeLabel(doc.doc_type) }}</span>
-                    <strong>{{ doc.title || doc.path }}</strong>
-                    <small>{{ doc.path }}</small>
-                  </a>
-                  <p v-if="!state.currentProject.documents.length">暂无文件记录。</p>
-                </div>
+                <p v-else>{{ state.currentProject.theme?.slug ? '该主题还没有登记数据资产文件。' : '该课题暂无所属主题，无法关联主题文件空间。' }}</p>
               </article>
               <aside class="side-panel">
                 <h2>参与操作</h2>
@@ -2648,9 +2900,8 @@ const App = {
           <section v-else-if="activeView === 'space'" class="space-view">
             <div class="section-head">
               <div>
-                <span class="eyebrow">主题数据文件域</span>
+                <span class="eyebrow">主题数据文件空间</span>
                 <h1>文件空间</h1>
-                <p>按主题集中登记数据集、数据字典、标注规范、伦理合规材料和模型实验资产。</p>
               </div>
             </div>
             <div class="theme-strip">
@@ -2684,8 +2935,8 @@ const App = {
                 </dl>
                 <div class="space-domain-grid">
                   <section class="policy-box">
-                    <strong>文件域策略</strong>
-                    <p>{{ state.themeSpace.theme.file_space?.storage_policy || '只登记主题级数据资产元信息，不登记单个课题原文、PDF 或公开页面。' }}</p>
+                    <strong>文件空间策略</strong>
+                    <p>{{ state.themeSpace.theme.file_space?.storage_policy || '只登记主题级数据资产元信息。' }}</p>
                   </section>
                   <section class="space-type-panel">
                     <strong>允许登记的资产类型</strong>
@@ -2699,7 +2950,6 @@ const App = {
                   <span class="material-symbols-rounded" style="font-size: 28px;">folder_open</span>
                   <div>
                     <strong>当前主题还没有登记数据资产文件</strong>
-                    <p>这里会展示数据集、数据字典、标注规范、合规材料和模型实验资产。管理员可在“管理 / 主题与文件域”中维护。</p>
                   </div>
                 </div>
                 <div class="space-section-grid">
@@ -2808,7 +3058,7 @@ const App = {
                         <span class="status-chip strong">{{ myTaskStatusLabel(task) }}</span>
                       </div>
                       <h2>{{ task.project.title }}</h2>
-                      <p>{{ shortText(task.project.summary || task.project.problem_statement, 180) }}</p>
+                      <p>{{ shortText(task.project.problem_statement, 100) }}</p>
                       <small>{{ task.project.topic_id }} · {{ task.project.theme?.name || '未分类' }}</small>
                       <div class="relation-summary">{{ taskRelationSummary(task) }}</div>
                       <div v-if="task.contributions.length" class="task-result-strip">
@@ -2900,14 +3150,13 @@ const App = {
                     <span>{{ project.stage_label }}</span>
                   </div>
                   <h3>{{ project.title }}</h3>
-                  <p>{{ shortText(project.summary || project.problem_statement, 180) }}</p>
+                  <p>{{ shortText(project.problem_statement, 100) }}</p>
                   <div class="tag-row">
                     <span v-for="tag in project.tags.slice(0, 5)" :key="tag.id">{{ tag.name }}</span>
                   </div>
                 </div>
                 <div class="project-list-side">
                   <dl class="card-metrics">
-                    <div><dt>综合评分</dt><dd>{{ displayScore(project.composite_score) }}</dd></div>
                     <div><dt>收藏</dt><dd>{{ project.follow_count || 0 }}</dd></div>
                     <div><dt>参与</dt><dd>{{ project.interest_count || 0 }}</dd></div>
                   </dl>
@@ -2963,7 +3212,7 @@ const App = {
                 <div>
                   <span class="eyebrow">管理</span>
                   <h1>内容管理工作台</h1>
-                  <p>主题、文件域、课题字段和导入结果都由后端 API 写入数据库。停用操作保留审计记录，不做物理删除。</p>
+                  <p>主题、文件空间、课题字段和导入结果都由后端 API 写入数据库。停用操作保留审计记录，不做物理删除。</p>
                 </div>
               </div>
 
@@ -2972,7 +3221,7 @@ const App = {
                 <button type="button" :class="{ active: state.admin.activeTab === 'interactions' }" @click="setAdminTab('interactions')">任务审批</button>
                 <button type="button" :class="{ active: state.admin.activeTab === 'contributions' }" @click="setAdminTab('contributions')">任务管理</button>
                 <button type="button" :class="{ active: state.admin.activeTab === 'projects' }" @click="setAdminTab('projects')">课题管理</button>
-                <button type="button" :class="{ active: state.admin.activeTab === 'themes' }" @click="setAdminTab('themes')">主题与文件域</button>
+                <button type="button" :class="{ active: state.admin.activeTab === 'themes' }" @click="setAdminTab('themes')">主题与文件空间</button>
                 <button type="button" :class="{ active: state.admin.activeTab === 'users' }" @click="setAdminTab('users')">用户管理</button>
                 <button type="button" :class="{ active: state.admin.activeTab === 'audit' }" @click="setAdminTab('audit')">审计日志</button>
               </div>
@@ -3066,7 +3315,7 @@ const App = {
                 <div class="admin-table task-project-table">
                   <div class="admin-table-head"><span>课题名称</span><span>主题</span><span>课题状态</span><span>课题 ID</span><span>操作</span></div>
                   <div class="admin-table-row" v-for="project in state.admin.taskProjects" :key="project.id">
-                    <span><strong>{{ project.title }}</strong><small>{{ shortText(project.summary || project.problem_statement, 80) }}</small></span>
+                    <span><strong>{{ project.title }}</strong><small>{{ shortText(project.problem_statement, 100) }}</small></span>
                     <span>{{ project.theme?.name || '未分类' }}</span>
                     <span>{{ project.stage_label }}</span>
                     <span>{{ project.topic_id }}</span>
@@ -3158,58 +3407,41 @@ const App = {
                 <article class="content-panel markdown-import-panel">
                   <div class="panel-title-row">
                     <div>
-                      <h2>Markdown 导入</h2>
-                      <p>读取单个 Markdown 文件或文件夹下的多个 Markdown 文件，解析后先预览，再写入现有课题 API。</p>
+                      <h2>JSON/JSONL 导入</h2>
+                      <p>只能选择 JSON、JSONL 文件或包含这些文件的目录；解析后先弹窗预览，确认后写入数据库。</p>
                     </div>
-                    <button class="ghost-button" type="button" @click="copyMarkdownTemplate">复制 Markdown 模板</button>
+                    <button class="ghost-button" type="button" @click="downloadJsonlTemplate">下载 JSONL 模板</button>
                   </div>
                   <div class="markdown-import-actions">
                     <label class="file-picker">
-                      <span>选择 Markdown 文件</span>
-                      <input type="file" accept=".md,text/markdown" multiple @change="handleMarkdownFiles" />
+                      <span>选择 JSON/JSONL 文件</span>
+                      <input type="file" accept=".json,.jsonl,application/json,application/x-ndjson" multiple @change="handleJsonFiles" />
                     </label>
                     <label class="file-picker">
-                      <span>选择 Markdown 文件夹</span>
-                      <input type="file" accept=".md,text/markdown" webkitdirectory directory multiple @change="handleMarkdownFiles" />
+                      <span>选择 JSON 目录</span>
+                      <input type="file" accept=".json,.jsonl,application/json,application/x-ndjson" webkitdirectory directory multiple @change="handleJsonFiles" />
                     </label>
-                    <button class="primary-button" type="button" :disabled="state.admin.markdownImport.applying || !state.admin.markdownImport.rows.length" @click="applyMarkdownImport">
-                      {{ state.admin.markdownImport.applying ? '正在提交' : '提交可导入项' }}
+                    <button class="primary-button" type="button" :disabled="state.admin.jsonImport.applying || !state.admin.jsonImport.rows.length" @click="openJsonImportPreview">
+                      预览并确认
                     </button>
-                    <button class="ghost-button" type="button" :disabled="state.admin.markdownImport.applying || (!state.admin.markdownImport.rows.length && !state.admin.markdownImport.fileCount)" @click="clearMarkdownImport">
+                    <button class="ghost-button" type="button" :disabled="state.admin.jsonImport.applying || (!state.admin.jsonImport.rows.length && !state.admin.jsonImport.fileCount)" @click="clearJsonImport">
                       清除导入提示
                     </button>
                   </div>
-                  <div v-if="state.admin.markdownImport.rows.length" class="markdown-import-list">
-                    <div v-for="row in state.admin.markdownImport.rows" :key="row.id" class="markdown-import-row" :class="{ blocked: row.errors.length }">
-                      <div>
-                        <strong>{{ row.payload.title || row.fileName }}</strong>
-                        <small>{{ row.sourcePath }}</small>
-                      </div>
-                      <label class="inline-row-field"><span>课题ID</span><input v-model="row.payload.topic_id" type="text" /></label>
-                      <label class="inline-row-field"><span>标题</span><input v-model="row.payload.title" type="text" /></label>
-                      <label class="inline-row-field"><span>主题</span><input v-model="row.payload.theme" type="text" /></label>
-                      <span>{{ row.actionLabel }}</span>
-                      <span class="markdown-import-notes">
-                        <template v-if="row.errors.length">错误：{{ row.errors.join('；') }}</template>
-                        <template v-else-if="row.warnings.length">待补充：{{ row.warnings.join('、') }}</template>
-                        <template v-else>字段完整</template>
-                      </span>
-                      <button class="ghost-button" type="button" @click="refreshMarkdownImportRow(row)">重新检测</button>
-                    </div>
-                  </div>
-                  <p v-else>尚未选择 Markdown 文件。模板中的可选章节未解析到时，会按空字段保存并在用户侧显示“待补充”。</p>
+                  <p v-if="state.admin.jsonImport.rows.length">已解析 {{ state.admin.jsonImport.rows.length }} 条课题记录，其中 {{ state.admin.jsonImport.rows.filter((row) => !row.errors.length).length }} 条可导入。</p>
+                  <p v-else>尚未选择 JSON/JSONL 文件。JSON 文件可为单个对象、对象数组或包含 projects 数组的对象；JSONL 文件每行一个课题对象。</p>
                 </article>
 
                 <article class="content-panel schema-helper-panel">
                   <div class="panel-title-row">
                     <div>
-                      <h2>字段契约与 Markdown 模板</h2>
-                      <p>系统内表单、Markdown 导入和后端保存都按这些字段对齐。</p>
+                      <h2>字段契约与 JSONL 模板</h2>
+                      <p>系统内表单、JSON/JSONL 导入和后端保存都按这些字段对齐。</p>
                     </div>
                   </div>
                   <details>
-                    <summary>查看 Markdown 模板</summary>
-                    <pre class="markdown-template-preview">{{ state.schema.markdown_template }}</pre>
+                    <summary>查看 JSONL 模板</summary>
+                    <pre class="markdown-template-preview">{{ state.schema.jsonl_template }}</pre>
                   </details>
                   <div class="schema-table schema-table-wide">
                     <div v-for="field in state.schema.fields" :key="field.name">
@@ -3235,53 +3467,29 @@ const App = {
                     </header>
                     <form class="stack-form project-edit-form project-form-dialog-body" @submit.prevent="saveProject()">
                       <div class="form-grid">
-                        <label><span>课题 ID</span><input v-model="state.admin.projectForm.topic_id" type="text" :disabled="Boolean(state.admin.projectForm.id)" /></label>
                         <label><span>主题</span>
                           <select v-model="state.admin.projectForm.theme">
                             <option value="">请选择主题</option>
                             <option v-for="theme in state.admin.themes" :key="theme.id" :value="theme.slug">{{ theme.name }}</option>
                           </select>
                         </label>
-                        <label><span>主题内编号</span><input v-model="state.admin.projectForm.project_no" type="number" min="0" /></label>
                         <label><span>阶段</span>
                           <select v-model="state.admin.projectForm.stage">
                             <option v-for="stage in state.meta.project_stages" :key="stage.value" :value="stage.value">{{ stage.label }}</option>
                           </select>
                         </label>
                       </div>
-                      <label><span>标题</span><input v-model="state.admin.projectForm.title" type="text" /></label>
-                      <label><span>摘要</span><textarea v-model="state.admin.projectForm.summary"></textarea></label>
-                      <label><span>科学问题</span><textarea v-model="state.admin.projectForm.problem_statement"></textarea></label>
-                      <label><span>研究目标</span><textarea v-model="state.admin.projectForm.research_goal"></textarea></label>
-                      <label><span>技术路线</span><textarea v-model="state.admin.projectForm.technical_route"></textarea></label>
+                      <label><span>Title（中文）</span><input v-model="state.admin.projectForm.title" type="text" /></label>
+                      <label><span>Title（英文，选填）</span><input v-model="state.admin.projectForm.title_en" type="text" /></label>
                       <div class="form-grid">
-                        <label><span>数据类型</span><input v-model="state.admin.projectForm.data_type" type="text" /></label>
-                        <label><span>最小样本量</span><input v-model="state.admin.projectForm.minimum_cases" type="number" min="0" /></label>
-                        <label><span>数据来源</span><input v-model="state.admin.projectForm.data_source" type="text" /></label>
-                        <label><span>隐私要求</span><input v-model="state.admin.projectForm.privacy" type="text" /></label>
+                        <label><span>科学问题（250字以内）</span><textarea v-model="state.admin.projectForm.problem_statement" maxlength="250"></textarea></label>
+                        <label><span>临床终点（250字以内）</span><textarea v-model="state.admin.projectForm.clinical_endpoint" maxlength="250"></textarea></label>
+                        <label><span>已有基础（250字以内）</span><textarea v-model="state.admin.projectForm.existing_foundation" maxlength="250"></textarea></label>
                       </div>
-                      <div class="form-grid">
-                        <label><span>评价指标（每行一条）</span><textarea v-model="state.admin.projectForm.evaluation_metrics"></textarea></label>
-                        <label><span>预期成果（每行一条）</span><textarea v-model="state.admin.projectForm.expected_outputs"></textarea></label>
-                        <label><span>文件列表（类型|标题|路径，每行一条）</span><textarea v-model="state.admin.projectForm.documents"></textarea></label>
-                      </div>
-                      <label><span>合规说明</span><textarea v-model="state.admin.projectForm.compliance_notes"></textarea></label>
                       <div class="form-grid">
                         <label><span>标签（逗号分隔）</span><input v-model="state.admin.projectForm.tags" type="text" /></label>
-                        <label><span>需要角色（逗号分隔）</span><input v-model="state.admin.projectForm.needed_roles" type="text" /></label>
-                        <label><span>初始评分</span><input v-model="state.admin.projectForm.llm_score" type="number" step="0.1" /></label>
-                        <label><span>综合评分</span><input v-model="state.admin.projectForm.composite_score" type="number" step="0.1" /></label>
                       </div>
-                      <label><span>推荐期刊</span><input v-model="state.admin.projectForm.recommended_journal" type="text" /></label>
-                      <div class="form-grid">
-                        <label><span>Markdown 路径</span><input v-model="state.admin.projectForm.source_md_path" type="text" /></label>
-                        <label><span>PDF 路径</span><input v-model="state.admin.projectForm.source_pdf_path" type="text" /></label>
-                        <label><span>公开页路径</span><input v-model="state.admin.projectForm.page_path" type="text" /></label>
-                        <label><span>评分维度（维度|分数，每行一条）</span><textarea class="score-dimensions-editor" v-model="state.admin.projectForm.score_dimensions"></textarea></label>
-                      </div>
-                      <label><span>正文 Markdown</span><textarea class="markdown-body-editor" v-model="state.admin.projectForm.body_markdown"></textarea></label>
                       <div class="button-row form-actions">
-                        <label class="inline-check"><input v-model="state.admin.projectForm.has_pdf" type="checkbox" /> 有 PDF</label>
                         <label class="inline-check"><input v-model="state.admin.projectForm.is_public" type="checkbox" /> 公开展示</label>
                         <button class="ghost-button" type="submit">保存草稿</button>
                         <button class="primary-button" type="button" @click="saveProject({ publish: true })">发布课题</button>
@@ -3296,7 +3504,7 @@ const App = {
                   <div class="panel-title-row">
                     <div>
                       <h2>{{ state.admin.themeForm.id ? '编辑主题' : '新增主题' }}</h2>
-                      <p>主题配置和文件域策略会保存到数据库。</p>
+                      <p>主题配置和文件空间策略会保存到数据库。</p>
                     </div>
                     <button class="ghost-button" type="button" @click="newTheme">清空</button>
                   </div>
@@ -3308,7 +3516,7 @@ const App = {
                       <label class="inline-check"><input v-model="state.admin.themeForm.is_active" type="checkbox" /> 启用主题</label>
                     </div>
                     <label><span>主题说明</span><textarea v-model="state.admin.themeForm.description"></textarea></label>
-                    <label><span>文件域策略 JSON</span><textarea class="json-editor compact-json-editor" v-model="state.admin.themeForm.file_space"></textarea></label>
+                    <label><span>文件空间策略 JSON</span><textarea class="json-editor compact-json-editor" v-model="state.admin.themeForm.file_space"></textarea></label>
                     <button class="primary-button" type="submit">保存主题</button>
                   </form>
 
@@ -3325,54 +3533,142 @@ const App = {
                 <article class="content-panel admin-list-panel">
                   <div class="panel-title-row">
                     <div>
-                      <h2>主题数据文件域</h2>
-                      <p>{{ selectedAdminTheme?.name || '请选择主题' }} · {{ state.admin.themeFiles.length }} 个数据资产</p>
+                      <h2>文件空间管理</h2>
+                      <p>{{ selectedAdminTheme?.name || '请选择主题' }}</p>
                     </div>
-                    <button class="primary-button" type="button" @click="newThemeFile">新增文件</button>
                   </div>
-                  <label><span>选择主题文件域</span>
+                  <label><span>选择主题</span>
                     <select :value="state.admin.selectedThemeId" @change="selectAdminTheme($event.target.value)">
                       <option v-for="theme in state.admin.themes" :key="theme.id" :value="theme.id">{{ theme.name }}</option>
                     </select>
                   </label>
-                  <form class="stack-form theme-file-form" @submit.prevent="saveThemeFile">
-                    <div class="form-grid">
-                      <label><span>栏目</span><input v-model="state.admin.themeFileForm.section" type="text" /></label>
-                      <label><span>文件类型</span>
-                        <select v-model="state.admin.themeFileForm.file_type">
-                          <option v-for="type in state.schema.theme_file_types || []" :key="type.value" :value="type.value">{{ type.label }}</option>
-                        </select>
+                  <div class="file-manager">
+                    <div class="file-manager-root">
+                      <label>
+                        <span>服务器目录</span>
+                        <input v-model="state.admin.fileManager.serverDirectory" type="text" :placeholder="state.admin.fileManager.baseRoot || '文件空间根目录'" />
                       </label>
-                      <label><span>排序</span><input v-model="state.admin.themeFileForm.sort_order" type="number" /></label>
-                      <label class="inline-check"><input v-model="state.admin.themeFileForm.is_active" type="checkbox" /> 启用文件</label>
+                      <button class="primary-button" type="button" :disabled="state.admin.fileManager.rootSaving" @click="saveFileSpaceRoot">
+                        {{ state.admin.fileManager.rootSaving ? '保存中' : '保存目录' }}
+                      </button>
                     </div>
-                    <label><span>文件标题</span><input v-model="state.admin.themeFileForm.title" type="text" /></label>
-                    <label><span>文件路径或链接</span><input v-model="state.admin.themeFileForm.path" type="text" /></label>
-                    <label><span>说明</span><textarea v-model="state.admin.themeFileForm.description"></textarea></label>
-                    <button class="primary-button" type="submit">保存主题文件</button>
-                  </form>
-                  <div class="admin-table theme-file-table">
-                    <div class="admin-table-head">
-                      <span>文件</span>
-                      <span>栏目</span>
-                      <span>类型</span>
-                      <span>状态</span>
-                      <span>操作</span>
+                    <small class="field-hint">目录必须位于后端配置的文件空间根目录下：{{ state.admin.fileManager.baseRoot || '读取中' }}</small>
+                    <div class="file-manager-toolbar">
+                      <div class="breadcrumb-row">
+                        <button
+                          v-for="crumb in state.admin.fileManager.breadcrumbs"
+                          :key="crumb.path || 'root'"
+                          class="text-button"
+                          type="button"
+                          @click="loadAdminFileSpace(crumb.path)"
+                        >
+                          {{ crumb.name }}
+                        </button>
+                      </div>
+                      <button class="ghost-button" type="button" :disabled="state.admin.fileManager.loading" @click="loadAdminFileSpace()">刷新</button>
                     </div>
-                    <div class="admin-table-row" v-for="file in state.admin.themeFiles" :key="file.id">
-                      <span>
-                        <strong>{{ file.title }}</strong>
-                        <small>{{ file.path }}</small>
-                      </span>
-                      <span>{{ file.section }}</span>
-                      <span>{{ fileTypeLabel(file.file_type) }}</span>
-                      <span>{{ file.is_active ? '启用' : '停用' }}</span>
-                      <span class="button-row">
-                        <button class="ghost-button" type="button" @click="editThemeFile(file)">编辑</button>
-                        <button class="ghost-button danger" type="button" @click="deactivateThemeFile(file)">停用</button>
-                      </span>
+                    <div class="file-manager-actions">
+                      <label>
+                        <span>新目录</span>
+                        <input v-model="state.admin.fileManager.newDirectoryName" type="text" placeholder="目录名" @keyup.enter="createFileSpaceDirectory" />
+                      </label>
+                      <button class="ghost-button" type="button" @click="createFileSpaceDirectory">新建目录</button>
+                      <label>
+                        <span>新文件</span>
+                        <input v-model="state.admin.fileManager.newFileName" type="text" placeholder="例如 data-note.md" @keyup.enter="createFileSpaceFile" />
+                      </label>
+                      <button class="ghost-button" type="button" @click="createFileSpaceFile">新建文件</button>
+                      <label class="file-picker compact-picker">
+                        <span>{{ state.admin.fileManager.uploading ? '上传中' : '上传文件' }}</span>
+                        <input type="file" multiple :disabled="state.admin.fileManager.uploading" @change="handleFileSpaceUpload" />
+                      </label>
+                      <label class="file-picker compact-picker">
+                        <span>{{ state.admin.fileManager.uploading ? '上传中' : '上传目录' }}</span>
+                        <input type="file" webkitdirectory directory multiple :disabled="state.admin.fileManager.uploading" @change="handleFileSpaceUpload" />
+                      </label>
+                    </div>
+                    <div class="file-manager-layout">
+                      <div class="file-browser" :class="{ loading: state.admin.fileManager.loading }">
+                        <button
+                          v-for="entry in state.admin.fileManager.entries"
+                          :key="entry.path"
+                          class="file-row"
+                          :class="{ selected: state.admin.fileManager.selected?.path === entry.path }"
+                          type="button"
+                          @click="selectFileSpaceEntry(entry)"
+                          @dblclick="openFileSpaceEntry(entry)"
+                        >
+                          <span class="material-symbols-rounded">{{ entry.type === 'directory' ? 'folder' : 'draft' }}</span>
+                          <strong>{{ entry.name }}</strong>
+                          <small>{{ entry.type === 'directory' ? '目录' : formatFileSize(entry.size) }}</small>
+                        </button>
+                        <p v-if="!state.admin.fileManager.loading && !state.admin.fileManager.entries.length">当前目录为空。</p>
+                      </div>
+                      <aside class="file-inspector">
+                        <template v-if="state.admin.fileManager.selected">
+                          <span class="eyebrow">{{ state.admin.fileManager.selected.type === 'directory' ? '目录' : '文件' }}</span>
+                          <h3>{{ state.admin.fileManager.selected.name }}</h3>
+                          <p>{{ state.admin.fileManager.selected.path || '根目录' }}</p>
+                          <dl>
+                            <div><dt>大小</dt><dd>{{ formatFileSize(state.admin.fileManager.selected.size) || '-' }}</dd></div>
+                            <div><dt>修改时间</dt><dd>{{ state.admin.fileManager.selected.modified_at }}</dd></div>
+                          </dl>
+                          <div class="button-row">
+                            <button v-if="state.admin.fileManager.selected.type === 'directory'" class="primary-button" type="button" @click="openFileSpaceEntry(state.admin.fileManager.selected)">打开</button>
+                            <button v-else class="primary-button" type="button" @click="openFileSpaceEditor(state.admin.fileManager.selected)">编辑</button>
+                            <a v-if="state.admin.fileManager.selected.public_path" class="ghost-button" :href="state.admin.fileManager.selected.public_path" target="_blank" rel="noreferrer">查看</a>
+                            <button class="ghost-button danger" type="button" @click="deleteFileSpaceEntry(state.admin.fileManager.selected)">删除</button>
+                          </div>
+                        </template>
+                        <p v-else>选择一个文件或目录查看操作。</p>
+                      </aside>
                     </div>
                   </div>
+
+                  <details class="registered-files-panel">
+                    <summary>登记文件记录（{{ state.admin.themeFiles.length }}）</summary>
+                    <form class="stack-form theme-file-form" @submit.prevent="saveThemeFile">
+                      <div class="form-grid">
+                        <label><span>栏目</span><input v-model="state.admin.themeFileForm.section" type="text" /></label>
+                        <label><span>文件类型</span>
+                          <select v-model="state.admin.themeFileForm.file_type">
+                            <option v-for="type in state.schema.theme_file_types || []" :key="type.value" :value="type.value">{{ type.label }}</option>
+                          </select>
+                        </label>
+                        <label><span>排序</span><input v-model="state.admin.themeFileForm.sort_order" type="number" /></label>
+                        <label class="inline-check"><input v-model="state.admin.themeFileForm.is_active" type="checkbox" /> 启用文件</label>
+                      </div>
+                      <label><span>文件标题</span><input v-model="state.admin.themeFileForm.title" type="text" /></label>
+                      <label><span>文件路径或链接</span><input v-model="state.admin.themeFileForm.path" type="text" /></label>
+                      <label><span>说明</span><textarea v-model="state.admin.themeFileForm.description"></textarea></label>
+                      <div class="button-row">
+                        <button class="ghost-button" type="button" @click="newThemeFile">新增登记</button>
+                        <button class="primary-button" type="submit">保存登记</button>
+                      </div>
+                    </form>
+                    <div class="admin-table theme-file-table">
+                      <div class="admin-table-head">
+                        <span>文件</span>
+                        <span>栏目</span>
+                        <span>类型</span>
+                        <span>状态</span>
+                        <span>操作</span>
+                      </div>
+                      <div class="admin-table-row" v-for="file in state.admin.themeFiles" :key="file.id">
+                        <span>
+                          <strong>{{ file.title }}</strong>
+                          <small>{{ file.path }}</small>
+                        </span>
+                        <span>{{ file.section }}</span>
+                        <span>{{ fileTypeLabel(file.file_type) }}</span>
+                        <span>{{ file.is_active ? '启用' : '停用' }}</span>
+                        <span class="button-row">
+                          <button class="ghost-button" type="button" @click="editThemeFile(file)">编辑</button>
+                          <button class="ghost-button danger" type="button" @click="deactivateThemeFile(file)">停用</button>
+                        </span>
+                      </div>
+                    </div>
+                  </details>
                 </article>
               </section>
 
@@ -3420,10 +3716,29 @@ const App = {
                 <p v-if="!state.admin.loadingUsers && !state.admin.users.length">没有找到匹配用户。</p>
               </section>
 
+              <div v-if="state.admin.fileManager.editorOpen" class="project-form-modal file-editor-modal" @click.self="closeFileSpaceEditor">
+                <section class="project-form-dialog file-editor-dialog" role="dialog" aria-modal="true" aria-label="文件编辑器">
+                  <header class="project-form-dialog-header">
+                    <div>
+                      <span class="eyebrow">文件空间</span>
+                      <h2>编辑文件</h2>
+                    </div>
+                    <div class="modal-actions">
+                      <button class="ghost-button" type="button" @click="closeFileSpaceEditor">关闭</button>
+                      <button class="primary-button" type="button" @click="saveFileSpaceEditor">保存</button>
+                    </div>
+                  </header>
+                  <div class="project-form-dialog-body file-editor-body">
+                    <label><span>文件名</span><input v-model="state.admin.fileManager.editorName" type="text" /></label>
+                    <label><span>内容</span><textarea v-model="state.admin.fileManager.editorContent"></textarea></label>
+                  </div>
+                </section>
+              </div>
+
             </template>
             <section v-else class="empty-state">
               <h2>当前身份没有管理权限</h2>
-              <p>管理员可以维护主题、课题、文件空间和 Markdown 模板导入。</p>
+              <p>管理员可以维护主题、课题、文件空间和 JSONL 模板导入。</p>
             </section>
           </section>
 
@@ -3707,7 +4022,7 @@ const App = {
                   <div>
                     <strong>{{ state.admin.taskProjectDetail.project.title }}</strong>
                     <small>{{ state.admin.taskProjectDetail.project.theme?.name || '未分类' }} · {{ state.admin.taskProjectDetail.project.stage_label }}</small>
-                    <p>{{ shortText(state.admin.taskProjectDetail.project.summary || state.admin.taskProjectDetail.project.problem_statement, 180) }}</p>
+                    <p>{{ shortText(state.admin.taskProjectDetail.project.problem_statement, 100) }}</p>
                   </div>
                   <div class="button-row">
                     <button v-if="state.admin.taskProjectDetail.project.stage !== 'active' && state.admin.taskProjectDetail.project.stage !== 'archived'" class="ghost-button" type="button" @click="updateTaskProjectStage(state.admin.taskProjectDetail.project, 'active')">进入进行中</button>
@@ -3753,6 +4068,51 @@ const App = {
           </section>
         </div>
 
+        <div v-if="state.admin.jsonImport.previewOpen" class="project-form-modal json-import-preview-modal" @click.self="closeJsonImportPreview">
+          <section class="project-form-dialog json-import-preview-dialog" role="dialog" aria-modal="true" aria-label="JSON 导入预览">
+            <header class="project-form-dialog-header">
+              <div>
+                <span class="eyebrow">导入确认</span>
+                <h2>待导入课题</h2>
+                <p>共 {{ state.admin.jsonImport.rows.length }} 条，{{ state.admin.jsonImport.rows.filter((row) => !row.errors.length).length }} 条可写入数据库。</p>
+              </div>
+              <div class="modal-actions">
+                <button class="ghost-button" type="button" :disabled="state.admin.jsonImport.applying" @click="closeJsonImportPreview">关闭</button>
+              </div>
+            </header>
+            <div class="json-import-preview-body">
+              <div class="markdown-import-list json-import-preview-list">
+                <div v-for="row in state.admin.jsonImport.rows" :key="row.id" class="markdown-import-row json-import-preview-row" :class="{ blocked: row.errors.length }">
+                  <div>
+                    <strong>{{ row.payload.title || row.fileName }}</strong>
+                    <small>{{ row.sourcePath }}</small>
+                  </div>
+                  <div class="inline-row-field readonly-row-field"><span>ID</span><strong>{{ row.payload.topic_id || '自动生成' }}</strong></div>
+                  <label class="inline-row-field"><span>Title（中文）</span><input v-model="row.payload.title" type="text" /></label>
+                  <label class="inline-row-field"><span>Title（英文）</span><input v-model="row.payload.title_en" type="text" /></label>
+                  <label class="inline-row-field"><span>主题</span><input v-model="row.payload.theme" type="text" /></label>
+                  <label class="inline-row-field"><span>科学问题</span><input v-model="row.payload.problem_statement" type="text" maxlength="250" /></label>
+                  <label class="inline-row-field"><span>临床终点</span><input v-model="row.payload.clinical_endpoint" type="text" maxlength="250" /></label>
+                  <label class="inline-row-field"><span>已有基础</span><input v-model="row.payload.existing_foundation" type="text" maxlength="250" /></label>
+                  <span>{{ row.actionLabel }}</span>
+                  <span class="markdown-import-notes">
+                    <template v-if="row.errors.length">错误：{{ row.errors.join('；') }}</template>
+                    <template v-else-if="row.warnings.length">待补充：{{ row.warnings.join('、') }}</template>
+                    <template v-else>字段完整</template>
+                  </span>
+                  <button class="ghost-button" type="button" :disabled="state.admin.jsonImport.applying" @click="refreshAllJsonImportRows">重新检测</button>
+                </div>
+              </div>
+            </div>
+            <div class="json-import-preview-footer">
+              <button class="ghost-button" type="button" :disabled="state.admin.jsonImport.applying" @click="closeJsonImportPreview">取消</button>
+              <button class="primary-button" type="button" :disabled="state.admin.jsonImport.applying || !state.admin.jsonImport.rows.some((row) => !row.errors.length)" @click="applyJsonImport">
+                {{ state.admin.jsonImport.applying ? '正在导入' : '确认导入可写入项' }}
+              </button>
+            </div>
+          </section>
+        </div>
+
         <div v-if="state.confirmDialog.open" class="confirm-modal-backdrop" @click.self="resolveConfirmDialog(false)">
           <section class="confirm-modal" :class="'confirm-modal--' + state.confirmDialog.tone" role="dialog" aria-modal="true" aria-label="确认操作">
             <h2>{{ state.confirmDialog.title }}</h2>
@@ -3791,14 +4151,15 @@ const App = {
                   <div>
                     <span class="eyebrow">{{ state.currentProject.theme?.name || '未分类' }} · {{ state.currentProject.stage_label }}</span>
                     <h1>{{ state.currentProject.title }}</h1>
-                    <p>{{ state.currentProject.summary }}</p>
+                    <p v-if="state.currentProject.title_en" class="english-title">{{ state.currentProject.title_en }}</p>
+                    <p>{{ state.currentProject.problem_statement }}</p>
                     <div class="tag-row">
                       <span v-for="tag in state.currentProject.tags" :key="tag.id">{{ tag.name }}</span>
                     </div>
                   </div>
                   <div class="score-panel">
-                    <strong>{{ displayScore(state.currentProject.composite_score) }}</strong>
-                    <span>综合评分</span>
+                    <strong>ID {{ state.currentProject.topic_id }}</strong>
+                    <span>课题编号</span>
                     <button v-if="shouldShowFollowButton(state.currentProject)" class="primary-button follow-button" :class="{ active: isProjectFollowing(state.currentProject) }" type="button" @click="toggleFollow(state.currentProject)">
                       {{ isProjectFollowing(state.currentProject) ? '已收藏' : '收藏课题' }}
                     </button>
@@ -3810,12 +4171,8 @@ const App = {
                     <h2>结构化课题信息</h2>
                     <div class="info-list">
                       <section><h3>科学问题</h3><p>{{ state.currentProject.problem_statement || '待补充' }}</p></section>
-                      <section><h3>研究目标</h3><p>{{ state.currentProject.research_goal || '待补充' }}</p></section>
-                      <section><h3>技术路线</h3><p>{{ state.currentProject.technical_route || '待补充' }}</p></section>
-                      <section><h3>数据需求</h3><p>{{ formatList(state.currentProject.data_requirements) }}</p></section>
-                      <section><h3>评价指标</h3><p>{{ formatList(state.currentProject.evaluation_metrics) }}</p></section>
-                      <section><h3>预期成果</h3><p>{{ formatList(state.currentProject.expected_outputs) }}</p></section>
-                      <section><h3>合规说明</h3><p>{{ state.currentProject.compliance_notes || '第一版默认不允许上传可识别患者数据。' }}</p></section>
+                      <section><h3>临床终点</h3><p>{{ state.currentProject.clinical_endpoint || '待补充' }}</p></section>
+                      <section><h3>已有基础</h3><p>{{ state.currentProject.existing_foundation || '待补充' }}</p></section>
                     </div>
                   </article>
 
@@ -3833,7 +4190,7 @@ const App = {
 
                 <div class="detail-grid modal-detail-grid">
                   <article class="content-panel">
-                    <h2>主题文件域</h2>
+                    <h2>主题文件空间</h2>
                     <div v-if="state.currentProjectThemeSpace?.sections?.length" class="theme-file-sections">
                       <div class="domain-section" v-for="section in state.currentProjectThemeSpace.sections" :key="section.name">
                         <div class="domain-section-head">
@@ -3851,16 +4208,7 @@ const App = {
                       </div>
                       <button v-if="state.currentProject.theme?.slug" class="ghost-button" type="button" @click="selectSpace(state.currentProject.theme.slug)">查看主题文件空间</button>
                     </div>
-                    <p v-else>{{ state.currentProject.theme?.slug ? '该主题还没有登记数据资产文件。' : '该课题暂无所属主题，无法关联主题文件域。' }}</p>
-                    <h2 class="subsection-title">课题原始文档</h2>
-                    <div class="file-list">
-                      <a v-for="doc in state.currentProject.documents" :key="doc.id" :href="doc.path" target="_blank" rel="noreferrer">
-                        <span>{{ fileTypeLabel(doc.doc_type) }}</span>
-                        <strong>{{ doc.title || doc.path }}</strong>
-                        <small>{{ doc.path }}</small>
-                      </a>
-                      <p v-if="!state.currentProject.documents.length">暂无文件记录。</p>
-                    </div>
+                    <p v-else>{{ state.currentProject.theme?.slug ? '该主题还没有登记数据资产文件。' : '该课题暂无所属主题，无法关联主题文件空间。' }}</p>
                   </article>
                   <aside class="side-panel">
                     <h2>参与操作</h2>
@@ -3903,7 +4251,7 @@ function emptyThemeForm() {
     description: "",
     file_space: JSON.stringify({
       access_level: "restricted_metadata",
-      storage_policy: "主题文件域只登记与该主题相关的数据资产元信息，例如公开数据集链接、数据字典、标注规范、伦理合规材料和模型实验资产；不登记单个课题原文、PDF 或公开页面。",
+      storage_policy: "主题文件空间只登记与该主题相关的数据资产元信息。",
       allowed_file_types: ["dataset", "data_dictionary", "annotation_guide", "ethics", "model_artifact", "dataset_meta", "link", "other"],
       sections: ["数据集文件", "数据字典", "标注规范", "伦理合规材料", "模型与实验资产"]
     }, null, 2),
@@ -3971,102 +4319,43 @@ function emptyProjectForm() {
     id: null,
     topic_id: "",
     theme: "",
-    project_no: "",
     title: "",
-    summary: "",
+    title_en: "",
     problem_statement: "",
-    research_goal: "",
-    technical_route: "",
-    data_type: "",
-    minimum_cases: "",
-    data_source: "",
-    privacy: "",
-    evaluation_metrics: "",
-    expected_outputs: "",
-    compliance_notes: "",
-    body_markdown: "",
+    clinical_endpoint: "",
+    existing_foundation: "",
     stage: "draft",
     tags: "",
-    llm_score: "",
-    community_score: "",
-    composite_score: "",
-    recommended_journal: "",
-    needed_roles: "",
-    score_dimensions: "",
-    source_md_path: "",
-    source_pdf_path: "",
-    page_path: "",
-    documents: "",
-    has_pdf: false,
     is_public: false
   };
 }
 
 function projectToForm(project) {
-  const requirements = project.data_requirements || {};
   return {
     id: project.id,
     topic_id: project.topic_id || "",
     theme: project.theme?.slug || project.theme?.name || "",
-    project_no: project.project_no ?? "",
     title: project.title || "",
-    summary: project.summary || "",
+    title_en: project.title_en || "",
     problem_statement: project.problem_statement || "",
-    research_goal: project.research_goal || "",
-    technical_route: project.technical_route || "",
-    data_type: requirements.data_type || (Array.isArray(requirements.modalities) ? requirements.modalities.join("，") : ""),
-    minimum_cases: requirements.minimum_cases ?? "",
-    data_source: requirements.data_source || requirements.source || "",
-    privacy: requirements.privacy || "",
-    evaluation_metrics: formatMultilineList(project.evaluation_metrics || []),
-    expected_outputs: formatMultilineList(project.expected_outputs || []),
-    compliance_notes: project.compliance_notes || "",
-    body_markdown: project.body_markdown || "",
+    clinical_endpoint: project.clinical_endpoint || "",
+    existing_foundation: project.existing_foundation || "",
     stage: project.stage || "open_recruiting",
     tags: (project.tags || []).map((tag) => tag.name).join("，"),
-    llm_score: project.llm_score ?? "",
-    community_score: project.community_score ?? "",
-    composite_score: project.composite_score ?? "",
-    recommended_journal: project.recommended_journal || "",
-    needed_roles: (project.needed_roles || []).join("，"),
-    score_dimensions: formatScoreDimensionLines(project.score_dimensions || {}),
-    source_md_path: project.source_md_path || "",
-    source_pdf_path: project.source_pdf_path || "",
-    page_path: project.page_path || "",
-    documents: formatDocumentLines(project.documents || []),
-    has_pdf: Boolean(project.has_pdf),
     is_public: Boolean(project.is_public)
   };
 }
 
 function projectFormPayload(form) {
   return {
-    topic_id: form.topic_id.trim(),
     theme: form.theme,
-    project_no: optionalNumber(form.project_no),
     title: form.title.trim(),
-    summary: form.summary,
+    title_en: form.title_en.trim(),
     problem_statement: form.problem_statement,
-    research_goal: form.research_goal,
-    technical_route: form.technical_route,
-    data_requirements: dataRequirementsPayload(form),
-    evaluation_metrics: parseMultilineList(form.evaluation_metrics),
-    expected_outputs: parseMultilineList(form.expected_outputs),
-    compliance_notes: form.compliance_notes,
-    body_markdown: form.body_markdown,
+    clinical_endpoint: form.clinical_endpoint,
+    existing_foundation: form.existing_foundation,
     stage: form.stage,
     tags: parseListInput(form.tags),
-    llm_score: optionalNumber(form.llm_score),
-    community_score: optionalNumber(form.community_score),
-    composite_score: optionalNumber(form.composite_score),
-    recommended_journal: form.recommended_journal,
-    needed_roles: parseListInput(form.needed_roles),
-    score_dimensions: scoreDimensionsPayload(form.score_dimensions),
-    source_md_path: form.source_md_path,
-    source_pdf_path: form.source_pdf_path,
-    page_path: form.page_path,
-    documents: parseDocumentLines(form.documents),
-    has_pdf: Boolean(form.has_pdf),
     is_public: Boolean(form.is_public)
   };
 }
@@ -4144,17 +4433,6 @@ function roleCountEntries(teamStatus) {
   return Object.entries(teamStatus?.roles || {});
 }
 
-function formatList(value) {
-  if (!value) return "待补充";
-  if (Array.isArray(value)) return value.length ? value.join("、") : "待补充";
-  if (typeof value === "object") {
-    return Object.entries(value)
-      .map(([key, item]) => `${key}: ${Array.isArray(item) ? item.join("、") : item}`)
-      .join("；");
-  }
-  return String(value);
-}
-
 function fileTypeLabel(type) {
   return {
     dataset: "数据集文件",
@@ -4207,11 +4485,9 @@ function uniqueSlugHint(value) {
     .replace(/^-+|-+$/g, "");
 }
 
-async function findMarkdownImportDuplicates(payload) {
+async function findJsonImportDuplicates(payload) {
   const queries = [];
   if (payload.topic_id) queries.push({ topic_id: payload.topic_id, page_size: 3 });
-  if (payload.source_md_path) queries.push({ source_md_path: payload.source_md_path, page_size: 3 });
-  if (payload.content_hash) queries.push({ content_hash: payload.content_hash, page_size: 3 });
   if (payload.title) queries.push({ q: payload.title, page_size: 3 });
   const byId = new Map();
   for (const query of queries) {
@@ -4225,79 +4501,17 @@ async function findMarkdownImportDuplicates(payload) {
 
 function duplicateWarningsForImport(payload, duplicates) {
   const warnings = [];
-  const topicMatch = duplicates.find((project) => project.topic_id === payload.topic_id);
+  const topicMatch = duplicates.find((project) => Number(project.topic_id) === Number(payload.topic_id));
   if (topicMatch) {
-    warnings.push("同一课题ID将更新已有课题");
+    warnings.push("同一课题 ID 将更新已有课题");
     if (topicMatch.is_public || topicMatch.stage !== "draft") {
       warnings.push("已有课题将更新为草稿并暂不公开");
     }
   }
-  if (payload.source_md_path && duplicates.some((project) => project.source_md_path === payload.source_md_path && project.topic_id !== payload.topic_id)) {
-    warnings.push("来源路径可能重复");
-  }
-  if (payload.content_hash && duplicates.some((project) => project.content_hash === payload.content_hash && project.topic_id !== payload.topic_id)) {
-    warnings.push("正文内容可能重复");
-  }
-  if (payload.title && duplicates.some((project) => project.title === payload.title && project.topic_id !== payload.topic_id)) {
+  if (payload.title && duplicates.some((project) => project.title === payload.title && Number(project.topic_id) !== Number(payload.topic_id))) {
     warnings.push("标题可能重复");
   }
   return warnings;
-}
-
-async function sha256Hex(text) {
-  if (!globalThis.crypto?.subtle || typeof TextEncoder === "undefined") return "";
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(text || "")));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function parseMultilineList(text) {
-  return String(text || "")
-    .split("\n")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function formatMultilineList(items) {
-  if (!Array.isArray(items)) return "";
-  return items
-    .map((item) => String(item || "").trim())
-    .filter(Boolean)
-    .join("\n");
-}
-
-function scoreDimensionsPayload(text) {
-  const entries = String(text || "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const [name = "", rawValue = ""] = line.split("|").map((part) => part.trim());
-      if (!name) return null;
-      const number = optionalNumber(rawValue);
-      return [name, number ?? rawValue];
-    })
-    .filter(Boolean);
-  return Object.fromEntries(entries);
-}
-
-function formatScoreDimensionLines(dimensions) {
-  if (!dimensions || typeof dimensions !== "object" || Array.isArray(dimensions)) return "";
-  return Object.entries(dimensions)
-    .map(([name, value]) => `${name}|${value ?? ""}`)
-    .filter((line) => line.replace(/\|/g, "").trim())
-    .join("\n");
-}
-
-function dataRequirementsPayload(form) {
-  const payload = {
-    data_type: String(form.data_type || "").trim(),
-    minimum_cases: optionalNumber(form.minimum_cases),
-    data_source: String(form.data_source || "").trim(),
-    privacy: String(form.privacy || "").trim()
-  };
-  return Object.fromEntries(Object.entries(payload).filter(([, value]) => value !== "" && value !== null));
 }
 
 function parseDocumentLines(text) {
@@ -4331,19 +4545,13 @@ function parseListInput(text) {
     .filter(Boolean);
 }
 
-function optionalNumber(value) {
-  if (value === "" || value === null || value === undefined) return null;
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
-}
-
 function roleCardsFor(capabilities) {
   const cards = [];
   if (capabilities.medical_review) cards.push({ title: "医学审核", body: "可参与临床价值判断、术语审核和数据解释。" });
   if (capabilities.technical_delivery) cards.push({ title: "技术实现", body: "可参与模型、RAG、Agent、多模态和工程实现。" });
   if (capabilities.statistical_design) cards.push({ title: "统计设计", body: "可参与样本量、终点、统计方案和结果解释。" });
   if (capabilities.funding_support) cards.push({ title: "资源支持", body: "可表达经费、算力、标注预算或专家咨询支持意向。" });
-  if (capabilities.manage_projects) cards.push({ title: "内容管理", body: "可维护主题、课题、文件空间和 Markdown 模板导入。" });
+  if (capabilities.manage_projects) cards.push({ title: "内容管理", body: "可维护主题、课题、文件空间和 JSONL 模板导入。" });
   if (!cards.length) cards.push({ title: "开放协作", body: "可关注、评分、申请参与和认领感兴趣的课题。" });
   return cards;
 }

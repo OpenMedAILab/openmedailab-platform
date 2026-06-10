@@ -22,7 +22,7 @@ test("theme space navigation closes an open project preview modal", () => {
 
 test("route changes close workspace and admin modal overlays", () => {
   assert.match(mainSource, /function closeRouteScopedOverlays\(\)/);
-  assert.match(mainSource, /closeRouteScopedOverlays\(\);\s*state\.heroTitleScrollProgress = 0;/);
+  assert.match(mainSource, /closeRouteScopedOverlays\(\);\s*window\.requestAnimationFrame\(\(\) => window\.scrollTo\(\{ top: 0, behavior: "auto" \}\)\);/);
   assert.match(mainSource, /if \(state\.contributionModal\.open\)\s*\{\s*closeContributionModal\(\);/s);
   assert.match(mainSource, /if \(state\.admin\.taskProjectDetail\.open\)\s*\{\s*closeTaskProjectDetail\(\);/s);
   assert.match(mainSource, /if \(state\.admin\.projectFormOpen\)\s*\{\s*closeProjectForm\(\);/s);
@@ -63,16 +63,33 @@ test("small-screen tab and chip rows wrap instead of hiding content horizontally
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.theme-chip,\s*\.admin-tabs button\s*\{[\s\S]*?flex:\s*0 1 auto;/);
 });
 
-test("homepage hero title uses the campaign copy with hover and scroll motion guards", () => {
-  assert.match(mainSource, /让医学问题，/);
-  assert.match(mainSource, /等到它的盖世英雄/);
-  assert.match(mainSource, /const heroTitleStyle = computed/);
-  assert.match(mainSource, /function updateHeroTitleScrollProgress\(\)/);
-  assert.match(mainSource, /"--hero-title-opacity": \(1 - progress \* 0\.72\)\.toFixed\(3\)/);
-  assert.match(stylesSource, /\.library-hero \.hero-title\s*\{[\s\S]*?display:\s*block;/);
-  assert.match(stylesSource, /\.library-hero \.hero-title:hover\s*\{[\s\S]*?scale\(1\.022\)/);
-  assert.match(stylesSource, /\.library-hero \.hero-title\s*\{[\s\S]*?mask-image:\s*linear-gradient/);
-  assert.match(stylesSource, /@media \(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?\.library-hero \.hero-title\s*\{[\s\S]*?transition:\s*none;/);
+test("homepage removes the hero copy and keeps compact library stats", () => {
+  assert.doesNotMatch(mainSource, /library-hero/);
+  assert.doesNotMatch(mainSource, /hero-title/);
+  assert.doesNotMatch(mainSource, /大道无言/);
+  assert.doesNotMatch(mainSource, /让医学问题，/);
+  assert.doesNotMatch(mainSource, /等到它的盖世英雄/);
+  assert.doesNotMatch(mainSource, /真实临床场景，开放协作验证/);
+  assert.doesNotMatch(mainSource, /const heroTitleStyle = computed/);
+  assert.doesNotMatch(mainSource, /function updateHeroTitleScrollProgress\(\)/);
+  assert.match(mainSource, /class="inline-stats"/);
+  assert.match(stylesSource, /\.inline-stats\s*\{/);
+});
+
+test("modal overlays lock the page scroll behind dialogs", () => {
+  assert.match(mainSource, /const modalOpen = computed/);
+  assert.match(mainSource, /document\.body\.classList\.toggle\("modal-open", open\)/);
+  assert.match(stylesSource, /body\.modal-open\s*\{[\s\S]*?overflow:\s*hidden;/);
+});
+
+test("admin file space management exposes a file-manager workflow", () => {
+  assert.match(mainSource, /文件空间管理/);
+  assert.match(mainSource, /state\.admin\.fileManager/);
+  assert.match(mainSource, /handleFileSpaceUpload/);
+  assert.match(mainSource, /webkitdirectory directory multiple/);
+  assert.match(stylesSource, /\.file-manager-layout\s*\{/);
+  assert.match(apiSource, /adminFileSpace/);
+  assert.match(apiSource, /adminUploadFileSpaceFiles/);
 });
 
 test("homepage search toolbar is lifted and visually emphasized", () => {
@@ -211,18 +228,19 @@ test("workspace lifecycle people fields render uid-only payloads", () => {
   assert.doesNotMatch(mainSource, /entry\?\.actor\?\.profile\?\.uid/);
 });
 
-test("admin project lifecycle removes json import and exposes markdown template import", () => {
-  assert.doesNotMatch(mainSource, />JSON 导入<\/button>/);
+test("admin project lifecycle exposes json/jsonl import with confirmation preview", () => {
   assert.doesNotMatch(mainSource, /importJson\(/);
   assert.doesNotMatch(mainSource, /useExampleJson/);
   assert.doesNotMatch(mainSource, /state\.admin\.importText/);
-  assert.match(mainSource, /Markdown 导入/);
-  assert.match(mainSource, /copyMarkdownTemplate/);
-  assert.match(mainSource, /handleMarkdownFiles/);
-  assert.match(mainSource, /clearMarkdownImport/);
-  assert.match(mainSource, /state\.schema\.markdown_template/);
-  assert.match(mainSource, /字段契约与 Markdown 模板/);
-  assert.match(mainSource, /refreshMarkdownImportRow/);
+  assert.match(mainSource, /JSON\/JSONL 导入/);
+  assert.match(mainSource, /downloadJsonlTemplate/);
+  assert.match(mainSource, /handleJsonFiles/);
+  assert.match(mainSource, /clearJsonImport/);
+  assert.match(mainSource, /state\.schema\.jsonl_template/);
+  assert.match(mainSource, /字段契约与 JSONL 模板/);
+  assert.match(mainSource, /refreshJsonImportRow/);
+  assert.match(mainSource, /jsonImport\.previewOpen/);
+  assert.match(mainSource, /确认导入可写入项/);
   assert.match(mainSource, /重新检测/);
   assert.match(mainSource, /清除导入提示/);
   assert.match(mainSource, /inline-row-field/);
@@ -234,12 +252,20 @@ test("admin project form uses structured project inputs instead of json textarea
   assert.doesNotMatch(mainSource, /预期成果 JSON/);
   assert.doesNotMatch(mainSource, /文件列表 JSON/);
   assert.doesNotMatch(mainSource, /评分维度 JSON/);
-  assert.match(mainSource, /数据类型/);
-  assert.match(mainSource, /最小样本量/);
-  assert.match(mainSource, /评价指标（每行一条）/);
-  assert.match(mainSource, /预期成果（每行一条）/);
-  assert.match(mainSource, /文件列表（类型\\|标题\\|路径，每行一条）/);
-  assert.match(mainSource, /评分维度（维度\\|分数，每行一条）/);
+  assert.match(mainSource, /Title（中文）/);
+  assert.match(mainSource, /Title（英文，选填）/);
+  assert.match(mainSource, /科学问题（250字以内）/);
+  assert.match(mainSource, /临床终点（250字以内）/);
+  assert.match(mainSource, /已有基础（250字以内）/);
+  assert.doesNotMatch(mainSource, /<label><span>课题 ID<\/span><input v-model="state\.admin\.projectForm\.topic_id"/);
+  assert.doesNotMatch(mainSource, /数据类型/);
+  assert.doesNotMatch(mainSource, /最小样本量/);
+  assert.doesNotMatch(mainSource, /评价指标（每行一条）/);
+  assert.doesNotMatch(mainSource, /预期成果（每行一条）/);
+  assert.doesNotMatch(mainSource, /文件列表（类型\\|标题\\|路径，每行一条）/);
+  assert.doesNotMatch(mainSource, /Markdown 路径/);
+  assert.doesNotMatch(mainSource, /正文 Markdown/);
+  assert.doesNotMatch(mainSource, /评分维度（维度\\|分数，每行一条）/);
 });
 
 test("admin project form is opened in a modal instead of occupying the normal project list view", () => {
@@ -251,9 +277,9 @@ test("admin project form is opened in a modal instead of occupying the normal pr
   assert.doesNotMatch(mainSource, /id="admin-project-form"/);
 });
 
-test("admin project score dimensions use line based structured input instead of hand written json", () => {
-  assert.match(mainSource, /formatScoreDimensionLines/);
-  assert.match(mainSource, /scoreDimensionsPayload/);
+test("admin project form no longer exposes score dimension fields", () => {
+  assert.doesNotMatch(mainSource, /formatScoreDimensionLines/);
+  assert.doesNotMatch(mainSource, /scoreDimensionsPayload/);
   assert.doesNotMatch(mainSource, /parseJsonStrict\(form\.score_dimensions,\s*"评分维度"/);
   assert.doesNotMatch(mainSource, /score_dimensions:\s*parseJsonOrFallback\(form\.score_dimensions/);
 });

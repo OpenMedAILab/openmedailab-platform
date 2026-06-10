@@ -1,9 +1,12 @@
 import json
 import importlib.util
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.conf import settings
 from django.test import Client, TestCase, override_settings
 
@@ -19,23 +22,14 @@ class ApiTests(TestCase):
         self.theme = Theme.objects.create(name="AntiVEGF", slug="antivegf")
         self.tag = Tag.objects.create(name="RAG", slug="rag")
         self.project = Project.objects.create(
-            topic_id="AntiVEGF-001",
+            topic_id=1,
             title="纵向病例证据 RAG",
-            summary="用于抗 VEGF 随访复核。",
+            title_en="Longitudinal evidence RAG",
             problem_statement="随访证据分散，难以复核。",
-            research_goal="验证 RAG 对复核效率的帮助。",
-            technical_route="证据切片 -> 检索 -> 医生审核。",
-            data_requirements={"modalities": ["随访表", "OCT 摘要"]},
-            evaluation_metrics=["一致性"],
-            expected_outputs=["实验报告"],
-            compliance_notes="只使用脱敏数据。",
-            body_markdown="## 背景\n测试正文",
+            clinical_endpoint="复核一致性",
+            existing_foundation="已有随访摘要",
             theme=self.theme,
-            project_no=1,
             stage=ProjectStage.OPEN_RECRUITING,
-            llm_score=8.5,
-            composite_score=8.5,
-            needed_roles=["医生", "学生", "Leader"],
             is_public=True,
         )
         self.project.tags.add(self.tag)
@@ -63,15 +57,16 @@ class ApiTests(TestCase):
         list_payload = list_response.json()
         self.assertTrue(list_payload["ok"])
         self.assertEqual(list_payload["data"]["pagination"]["total_count"], 1)
-        self.assertEqual(list_payload["data"]["results"][0]["topic_id"], "AntiVEGF-001")
+        self.assertEqual(list_payload["data"]["results"][0]["topic_id"], 1)
 
         detail_response = self.client.get(f"/api/projects/{self.project.pk}/")
         self.assertEqual(detail_response.status_code, 200)
         detail_payload = detail_response.json()
         self.assertEqual(detail_payload["data"]["team_status"]["basic_ready"], False)
-        self.assertEqual(detail_payload["data"]["body_markdown"], "## 背景\n测试正文")
+        self.assertNotIn("documents", detail_payload["data"])
         self.assertEqual(detail_payload["data"]["problem_statement"], "随访证据分散，难以复核。")
-        self.assertEqual(detail_payload["data"]["data_requirements"]["modalities"], ["随访表", "OCT 摘要"])
+        self.assertEqual(detail_payload["data"]["clinical_endpoint"], "复核一致性")
+        self.assertEqual(detail_payload["data"]["existing_foundation"], "已有随访摘要")
 
     def test_lifecycle_stage_contract_and_public_filters(self):
         stage_values = [value for value, _ in ProjectStage.choices]
@@ -81,14 +76,14 @@ class ApiTests(TestCase):
         )
 
         draft = Project.objects.create(
-            topic_id="AntiVEGF-DRAFT",
+            topic_id=2,
             title="草稿课题",
             theme=self.theme,
             stage=ProjectStage.DRAFT,
             is_public=True,
         )
         archived = Project.objects.create(
-            topic_id="AntiVEGF-ARCHIVED",
+            topic_id=3,
             title="归档课题",
             theme=self.theme,
             stage=ProjectStage.ARCHIVED,
@@ -198,6 +193,10 @@ class ApiTests(TestCase):
         self.assertIn("/api/admin/users/{uid}/reset-password/", schema["paths"])
         self.assertNotIn("/api/admin/projects/import-json/", schema["paths"])
         self.assertIn("/api/admin/theme-files/", schema["paths"])
+        self.assertIn("/api/admin/file-space/", schema["paths"])
+        self.assertIn("/api/admin/file-space/file/", schema["paths"])
+        self.assertIn("/api/admin/file-space/upload/", schema["paths"])
+        self.assertIn("/api/admin/themes/{theme_id}/file-space-root/", schema["paths"])
         self.assertIn("/api/admin/projects/{project_id}/", schema["paths"])
         self.assertIn("/api/projects/{project_id}/status-card/", schema["paths"])
         self.assertIn("/api/admin/overview/", schema["paths"])
@@ -215,10 +214,21 @@ class ApiTests(TestCase):
         self.assertEqual(contract_response.status_code, 200)
         contract_data = contract_response.json()["data"]
         contract_fields = [field["name"] for field in contract_data["fields"]]
+        self.assertIn("id", contract_fields)
+        self.assertIn("title_en", contract_fields)
         self.assertIn("problem_statement", contract_fields)
-        self.assertIn("data_requirements", contract_fields)
-        self.assertIn("markdown_template", contract_data)
-        self.assertIn("模板版本：v1", contract_data["markdown_template"])
+        self.assertIn("clinical_endpoint", contract_fields)
+        self.assertIn("existing_foundation", contract_fields)
+        self.assertNotIn("data_requirements", contract_fields)
+        self.assertNotIn("summary", contract_fields)
+        self.assertNotIn("project_no", contract_fields)
+        self.assertNotIn("documents", contract_fields)
+        self.assertNotIn("source_md_path", contract_fields)
+        self.assertNotIn("source_pdf_path", contract_fields)
+        self.assertIn("jsonl_template", contract_data)
+        self.assertNotIn('"id":1', contract_data["jsonl_template"])
+        self.assertIn("250字以内", contract_data["jsonl_template"])
+        self.assertNotIn("markdown_template", contract_data)
         self.assertNotIn("example", contract_data)
         theme_file_types = [item["value"] for item in contract_data["theme_file_types"]]
         self.assertIn("dataset", theme_file_types)
@@ -278,6 +288,61 @@ class ApiTests(TestCase):
         self.assertEqual(payload["sections"][0]["files"][0]["title"], "抗 VEGF 脱敏随访样例索引")
         self.assertNotIn("documents_by_type", payload)
 
+    def test_admin_file_space_manager_is_limited_to_configured_root(self):
+        self.login_platform_admin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            media_root = Path(tmpdir) / "media"
+            file_space_root = media_root / "theme-file-space"
+            with override_settings(MEDIA_ROOT=media_root, MEDIA_URL="/media/", OPENMEDAILAB_FILE_SPACE_ROOT=file_space_root):
+                outside_response = self.patch_json(
+                    f"/api/admin/themes/{self.theme.pk}/file-space-root/",
+                    {"server_directory": str(Path(tmpdir).parent)},
+                )
+                self.assertEqual(outside_response.status_code, 422)
+
+                root_response = self.patch_json(
+                    f"/api/admin/themes/{self.theme.pk}/file-space-root/",
+                    {"server_directory": "antivegf-data"},
+                )
+                self.assertEqual(root_response.status_code, 200)
+                self.assertTrue((file_space_root / "antivegf-data").exists())
+
+                directory_response = self.post_json(
+                    "/api/admin/file-space/directories/",
+                    {"theme_id": self.theme.pk, "path": "", "name": "datasets"},
+                )
+                self.assertEqual(directory_response.status_code, 201)
+
+                file_response = self.post_json(
+                    "/api/admin/file-space/files/",
+                    {"theme_id": self.theme.pk, "path": "datasets", "name": "README.md", "content": "脱敏数据说明"},
+                )
+                self.assertEqual(file_response.status_code, 201)
+                self.assertTrue((file_space_root / "antivegf-data" / "datasets" / "README.md").exists())
+                self.assertTrue(ThemeFile.objects.filter(theme=self.theme, path="/media/theme-file-space/antivegf-data/datasets/README.md").exists())
+
+                read_response = self.client.get(f"/api/admin/file-space/file/?theme_id={self.theme.pk}&path=datasets/README.md")
+                self.assertEqual(read_response.status_code, 200)
+                self.assertEqual(read_response.json()["data"]["content"], "脱敏数据说明")
+
+                upload_response = self.client.post(
+                    "/api/admin/file-space/upload/",
+                    data={
+                        "theme_id": str(self.theme.pk),
+                        "path": "datasets",
+                        "relative_paths": ["batch/sample.csv"],
+                        "files": [SimpleUploadedFile("sample.csv", b"id,value\n1,ok\n", content_type="text/csv")],
+                    },
+                )
+                self.assertEqual(upload_response.status_code, 201)
+                self.assertTrue((file_space_root / "antivegf-data" / "datasets" / "batch" / "sample.csv").exists())
+
+                list_response = self.client.get(f"/api/admin/file-space/?theme_id={self.theme.pk}&path=datasets")
+                self.assertEqual(list_response.status_code, 200)
+                names = {entry["name"] for entry in list_response.json()["data"]["entries"]}
+                self.assertIn("README.md", names)
+                self.assertIn("batch", names)
+
     def test_protected_post_uses_csrf_envelope_when_enforced(self):
         user = User.objects.create_user(username="csrfuser", password="StrongPass12345")
         secure_client = Client(enforce_csrf_checks=True)
@@ -317,22 +382,20 @@ class ApiTests(TestCase):
         create_response = self.post_json(
             "/api/admin/projects/",
             {
-                "topic_id": "RETINA-002",
+                "id": 4,
                 "theme": "视网膜影像",
                 "title": "OCT 病灶分割评估",
-                "summary": "面向 OCT 病灶分割模型的临床可用性评估。",
-                "problem_statement": "需要验证分割结果是否可被医生复核。",
-                "data_requirements": {"modalities": ["OCT"], "minimum_cases": 30},
-                "expected_outputs": ["标注规范", "评估报告"],
+                "title_en": "OCT lesion segmentation evaluation",
+                "problem_statement": "验证分割结果能否复核。",
+                "clinical_endpoint": "医生复核一致性",
+                "existing_foundation": "已有OCT标注",
                 "tags": ["OCT", "分割"],
-                "source_md_path": "topics/RETINA-002.md",
-                "documents": [{"doc_type": "markdown", "title": "方案", "path": "topics/RETINA-002.md"}],
             },
         )
         self.assertEqual(create_response.status_code, 201)
-        project = Project.objects.get(topic_id="RETINA-002")
-        self.assertEqual(project.data_requirements["modalities"], ["OCT"])
-        self.assertEqual(project.documents.count(), 1)
+        project = Project.objects.get(topic_id=4)
+        self.assertEqual(project.problem_statement, "验证分割结果能否复核。")
+        self.assertEqual(project.title_en, "OCT lesion segmentation evaluation")
         self.assertEqual(project.stage, ProjectStage.DRAFT)
         self.assertFalse(project.is_public)
 
@@ -344,7 +407,7 @@ class ApiTests(TestCase):
                 "file_type": "dataset_meta",
                 "title": "脱敏数据说明",
                 "path": "spaces/retina-imaging/data.json",
-                "description": "主题级文件域记录",
+                "description": "主题级文件空间记录",
             },
         )
         self.assertEqual(file_response.status_code, 201)
@@ -360,7 +423,7 @@ class ApiTests(TestCase):
 
         project_detail_response = self.client.get(f"/api/admin/projects/{project.pk}/")
         self.assertEqual(project_detail_response.status_code, 200)
-        self.assertEqual(project_detail_response.json()["data"]["topic_id"], "RETINA-002")
+        self.assertEqual(project_detail_response.json()["data"]["topic_id"], 4)
 
         project_update_response = self.patch_json(f"/api/admin/projects/{project.pk}/", {"title": "OCT 病灶分割临床评估", "stage": "active"})
         self.assertEqual(project_update_response.status_code, 200)
@@ -377,10 +440,19 @@ class ApiTests(TestCase):
 
         response = self.post_json(
             "/api/admin/projects/",
-            {"topic_id": "NEW-001", "theme": self.theme.slug, "title": "新建课题", "stage": "active", "is_public": True},
+            {
+                "theme": self.theme.slug,
+                "title": "新建课题",
+                "problem_statement": "科学问题",
+                "clinical_endpoint": "临床终点",
+                "existing_foundation": "已有基础",
+                "stage": "active",
+                "is_public": True,
+            },
         )
         self.assertEqual(response.status_code, 201)
-        created = Project.objects.get(topic_id="NEW-001")
+        created = Project.objects.get(title="新建课题")
+        self.assertEqual(created.topic_id, 2)
         self.assertEqual(created.stage, ProjectStage.DRAFT)
         self.assertFalse(created.is_public)
         self.assertEqual(response.json()["data"]["stage"], ProjectStage.DRAFT)
@@ -389,43 +461,62 @@ class ApiTests(TestCase):
 
         duplicate_response = self.post_json(
             "/api/admin/projects/",
-            {"topic_id": "NEW-001", "theme": self.theme.slug, "title": "重复课题"},
+            {
+                "id": created.topic_id,
+                "theme": self.theme.slug,
+                "title": "重复课题",
+                "problem_statement": "科学问题",
+                "clinical_endpoint": "临床终点",
+                "existing_foundation": "已有基础",
+            },
         )
         self.assertEqual(duplicate_response.status_code, 422)
-        self.assertEqual(Project.objects.filter(topic_id="NEW-001").count(), 1)
+        self.assertEqual(Project.objects.filter(topic_id=created.topic_id).count(), 1)
+
+        legacy_id_response = self.post_json(
+            "/api/admin/projects/",
+            {
+                "topic_id": "ROP-1",
+                "theme": self.theme.slug,
+                "title": "旧编号课题",
+                "problem_statement": "科学问题",
+                "clinical_endpoint": "临床终点",
+                "existing_foundation": "已有基础",
+            },
+        )
+        self.assertEqual(legacy_id_response.status_code, 422)
 
         topic_change_response = self.patch_json(
             f"/api/admin/projects/{created.pk}/",
-            {"topic_id": "NEW-002", "title": "不允许改编号"},
+            {"id": created.topic_id + 1, "title": "不允许改编号"},
         )
         self.assertEqual(topic_change_response.status_code, 422)
-        self.assertFalse(Project.objects.filter(topic_id="NEW-002").exists())
+        self.assertFalse(Project.objects.filter(topic_id=created.topic_id + 1).exists())
 
         unknown_theme_response = self.post_json(
             "/api/admin/projects/",
-            {"topic_id": "NEW-003", "theme": "不存在主题", "title": "未知主题课题"},
+            {
+                "theme": "不存在主题",
+                "title": "未知主题课题",
+                "problem_statement": "科学问题",
+                "clinical_endpoint": "临床终点",
+                "existing_foundation": "已有基础",
+            },
         )
         self.assertEqual(unknown_theme_response.status_code, 422)
         self.assertFalse(Theme.objects.filter(name="不存在主题").exists())
 
-    def test_admin_project_list_supports_duplicate_detection_fields(self):
+    def test_admin_project_list_supports_id_duplicate_detection(self):
         self.login_platform_admin()
-        self.project.source_md_path = "topics/AntiVEGF-001.md"
-        self.project.content_hash = "hash-for-duplicate-check"
-        self.project.save(update_fields=["source_md_path", "content_hash", "updated_at"])
 
-        topic_response = self.client.get("/api/admin/projects/?topic_id=AntiVEGF-001&page_size=10")
+        topic_response = self.client.get("/api/admin/projects/?topic_id=1&page_size=10")
         self.assertEqual(topic_response.status_code, 200)
         topic_rows = topic_response.json()["data"]["results"]
         self.assertEqual(len(topic_rows), 1)
-        self.assertEqual(topic_rows[0]["source_md_path"], "topics/AntiVEGF-001.md")
-        self.assertEqual(topic_rows[0]["content_hash"], "hash-for-duplicate-check")
+        self.assertEqual(topic_rows[0]["topic_id"], 1)
 
-        source_response = self.client.get("/api/admin/projects/?source_md_path=topics/AntiVEGF-001.md&page_size=10")
-        self.assertEqual(source_response.json()["data"]["pagination"]["total_count"], 1)
-
-        hash_response = self.client.get("/api/admin/projects/?content_hash=hash-for-duplicate-check&page_size=10")
-        self.assertEqual(hash_response.json()["data"]["pagination"]["total_count"], 1)
+        title_response = self.client.get("/api/admin/projects/?q=纵向病例&page_size=10")
+        self.assertEqual(title_response.json()["data"]["pagination"]["total_count"], 1)
 
     def test_admin_user_list_orders_platform_admin_first_then_uid(self):
         admin = self.login_platform_admin()
@@ -454,12 +545,8 @@ class ApiTests(TestCase):
         self.assertEqual(search_rows[0]["profile"]["uid"], PLATFORM_ADMIN_UID)
 
     def test_public_project_detail_hides_internal_source_fields(self):
-        self.project.source_md_path = "topics/AntiVEGF-001.md"
-        self.project.source_pdf_path = "/Users/wang/private/AntiVEGF-001.pdf"
-        self.project.page_path = "/internal/pages/AntiVEGF-001.html"
-        self.project.content_hash = "internal-hash"
         self.project.source_payload = {"source": "api-admin", "payload": {"secret": "internal"}}
-        self.project.save(update_fields=["source_md_path", "source_pdf_path", "page_path", "content_hash", "source_payload", "updated_at"])
+        self.project.save(update_fields=["source_payload", "updated_at"])
         ProjectDocument.objects.create(
             project=self.project,
             doc_type=ProjectDocument.DocumentType.MARKDOWN,
@@ -473,10 +560,6 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()["data"]
         self.assertNotIn("source_payload", payload)
-        self.assertNotIn("content_hash", payload)
-        self.assertNotIn("source_md_path", payload)
-        self.assertNotIn("source_pdf_path", payload)
-        self.assertNotIn("page_path", payload)
         self.assertNotIn("imported_at", payload)
         self.assertNotIn("/Users/wang/private", json.dumps(payload, ensure_ascii=False))
         self.assertNotIn("document-internal-hash", json.dumps(payload, ensure_ascii=False))
@@ -676,7 +759,7 @@ class ApiTests(TestCase):
             {
                 "project_id": self.project.pk,
                 "title": "整理数据字典",
-                "description": "梳理主题文件域的数据字段。",
+                "description": "梳理主题文件空间的数据字段。",
                 "task_type": "data_dictionary",
                 "required_role": "学生",
                 "difficulty": 2,
@@ -726,7 +809,7 @@ class ApiTests(TestCase):
         self.client.force_login(admin)
         review_response = self.patch_json(
             f"/api/admin/contributions/{contribution_id}/review/",
-            {"status": "approved", "review_comment": "可进入主题文件域", "grant_reward": True},
+            {"status": "approved", "review_comment": "可进入主题文件空间", "grant_reward": True},
         )
 
         self.assertEqual(review_response.status_code, 200)

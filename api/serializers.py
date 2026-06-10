@@ -119,25 +119,14 @@ def project_summary_payload(project):
         "id": project.id,
         "topic_id": project.topic_id,
         "title": project.title,
-        "summary": project.summary,
+        "title_en": project.title_en,
         "problem_statement": project.problem_statement,
-        "research_goal": project.research_goal,
-        "technical_route": project.technical_route,
-        "data_requirements": project.data_requirements,
-        "evaluation_metrics": project.evaluation_metrics,
-        "expected_outputs": project.expected_outputs,
-        "compliance_notes": project.compliance_notes,
+        "clinical_endpoint": project.clinical_endpoint,
+        "existing_foundation": project.existing_foundation,
         "theme": theme_payload(project.theme),
-        "project_no": project.project_no,
         "stage": project.stage,
         "stage_label": project.get_stage_display(),
         "tags": [tag_payload(tag) for tag in project.tags.all()],
-        "llm_score": decimal_value(project.llm_score),
-        "community_score": decimal_value(project.community_score),
-        "composite_score": decimal_value(project.composite_score),
-        "recommended_journal": project.recommended_journal,
-        "needed_roles": project.needed_roles,
-        "has_pdf": project.has_pdf,
         "is_public": project.is_public,
         "follow_count": getattr(project, "follow_count", None),
         "score_count": getattr(project, "score_count", None),
@@ -150,15 +139,7 @@ def project_summary_payload(project):
 
 def admin_project_summary_payload(project):
     payload = project_summary_payload(project)
-    payload.update(
-        {
-            "source_md_path": project.source_md_path,
-            "source_pdf_path": project.source_pdf_path,
-            "page_path": project.page_path,
-            "content_hash": project.content_hash,
-            "imported_at": project.imported_at,
-        }
-    )
+    payload["imported_at"] = project.imported_at
     return payload
 
 
@@ -166,14 +147,7 @@ def project_detail_payload(project):
     payload = project_summary_payload(project)
     payload.update(
         {
-            "body_markdown": project.body_markdown,
-            "source_md_path": project.source_md_path,
-            "source_pdf_path": project.source_pdf_path,
-            "page_path": project.page_path,
-            "content_hash": project.content_hash,
-            "score_dimensions": project.score_dimensions,
             "team_status": project.team_status,
-            "documents": [document_payload(document) for document in project.documents.all()],
             "source_payload": project.source_payload,
             "imported_at": project.imported_at,
         }
@@ -185,10 +159,7 @@ def public_project_detail_payload(project):
     payload = project_summary_payload(project)
     payload.update(
         {
-            "body_markdown": project.body_markdown,
-            "score_dimensions": project.score_dimensions,
             "team_status": project.team_status,
-            "documents": [public_document_payload(document) for document in project.documents.all()],
         }
     )
     return payload

@@ -1,7 +1,11 @@
+import mimetypes
+import shutil
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Optional
 
+from django.conf import settings
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.forms import SetPasswordForm
 from django.contrib.auth.models import User
@@ -40,7 +44,7 @@ from interactions.models import (
     SponsorType,
 )
 from interactions.services import project_stat_annotations, recalculate_project_community_score
-from projects.contracts import DEFAULT_THEME_FILE_SPACE, PROJECT_FIELD_CONTRACT, PROJECT_MARKDOWN_TEMPLATE
+from projects.contracts import DEFAULT_THEME_FILE_SPACE, PROJECT_FIELD_CONTRACT, PROJECT_JSONL_TEMPLATE
 from projects.importing import create_project, unique_slug, update_project
 from projects.models import (
     FOLLOWABLE_PROJECT_STAGES,
@@ -177,33 +181,16 @@ class ThemeWriteRequest(Schema):
 
 
 class ProjectWriteRequest(Schema):
-    topic_id: Optional[str] = None
+    id: Optional[int] = None
+    topic_id: Optional[int] = None
     theme: Optional[Any] = None
-    project_no: Optional[int] = None
     title: Optional[str] = None
-    summary: Optional[str] = ""
+    title_en: Optional[str] = ""
     problem_statement: Optional[str] = ""
-    research_goal: Optional[str] = ""
-    technical_route: Optional[str] = ""
-    data_requirements: Optional[Any] = None
-    evaluation_metrics: Optional[Any] = None
-    expected_outputs: Optional[Any] = None
-    compliance_notes: Optional[str] = ""
-    body_markdown: Optional[str] = ""
+    clinical_endpoint: Optional[str] = ""
+    existing_foundation: Optional[str] = ""
     stage: Optional[str] = None
     tags: Optional[list[str]] = None
-    llm_score: Optional[float] = None
-    community_score: Optional[float] = None
-    composite_score: Optional[float] = None
-    recommended_journal: Optional[str] = ""
-    needed_roles: Optional[list[str]] = None
-    score_dimensions: Optional[Any] = None
-    source_md_path: Optional[str] = ""
-    source_pdf_path: Optional[str] = ""
-    page_path: Optional[str] = ""
-    content_hash: Optional[str] = ""
-    documents: Optional[list[dict[str, Any]]] = None
-    has_pdf: Optional[bool] = None
     is_public: Optional[bool] = None
 
 
@@ -217,6 +204,35 @@ class ThemeFileWriteRequest(Schema):
     path: Optional[str] = None
     sort_order: Optional[int] = 0
     is_active: Optional[bool] = True
+
+
+class FileSpaceDirectoryRequest(Schema):
+    theme_id: int
+    path: Optional[str] = ""
+    name: str
+
+
+class FileSpaceFileRequest(Schema):
+    theme_id: int
+    path: Optional[str] = ""
+    name: str
+    content: Optional[str] = ""
+
+
+class FileSpaceUpdateRequest(Schema):
+    theme_id: int
+    path: str
+    new_name: Optional[str] = None
+    content: Optional[str] = None
+
+
+class FileSpaceDeleteRequest(Schema):
+    theme_id: int
+    path: str
+
+
+class FileSpaceRootRequest(Schema):
+    server_directory: str
 
 
 class InteractionStatusRequest(Schema):
@@ -341,7 +357,7 @@ def project_schema(request):
     return ok(
         {
             "fields": PROJECT_FIELD_CONTRACT,
-            "markdown_template": PROJECT_MARKDOWN_TEMPLATE,
+            "jsonl_template": PROJECT_JSONL_TEMPLATE,
             "template_version": "v1",
             "stage_values": choice_payload(ProjectStage.choices),
             "document_types": choice_payload(ProjectDocument.DocumentType.choices),
@@ -359,7 +375,7 @@ def theme_space(request, slug: str):
             Project.objects.filter(theme=theme, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
             .select_related("theme")
             .prefetch_related("tags")
-        ).order_by("-composite_score", "-updated_at")[:80]
+        ).order_by("topic_id", "-updated_at")[:80]
     )
     files = list(ThemeFile.objects.filter(theme=theme, is_active=True).order_by("sort_order", "section", "title")[:300])
     return ok(theme_space_payload(theme, projects, files))
@@ -479,7 +495,6 @@ def project_list(
     theme: str = "",
     tag: str = "",
     stage: str = "",
-    has_pdf: str = "",
     sort: str = "recommended",
     page: int = 1,
     page_size: int = 20,
@@ -491,28 +506,20 @@ def project_list(
     theme = theme.strip()
     tag = tag.strip()
     stage = stage.strip()
-    has_pdf = has_pdf.strip()
 
     if q:
-        projects = projects.filter(Q(title__icontains=q) | Q(summary__icontains=q) | Q(topic_id__icontains=q) | Q(tags__name__icontains=q)).distinct()
+        projects = projects.filter(project_search_q(q) | Q(tags__name__icontains=q)).distinct()
     if theme:
         projects = projects.filter(Q(theme__slug=theme) | Q(theme__name=theme))
     if tag:
         projects = projects.filter(Q(tags__slug=tag) | Q(tags__name=tag))
     if stage:
         projects = projects.filter(stage=stage)
-    if has_pdf in {"1", "true", "yes"}:
-        projects = projects.filter(has_pdf=True)
-    elif has_pdf in {"0", "false", "no"}:
-        projects = projects.filter(has_pdf=False)
-
     sort_map = {
-        "recommended": ("-composite_score", "-llm_score", "topic_id"),
-        "llm_score": ("-llm_score", "topic_id"),
-        "community_score": ("-community_score", "topic_id"),
+        "recommended": ("topic_id",),
         "follows": ("-follow_count", "-interest_count", "topic_id"),
         "updated": ("-updated_at",),
-        "project_no": ("theme__name", "project_no", "topic_id"),
+        "project_id": ("topic_id",),
     }
     projects = projects.order_by(*sort_map.get(sort, sort_map["recommended"]))
 
@@ -530,7 +537,7 @@ def project_list(
                 "has_next": page_obj.has_next(),
                 "has_previous": page_obj.has_previous(),
             },
-            "filters": {"q": q, "theme": theme, "tag": tag, "stage": stage, "has_pdf": has_pdf, "sort": sort},
+            "filters": {"q": q, "theme": theme, "tag": tag, "stage": stage, "sort": sort},
         }
     )
 
@@ -752,15 +759,14 @@ def admin_interaction_list(
         if status:
             query = query.filter(status=status)
         if project:
-            query = query.filter(Q(project__topic_id__icontains=project) | Q(project__title__icontains=project))
+            query = query.filter(related_project_search_q(project))
         if theme:
             query = query.filter(Q(project__theme__slug=theme) | Q(project__theme__name=theme))
         if user:
             query = query.filter(Q(user__username__icontains=user) | Q(user__profile__uid__icontains=user) | Q(user__email__icontains=user))
         if q:
             query = query.filter(
-                Q(project__title__icontains=q)
-                | Q(project__topic_id__icontains=q)
+                related_project_search_q(q)
                 | Q(user__username__icontains=q)
                 | Q(user__profile__uid__icontains=q)
             )
@@ -933,13 +939,13 @@ def admin_task_list(request, project: str = "", status: str = "", assignee: str 
         return auth_error
     tasks = ProjectTask.objects.select_related("project", "project__theme", "assignee").prefetch_related("project__tags").order_by("-updated_at")
     if project:
-        tasks = tasks.filter(Q(project__topic_id__icontains=project) | Q(project__title__icontains=project))
+        tasks = tasks.filter(related_project_search_q(project))
     if status:
         tasks = tasks.filter(status=status)
     if assignee:
         tasks = tasks.filter(Q(assignee__profile__uid__icontains=assignee) | Q(assignee__username__icontains=assignee))
     if q:
-        tasks = tasks.filter(Q(title__icontains=q) | Q(description__icontains=q) | Q(project__title__icontains=q) | Q(project__topic_id__icontains=q))
+        tasks = tasks.filter(Q(title__icontains=q) | Q(description__icontains=q) | related_project_search_q(q))
     return ok(paginated_queryset(tasks, page, page_size, task_payload, max_page_size=100))
 
 
@@ -1072,7 +1078,7 @@ def admin_contribution_list(request, status: str = "", project: str = "", task: 
     if status:
         contributions = contributions.filter(status=status)
     if project:
-        contributions = contributions.filter(Q(project__topic_id__icontains=project) | Q(project__title__icontains=project))
+        contributions = contributions.filter(related_project_search_q(project))
     if task:
         task_filter = Q(task__title__icontains=task)
         if str(task).isdigit():
@@ -1145,7 +1151,7 @@ def admin_credit_list(request, uid: str = "", action_type: str = "", project: st
     if action_type:
         entries = entries.filter(action_type=action_type)
     if project:
-        entries = entries.filter(Q(project__topic_id__icontains=project) | Q(project__title__icontains=project))
+        entries = entries.filter(related_project_search_q(project))
     return ok(paginated_queryset(entries, page, page_size, credit_ledger_payload, max_page_size=100))
 
 
@@ -1348,6 +1354,212 @@ def admin_theme_file_delete(request, file_id: int):
     return ok(theme_file_payload(file))
 
 
+@api.get("/admin/file-space/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_file_space_list(request, theme_id: int, path: str = ""):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    theme = get_object_or_404(Theme, pk=theme_id)
+    try:
+        root = theme_file_space_root(theme)
+        directory = safe_file_space_path(theme, path, expect_parent=False)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="invalid_file_space_path")
+    if not directory.exists():
+        directory.mkdir(parents=True, exist_ok=True)
+    if not directory.is_dir():
+        return fail("Path is not a directory.", status=422, code="not_directory")
+    entries = [file_space_entry(item, root) for item in sorted(directory.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))]
+    return ok(
+        {
+            "theme": theme_payload(theme),
+            "base_root": str(file_space_base_root()),
+            "root_path": str(root),
+            "relative_path": relative_file_space_path(directory, root),
+            "breadcrumbs": file_space_breadcrumbs(directory, root),
+            "entries": entries,
+        }
+    )
+
+
+@api.get("/admin/file-space/file/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_file_space_read_file(request, theme_id: int, path: str):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    theme = get_object_or_404(Theme, pk=theme_id)
+    try:
+        root = theme_file_space_root(theme)
+        file_path = safe_file_space_path(theme, path, expect_parent=False)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="invalid_file_space_path")
+    if not file_path.exists() or not file_path.is_file():
+        raise Http404("File not found")
+    if file_path.stat().st_size > 1024 * 1024:
+        return fail("File is too large to edit online.", status=422, code="file_too_large")
+    try:
+        content = file_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return fail("Only UTF-8 text files can be edited online.", status=422, code="binary_file")
+    return ok({"entry": file_space_entry(file_path, root), "content": content})
+
+
+@api.patch("/admin/themes/{theme_id}/file-space-root/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_theme_file_space_root_update(request, theme_id: int, payload: FileSpaceRootRequest):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    theme = get_object_or_404(Theme, pk=theme_id)
+    before = theme_payload(theme)
+    raw_directory = payload.server_directory.strip()
+    try:
+        resolved = resolve_file_space_root(raw_directory, theme)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="invalid_file_space_root")
+    resolved.mkdir(parents=True, exist_ok=True)
+    file_space = dict(theme.file_space or {})
+    file_space["server_directory"] = str(resolved)
+    theme.file_space = {**DEFAULT_THEME_FILE_SPACE, **file_space}
+    theme.save(update_fields=["file_space", "updated_at"])
+    audit(request.user, "theme.file_space_root.update", "Theme", theme.id, before=before, after=theme_payload(theme))
+    return ok({"theme": theme_payload(theme), "root_path": str(resolved), "base_root": str(file_space_base_root())})
+
+
+@api.post("/admin/file-space/directories/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_file_space_create_directory(request, payload: FileSpaceDirectoryRequest):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    theme = get_object_or_404(Theme, pk=payload.theme_id)
+    name = sanitize_file_name(payload.name)
+    if not name:
+        return fail("Directory name is required.", status=422, code="validation_error")
+    try:
+        root = theme_file_space_root(theme)
+        directory = safe_file_space_path(theme, f"{payload.path or ''}/{name}", expect_parent=True)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="invalid_file_space_path")
+    directory.mkdir(parents=True, exist_ok=True)
+    audit(request.user, "file_space.directory.create", "Theme", theme.id, after={"path": relative_file_space_path(directory, root)})
+    return 201, ok({"entry": file_space_entry(directory, root)})
+
+
+@api.post("/admin/file-space/files/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_file_space_create_file(request, payload: FileSpaceFileRequest):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    theme = get_object_or_404(Theme, pk=payload.theme_id)
+    name = sanitize_file_name(payload.name)
+    if not name:
+        return fail("File name is required.", status=422, code="validation_error")
+    try:
+        root = theme_file_space_root(theme)
+        file_path = safe_file_space_path(theme, f"{payload.path or ''}/{name}", expect_parent=True)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="invalid_file_space_path")
+    if file_path.exists():
+        return fail("File already exists.", status=422, code="file_exists")
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(payload.content or "", encoding="utf-8")
+    upsert_theme_file_for_path(theme, file_path, root)
+    audit(request.user, "file_space.file.create", "Theme", theme.id, after={"path": relative_file_space_path(file_path, root)})
+    return 201, ok({"entry": file_space_entry(file_path, root)})
+
+
+@api.patch("/admin/file-space/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_file_space_update(request, payload: FileSpaceUpdateRequest):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    theme = get_object_or_404(Theme, pk=payload.theme_id)
+    try:
+        root = theme_file_space_root(theme)
+        target = safe_file_space_path(theme, payload.path, expect_parent=False)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="invalid_file_space_path")
+    if not target.exists():
+        raise Http404("File space item not found")
+    before = {"path": relative_file_space_path(target, root)}
+    if payload.content is not None:
+        if not target.is_file():
+            return fail("Only files can be edited.", status=422, code="not_file")
+        target.write_text(payload.content, encoding="utf-8")
+    if payload.new_name:
+        new_name = sanitize_file_name(payload.new_name)
+        if not new_name:
+            return fail("New name is invalid.", status=422, code="validation_error")
+        destination = safe_file_space_path(theme, f"{Path(payload.path).parent.as_posix()}/{new_name}", expect_parent=True)
+        if destination.exists() and destination != target:
+            return fail("Destination already exists.", status=422, code="file_exists")
+        target.rename(destination)
+        sync_theme_file_after_rename(theme, target, destination, root)
+        target = destination
+    elif target.is_file():
+        upsert_theme_file_for_path(theme, target, root)
+    after = {"path": relative_file_space_path(target, root)}
+    audit(request.user, "file_space.update", "Theme", theme.id, before=before, after=after)
+    return ok({"entry": file_space_entry(target, root)})
+
+
+@api.delete("/admin/file-space/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_file_space_delete(request, payload: FileSpaceDeleteRequest):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    theme = get_object_or_404(Theme, pk=payload.theme_id)
+    try:
+        root = theme_file_space_root(theme)
+        target = safe_file_space_path(theme, payload.path, expect_parent=False)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="invalid_file_space_path")
+    if not target.exists():
+        raise Http404("File space item not found")
+    before = {"path": relative_file_space_path(target, root), "type": "directory" if target.is_dir() else "file"}
+    if target.is_dir():
+        shutil.rmtree(target)
+    else:
+        target.unlink()
+        deactivate_theme_file_for_path(theme, public_file_space_path(target))
+    audit(request.user, "file_space.delete", "Theme", theme.id, before=before)
+    return ok({"deleted": True, "path": before["path"]})
+
+
+@api.post("/admin/file-space/upload/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_file_space_upload(request):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    theme_id = request.POST.get("theme_id")
+    path = request.POST.get("path", "")
+    if not theme_id:
+        return fail("theme_id is required.", status=422, code="validation_error")
+    theme = get_object_or_404(Theme, pk=theme_id)
+    files = request.FILES.getlist("files")
+    relative_paths = request.POST.getlist("relative_paths")
+    if not files:
+        return fail("No files uploaded.", status=422, code="validation_error")
+    try:
+        root = theme_file_space_root(theme)
+        directory = safe_file_space_path(theme, path, expect_parent=True)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="invalid_file_space_path")
+    directory.mkdir(parents=True, exist_ok=True)
+    saved = []
+    for index, uploaded in enumerate(files):
+        relative_name = relative_paths[index] if index < len(relative_paths) else uploaded.name
+        relative_name = safe_relative_upload_path(relative_name or uploaded.name)
+        destination = safe_child_path(directory, relative_name, root)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("wb") as output:
+            for chunk in uploaded.chunks():
+                output.write(chunk)
+        upsert_theme_file_for_path(theme, destination, root)
+        saved.append(file_space_entry(destination, root))
+    audit(request.user, "file_space.upload", "Theme", theme.id, after={"count": len(saved), "path": relative_file_space_path(directory, root)})
+    return 201, ok({"saved": saved})
+
+
 @api.get("/admin/projects/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Admin"])
 def admin_project_list(
     request,
@@ -1356,8 +1568,6 @@ def admin_project_list(
     stage: str = "",
     is_public: str = "",
     topic_id: str = "",
-    source_md_path: str = "",
-    content_hash: str = "",
     page: int = 1,
     page_size: int = 20,
 ):
@@ -1370,15 +1580,8 @@ def admin_project_list(
     stage = stage.strip()
     is_public = is_public.strip().lower()
     topic_id = topic_id.strip()
-    source_md_path = source_md_path.strip()
-    content_hash = content_hash.strip()
     if q:
-        projects = projects.filter(
-            Q(title__icontains=q)
-            | Q(summary__icontains=q)
-            | Q(topic_id__icontains=q)
-            | Q(source_md_path__icontains=q)
-        ).distinct()
+        projects = projects.filter(project_search_q(q)).distinct()
     if theme:
         projects = projects.filter(Q(theme__slug=theme) | Q(theme__name=theme))
     if stage:
@@ -1388,11 +1591,8 @@ def admin_project_list(
     elif is_public in {"0", "false", "no"}:
         projects = projects.filter(is_public=False)
     if topic_id:
-        projects = projects.filter(topic_id=topic_id)
-    if source_md_path:
-        projects = projects.filter(source_md_path=source_md_path)
-    if content_hash:
-        projects = projects.filter(content_hash=content_hash)
+        normalized_topic_id = normalize_project_topic_id(topic_id)
+        projects = projects.filter(topic_id=normalized_topic_id) if normalized_topic_id else projects.none()
     projects = projects.order_by("-updated_at", "topic_id")
     page_size = max(1, min(page_size, 100))
     paginator = Paginator(projects, page_size)
@@ -1427,13 +1627,14 @@ def admin_project_create(request, payload: ProjectWriteRequest):
     if auth_error:
         return auth_error
     data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    normalize_project_identity_alias(data)
     error = validate_admin_project_payload(data, creating=True)
     if error:
         return error
     data["stage"] = ProjectStage.DRAFT
     data["is_public"] = False
-    if Project.objects.filter(topic_id=data["topic_id"].strip()).exists():
-        return fail("topic_id already exists.", status=422, code="validation_error")
+    if data.get("topic_id") and Project.objects.filter(topic_id=data["topic_id"]).exists():
+        return fail("id already exists.", status=422, code="validation_error")
     try:
         project = create_project(data, source_label="api-admin", allow_create_theme=False)
     except ValueError as exc:
@@ -1451,12 +1652,13 @@ def admin_project_update(request, project_id: int, payload: ProjectWriteRequest)
     project = get_object_or_404(Project.objects.select_related("theme").prefetch_related("tags", "documents"), pk=project_id)
     before = project_detail_payload(project)
     patch_data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    normalize_project_identity_alias(patch_data)
     if "topic_id" in patch_data and patch_data["topic_id"] != project.topic_id:
         return fail("topic_id cannot be changed.", status=422, code="validation_error")
     data = project_import_payload(project)
     data.update(patch_data)
     data["topic_id"] = project.topic_id
-    error = validate_admin_project_payload(data, creating=False)
+    error = validate_admin_project_payload(data, creating=False, current_project=project)
     if error:
         return error
     try:
@@ -1957,13 +2159,28 @@ def profile_form_initial(profile):
     }
 
 
-def validate_admin_project_payload(data, creating):
-    topic_id = (data.get("topic_id") or "").strip()
+def validate_admin_project_payload(data, creating, current_project=None):
+    topic_id = normalize_project_topic_id(data.get("topic_id"))
     title = (data.get("title") or "").strip()
-    if not topic_id or not title:
-        return fail("topic_id and title are required.", status=422, code="validation_error")
-    data["topic_id"] = topic_id
+    if not title:
+        return fail("title is required.", status=422, code="validation_error")
+    if data.get("topic_id") not in (None, ""):
+        if not topic_id:
+            return fail("id must be a positive integer.", status=422, code="validation_error")
+        data["topic_id"] = topic_id
     data["title"] = title
+
+    for field, label in [
+        ("problem_statement", "科学问题"),
+        ("clinical_endpoint", "临床终点"),
+        ("existing_foundation", "已有基础"),
+    ]:
+        value = str(data.get(field) or "").strip()
+        if not value:
+            return fail(f"{label} is required.", status=422, code="validation_error")
+        if len(value) > 250:
+            return fail(f"{label} must be within 250 characters.", status=422, code="validation_error")
+        data[field] = value
 
     theme = data.get("theme")
     if isinstance(theme, dict):
@@ -1972,6 +2189,9 @@ def validate_admin_project_payload(data, creating):
         theme_name = str(theme or "").strip()
     if not theme_name:
         return fail("theme is required.", status=422, code="validation_error")
+    theme_obj = theme_from_payload(data, current=current_project.theme if current_project else None)
+    if theme_obj is None:
+        return fail("theme does not exist.", status=422, code="validation_error")
 
     stage = data.get("stage")
     stage_labels = {label for _, label in ProjectStage.choices}
@@ -1980,45 +2200,201 @@ def validate_admin_project_payload(data, creating):
     return None
 
 
+def normalize_project_identity_alias(data):
+    if "id" in data and "topic_id" not in data:
+        data["topic_id"] = data.pop("id")
+    else:
+        data.pop("id", None)
+
+
+def normalize_project_topic_id(value):
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not text.isdigit():
+        return None
+    number = int(text)
+    return number if number > 0 else None
+
+
+def project_search_q(value):
+    text = str(value or "").strip()
+    query = (
+        Q(title__icontains=text)
+        | Q(title_en__icontains=text)
+        | Q(problem_statement__icontains=text)
+        | Q(clinical_endpoint__icontains=text)
+        | Q(existing_foundation__icontains=text)
+    )
+    topic_id = normalize_project_topic_id(text)
+    if topic_id:
+        query |= Q(topic_id=topic_id)
+    return query
+
+
+def related_project_search_q(value):
+    text = str(value or "").strip()
+    query = Q(project__title__icontains=text) | Q(project__title_en__icontains=text)
+    topic_id = normalize_project_topic_id(text)
+    if topic_id:
+        query |= Q(project__topic_id=topic_id)
+    return query
+
+
 def project_import_payload(project):
     return {
         "topic_id": project.topic_id,
         "theme": theme_payload(project.theme) if project.theme else "未分类",
-        "project_no": project.project_no,
         "title": project.title,
-        "summary": project.summary,
+        "title_en": project.title_en,
         "problem_statement": project.problem_statement,
-        "research_goal": project.research_goal,
-        "technical_route": project.technical_route,
-        "data_requirements": project.data_requirements,
-        "evaluation_metrics": project.evaluation_metrics,
-        "expected_outputs": project.expected_outputs,
-        "compliance_notes": project.compliance_notes,
-        "body_markdown": project.body_markdown,
+        "clinical_endpoint": project.clinical_endpoint,
+        "existing_foundation": project.existing_foundation,
         "stage": project.stage,
         "tags": [tag.name for tag in project.tags.all()],
-        "llm_score": float(project.llm_score) if project.llm_score is not None else None,
-        "community_score": float(project.community_score) if project.community_score is not None else None,
-        "composite_score": float(project.composite_score) if project.composite_score is not None else None,
-        "recommended_journal": project.recommended_journal,
-        "needed_roles": project.needed_roles,
-        "score_dimensions": project.score_dimensions,
-        "source_md_path": project.source_md_path,
-        "source_pdf_path": project.source_pdf_path,
-        "page_path": project.page_path,
-        "documents": [document_payload(document) for document in project.documents.all()],
-        "has_pdf": project.has_pdf,
         "is_public": project.is_public,
     }
 
 
-def document_payload(document):
+def file_space_base_root():
+    root = Path(getattr(settings, "OPENMEDAILAB_FILE_SPACE_ROOT", settings.MEDIA_ROOT / "theme-file-space"))
+    return root.expanduser().resolve()
+
+
+def resolve_file_space_root(raw_directory, theme):
+    base = file_space_base_root()
+    value = (raw_directory or "").strip() or theme.slug
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    candidate = candidate.resolve()
+    if candidate != base and base not in candidate.parents:
+        raise ValueError(f"文件空间目录必须位于 {base} 之下。")
+    return candidate
+
+
+def theme_file_space_root(theme):
+    file_space = theme.file_space if isinstance(theme.file_space, dict) else {}
+    return resolve_file_space_root(file_space.get("server_directory") or theme.slug, theme)
+
+
+def safe_file_space_path(theme, relative_path, expect_parent=False):
+    root = theme_file_space_root(theme)
+    root.mkdir(parents=True, exist_ok=True)
+    return safe_child_path(root, relative_path or "", root, expect_parent=expect_parent)
+
+
+def safe_child_path(parent, relative_path, root, expect_parent=False):
+    raw = str(relative_path or "").replace("\\", "/").strip("/")
+    if "\x00" in raw:
+        raise ValueError("文件路径不合法。")
+    candidate = (parent / raw).resolve() if raw else parent.resolve()
+    check = candidate.parent if expect_parent else candidate
+    if check != root and root not in check.parents:
+        raise ValueError("文件路径不能超出文件空间根目录。")
+    return candidate
+
+
+def safe_relative_upload_path(relative_path):
+    parts = [sanitize_file_name(part) for part in str(relative_path or "").replace("\\", "/").split("/") if part not in {"", ".", ".."}]
+    return "/".join(part for part in parts if part)
+
+
+def sanitize_file_name(name):
+    value = str(name or "").replace("\\", "/").split("/")[-1].strip()
+    if value in {"", ".", ".."} or "\x00" in value:
+        return ""
+    return value
+
+
+def relative_file_space_path(path, root):
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return ""
+
+
+def file_space_breadcrumbs(path, root):
+    relative = relative_file_space_path(path, root)
+    breadcrumbs = [{"name": "根目录", "path": ""}]
+    current = []
+    for part in [item for item in relative.split("/") if item]:
+        current.append(part)
+        breadcrumbs.append({"name": part, "path": "/".join(current)})
+    return breadcrumbs
+
+
+def file_space_entry(path, root):
+    stat = path.stat()
+    relative = relative_file_space_path(path, root)
+    is_dir = path.is_dir()
     return {
-        "doc_type": document.doc_type,
-        "title": document.title,
-        "path": document.path,
-        "content_hash": document.content_hash,
+        "name": path.name,
+        "path": relative,
+        "type": "directory" if is_dir else "file",
+        "size": None if is_dir else stat.st_size,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        "mime_type": "" if is_dir else (mimetypes.guess_type(path.name)[0] or "application/octet-stream"),
+        "public_path": "" if is_dir else public_file_space_path(path),
     }
+
+
+def public_file_space_path(path):
+    media_root = Path(settings.MEDIA_ROOT).expanduser().resolve()
+    try:
+        return f"{settings.MEDIA_URL.rstrip('/')}/{path.resolve().relative_to(media_root).as_posix()}"
+    except ValueError:
+        return str(path)
+
+
+def theme_file_section_for_path(path):
+    parent = path.parent.name
+    return parent if parent and parent != path.name else "数据集文件"
+
+
+def theme_file_type_for_path(path):
+    mime_type = mimetypes.guess_type(path.name)[0] or ""
+    suffix = path.suffix.lower()
+    if mime_type.startswith("text/") or suffix in {".csv", ".tsv", ".xlsx", ".xls", ".json", ".parquet"}:
+        return ThemeFile.FileType.DATASET
+    if suffix in {".md", ".txt", ".pdf", ".doc", ".docx"}:
+        return ThemeFile.FileType.DATASET_META
+    return ThemeFile.FileType.OTHER
+
+
+def upsert_theme_file_for_path(theme, path, root):
+    public_path = public_file_space_path(path)
+    title = path.stem or path.name
+    file, _ = ThemeFile.objects.get_or_create(
+        theme=theme,
+        path=public_path,
+        defaults={
+            "section": theme_file_section_for_path(path),
+            "file_type": theme_file_type_for_path(path),
+            "title": title,
+            "description": "",
+            "is_active": True,
+        },
+    )
+    if not file.is_active or file.title != title:
+        file.title = title
+        file.is_active = True
+        file.section = file.section or theme_file_section_for_path(path)
+        file.file_type = file.file_type or theme_file_type_for_path(path)
+        file.save(update_fields=["title", "section", "file_type", "is_active", "updated_at"])
+    return file
+
+
+def sync_theme_file_after_rename(theme, old_path, new_path, root):
+    old_public_path = public_file_space_path(old_path)
+    new_public_path = public_file_space_path(new_path)
+    ThemeFile.objects.filter(theme=theme, path=old_public_path).update(path=new_public_path, title=new_path.stem or new_path.name, is_active=True)
+    if new_path.is_file():
+        upsert_theme_file_for_path(theme, new_path, root)
+
+
+def deactivate_theme_file_for_path(theme, public_path):
+    ThemeFile.objects.filter(theme=theme, path=public_path).update(is_active=False)
 
 
 def theme_from_payload(data, current=None):

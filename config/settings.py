@@ -145,6 +145,7 @@ WHITENOISE_MANIFEST_STRICT = os.getenv("WHITENOISE_MANIFEST_STRICT", "0" if DEBU
 
 MEDIA_URL = "media/"
 MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", BASE_DIR / "media"))
+OPENMEDAILAB_FILE_SPACE_ROOT = Path(os.getenv("OPENMEDAILAB_FILE_SPACE_ROOT", MEDIA_ROOT / "theme-file-space"))
 
 LOGIN_URL = "login"
 LOGIN_REDIRECT_URL = "dashboard"

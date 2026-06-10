@@ -38,22 +38,12 @@
     </select>
   </div>
   <div>
-    <label for="has_pdf"><span class="material-symbols-rounded" style="font-size: 16px; vertical-align: text-bottom;">picture_as_pdf</span> PDF</label>
-    <select id="has_pdf" name="has_pdf">
-      <option value="">全部</option>
-      <option value="1" {% if filters.has_pdf == "1" %}selected{% endif %}>有 PDF</option>
-      <option value="0" {% if filters.has_pdf == "0" %}selected{% endif %}>无 PDF</option>
-    </select>
-  </div>
-  <div>
     <label for="sort"><span class="material-symbols-rounded" style="font-size: 16px; vertical-align: text-bottom;">sort</span> 排序</label>
     <select id="sort" name="sort">
       <option value="recommended" {% if filters.sort == "recommended" %}selected{% endif %}>综合推荐</option>
-      <option value="llm_score" {% if filters.sort == "llm_score" %}selected{% endif %}>初始评分</option>
-      <option value="community_score" {% if filters.sort == "community_score" %}selected{% endif %}>社区评分</option>
       <option value="follows" {% if filters.sort == "follows" %}selected{% endif %}>关注数</option>
       <option value="updated" {% if filters.sort == "updated" %}selected{% endif %}>最近更新</option>
-      <option value="project_no" {% if filters.sort == "project_no" %}selected{% endif %}>课题编号</option>
+      <option value="project_id" {% if filters.sort == "project_id" %}selected{% endif %}>课题 ID</option>
     </select>
   </div>
   <div style="display: flex; align-items: flex-end; min-width: 100px;">
@@ -69,13 +59,10 @@
         <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">category</span> {{ project.theme }}</span>
         <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">tag</span> {{ project.topic_id }}</span>
         <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">moving</span> {{ project.get_stage_display }}</span>
-        {% if project.llm_score %}<span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">smart_toy</span> 初评 {{ project.llm_score }}</span>{% endif %}
-        {% if project.community_score %}<span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">star</span> 社区 {{ project.community_score }}</span>{% endif %}
         <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">favorite</span> 关注 {{ project.follow_count }}</span>
         <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">group</span> 参与 {{ project.interest_count }}</span>
-        {% if project.has_pdf %}<span class="pill" style="background: #fee2e2; color: #991b1b; border-color: #f87171;"><span class="material-symbols-rounded" style="font-size: 14px;">picture_as_pdf</span> PDF</span>{% endif %}
       </div>
-      <p class="muted" style="margin-bottom: 16px;">{{ project.summary|truncatechars:220 }}</p>
+      <p class="muted" style="margin-bottom: 16px;">{{ project.problem_statement|truncatechars:220 }}</p>
       <div style="margin-top: auto; margin-bottom: 16px;">
         {% for tag in project.tags.all %}<span class="pill" style="background: #f1f5f9; border-style: dashed;">#{{ tag.name }}</span>{% endfor %}
       </div>
