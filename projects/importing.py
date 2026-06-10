@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.text import slugify
 
@@ -17,10 +18,10 @@ STAGE_MAP = {
     "开放招募": ProjectStage.OPEN_RECRUITING,
     "组队中": ProjectStage.TEAM_BUILDING,
     "进行中": ProjectStage.ACTIVE,
-    "实验中": ProjectStage.EXPERIMENTING,
-    "写作中": ProjectStage.WRITING,
-    "投稿中": ProjectStage.SUBMITTED,
-    "已发表": ProjectStage.PUBLISHED,
+    "实验中": ProjectStage.ACTIVE,
+    "写作中": ProjectStage.ACTIVE,
+    "投稿中": ProjectStage.ACTIVE,
+    "已发表": ProjectStage.ARCHIVED,
     "暂停": ProjectStage.PAUSED,
     "归档": ProjectStage.ARCHIVED,
 }
@@ -43,7 +44,7 @@ def import_topic_bundle(data, source_label="api-json", dry_run=False):
         sync_themes(themes)
         for item in projects:
             try:
-                was_created = upsert_project(item, source_label=source_label)
+                was_created = upsert_project(item, source_label=source_label, allow_create_theme=True)
                 if was_created:
                     created += 1
                 else:
@@ -84,15 +85,33 @@ def sync_themes(themes):
         theme.save(update_fields=["slug", "description", "cover_image", "file_space", "sort_order", "is_active", "updated_at"])
 
 
-def upsert_project(item, source_label="api-json"):
-    normalized = normalize_project_item(item, source_label)
+def upsert_project(item, source_label="api-json", allow_create_theme=True):
+    normalized = normalize_project_item(item, source_label, allow_create_theme=allow_create_theme)
     project, created = Project.objects.update_or_create(topic_id=normalized["topic_id"], defaults=normalized["defaults"])
     sync_project_tags(project, normalized["tags"])
     sync_project_documents(project, normalized["documents"])
     return created
 
 
-def normalize_project_item(item, source_label="api-json"):
+def create_project(item, source_label="api-admin", allow_create_theme=False):
+    normalized = normalize_project_item(item, source_label, allow_create_theme=allow_create_theme)
+    project = Project.objects.create(topic_id=normalized["topic_id"], **normalized["defaults"])
+    sync_project_tags(project, normalized["tags"])
+    sync_project_documents(project, normalized["documents"])
+    return project
+
+
+def update_project(project, item, source_label="api-admin", allow_create_theme=False):
+    normalized = normalize_project_item(item, source_label, allow_create_theme=allow_create_theme)
+    for field, value in normalized["defaults"].items():
+        setattr(project, field, value)
+    project.save(update_fields=[*normalized["defaults"].keys(), "updated_at"])
+    sync_project_tags(project, normalized["tags"])
+    sync_project_documents(project, normalized["documents"])
+    return project
+
+
+def normalize_project_item(item, source_label="api-json", allow_create_theme=True):
     topic_id = item.get("topic_id") or item.get("id")
     if not topic_id:
         raise ValueError("missing topic_id")
@@ -124,7 +143,7 @@ def normalize_project_item(item, source_label="api-json"):
             "expected_outputs": item.get("expected_outputs") or [],
             "compliance_notes": item.get("compliance_notes", ""),
             "body_markdown": body_markdown,
-            "theme": theme_from_item(item),
+            "theme": theme_from_item(item, allow_create_theme=allow_create_theme),
             "project_no": item.get("project_no"),
             "stage": normalize_stage(item.get("stage")),
             "source_md_path": md_path,
@@ -139,7 +158,7 @@ def normalize_project_item(item, source_label="api-json"):
             "score_dimensions": item.get("score_dimensions") or {},
             "source_payload": {"source": source_label, "payload": item},
             "has_pdf": bool(item.get("has_pdf") or pdf_path),
-            "is_public": item.get("is_public", True),
+            "is_public": item.get("is_public", False),
             "imported_at": timestamp(item.get("updated_at")) or timezone.now(),
         },
         "tags": tag_names_from_item(item),
@@ -147,7 +166,7 @@ def normalize_project_item(item, source_label="api-json"):
     }
 
 
-def theme_from_item(item):
+def theme_from_item(item, allow_create_theme=True):
     theme_value = item.get("theme") or item.get("theme_dir") or "未分类"
     if isinstance(theme_value, dict):
         name = theme_value.get("name") or theme_value.get("slug") or "未分类"
@@ -159,7 +178,19 @@ def theme_from_item(item):
         slug = None
         description = ""
         file_space = {}
-    theme, created = Theme.objects.get_or_create(name=name, defaults={"slug": slug or unique_slug(Theme, name), "is_active": True})
+    if not name.strip():
+        raise ValueError("theme is required")
+    theme = None
+    if slug:
+        theme = Theme.objects.filter(slug=slug).first()
+    if theme is None:
+        theme = Theme.objects.filter(Q(slug=name) | Q(name=name)).first()
+    if theme is None and not allow_create_theme:
+        raise ValueError("theme does not exist")
+    if theme is None:
+        theme, created = Theme.objects.get_or_create(name=name, defaults={"slug": slug or unique_slug(Theme, name), "is_active": True})
+    else:
+        created = False
     changed = False
     if created or not theme.file_space:
         theme.file_space = {**DEFAULT_THEME_FILE_SPACE, **file_space}
@@ -213,10 +244,10 @@ def sync_project_documents(project, documents):
 
 def normalize_stage(stage):
     if not stage:
-        return ProjectStage.OPEN_RECRUITING
+        return ProjectStage.DRAFT
     if stage in ProjectStage.values:
         return stage
-    return STAGE_MAP.get(stage, ProjectStage.OPEN_RECRUITING)
+    return STAGE_MAP.get(stage, ProjectStage.DRAFT)
 
 
 def normalize_document_type(doc_type):

@@ -126,6 +126,37 @@ test("workspace lifecycle api wrappers are exposed", async () => {
   ].forEach((method) => assert.equal(typeof api[method], "function", `${method} should be exposed`));
 });
 
+test("project lifecycle api does not expose legacy json import wrapper", async () => {
+  globalThis.window = { OPENMEDAILAB_API_BASE: "" };
+  globalThis.location = { port: "5173" };
+  globalThis.fetch = async () => {
+    throw new Error("No network calls expected");
+  };
+
+  const { api } = await import(`./api.js?project-lifecycle-no-json-import=${Date.now()}`);
+
+  assert.equal(api.adminImportProjects, undefined);
+  assert.equal(typeof api.adminCreateProject, "function");
+  assert.equal(typeof api.adminUpdateProject, "function");
+  assert.equal(typeof api.adminProjects, "function");
+});
+
+test("project lifecycle api reuses admin project update/delete instead of redundant stage wrappers", async () => {
+  globalThis.window = { OPENMEDAILAB_API_BASE: "" };
+  globalThis.location = { port: "5173" };
+  globalThis.fetch = async () => {
+    throw new Error("No network calls expected");
+  };
+
+  const { api } = await import(`./api.js?project-lifecycle-stage-wrapper-check=${Date.now()}`);
+
+  ["publishProject", "startProject", "pauseProject", "archiveProject"].forEach((method) => {
+    assert.equal(api[method], undefined);
+  });
+  assert.equal(typeof api.adminUpdateProject, "function");
+  assert.equal(typeof api.adminDeleteProject, "function");
+});
+
 function jsonResponse(status, payload) {
   return {
     ok: status >= 200 && status < 300,

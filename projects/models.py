@@ -7,12 +7,27 @@ class ProjectStage(models.TextChoices):
     OPEN_RECRUITING = "open_recruiting", "开放招募"
     TEAM_BUILDING = "team_building", "组队中"
     ACTIVE = "active", "进行中"
-    EXPERIMENTING = "experimenting", "实验中"
-    WRITING = "writing", "写作中"
-    SUBMITTED = "submitted", "投稿中"
-    PUBLISHED = "published", "已发表"
     PAUSED = "paused", "暂停"
     ARCHIVED = "archived", "归档"
+
+
+PUBLIC_PROJECT_STAGES = [
+    ProjectStage.OPEN_RECRUITING,
+    ProjectStage.TEAM_BUILDING,
+    ProjectStage.ACTIVE,
+    ProjectStage.PAUSED,
+]
+
+FOLLOWABLE_PROJECT_STAGES = [
+    ProjectStage.OPEN_RECRUITING,
+    ProjectStage.TEAM_BUILDING,
+    ProjectStage.ACTIVE,
+]
+
+RECRUITING_PROJECT_STAGES = [
+    ProjectStage.OPEN_RECRUITING,
+    ProjectStage.TEAM_BUILDING,
+]
 
 
 class Theme(models.Model):
@@ -59,11 +74,11 @@ class Project(models.Model):
     body_markdown = models.TextField(blank=True)
     theme = models.ForeignKey(Theme, on_delete=models.SET_NULL, null=True, blank=True, related_name="projects")
     project_no = models.PositiveIntegerField(null=True, blank=True)
-    stage = models.CharField(max_length=32, choices=ProjectStage.choices, default=ProjectStage.OPEN_RECRUITING)
+    stage = models.CharField(max_length=32, choices=ProjectStage.choices, default=ProjectStage.DRAFT)
     source_md_path = models.CharField(max_length=500, blank=True, db_index=True)
     source_pdf_path = models.CharField(max_length=500, blank=True)
     page_path = models.CharField(max_length=500, blank=True)
-    content_hash = models.CharField(max_length=64, blank=True)
+    content_hash = models.CharField(max_length=64, blank=True, db_index=True)
     llm_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     community_score = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True)
     composite_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
@@ -72,7 +87,7 @@ class Project(models.Model):
     score_dimensions = models.JSONField(default=dict, blank=True)
     source_payload = models.JSONField(default=dict, blank=True)
     has_pdf = models.BooleanField(default=False)
-    is_public = models.BooleanField(default=True)
+    is_public = models.BooleanField(default=False)
     imported_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -95,9 +110,9 @@ class Project(models.Model):
     @property
     def team_status(self):
         role_counts = {role: 0 for role in ["医生", "学生", "Leader", "AI工程师", "医学统计"]}
-        for item in self.interests.exclude(status="withdrawn").values("role").annotate(count=models.Count("id")):
+        for item in self.interests.filter(status="approved").values("role").annotate(count=models.Count("id")):
             role_counts[item["role"]] = item["count"]
-        sponsor_count = self.sponsor_intents.exclude(status="withdrawn").count()
+        sponsor_count = self.sponsor_intents.filter(status="approved").count()
         return {
             "roles": role_counts,
             "sponsor_count": sponsor_count,

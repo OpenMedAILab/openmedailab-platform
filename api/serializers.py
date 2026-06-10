@@ -86,6 +86,17 @@ def document_payload(document):
     }
 
 
+def public_document_payload(document):
+    return {
+        "id": document.id,
+        "doc_type": document.doc_type,
+        "doc_type_label": document.get_doc_type_display(),
+        "title": document.title,
+        "path": public_document_path(document.path),
+        "created_at": document.created_at,
+    }
+
+
 def theme_file_payload(file):
     return {
         "id": file.id,
@@ -137,6 +148,20 @@ def project_summary_payload(project):
     }
 
 
+def admin_project_summary_payload(project):
+    payload = project_summary_payload(project)
+    payload.update(
+        {
+            "source_md_path": project.source_md_path,
+            "source_pdf_path": project.source_pdf_path,
+            "page_path": project.page_path,
+            "content_hash": project.content_hash,
+            "imported_at": project.imported_at,
+        }
+    )
+    return payload
+
+
 def project_detail_payload(project):
     payload = project_summary_payload(project)
     payload.update(
@@ -154,6 +179,30 @@ def project_detail_payload(project):
         }
     )
     return payload
+
+
+def public_project_detail_payload(project):
+    payload = project_summary_payload(project)
+    payload.update(
+        {
+            "body_markdown": project.body_markdown,
+            "score_dimensions": project.score_dimensions,
+            "team_status": project.team_status,
+            "documents": [public_document_payload(document) for document in project.documents.all()],
+        }
+    )
+    return payload
+
+
+def public_document_path(path):
+    value = str(path or "").strip()
+    if not value:
+        return ""
+    if value.startswith("/") or value.startswith("\\") or ".." in value.replace("\\", "/").split("/"):
+        return ""
+    if ":" in value and not value.startswith(("http://", "https://")):
+        return ""
+    return value
 
 
 def theme_space_payload(theme, projects, files):
@@ -293,6 +342,8 @@ def contribution_payload(contribution):
         "title": contribution.title,
         "description": contribution.description,
         "file_path": contribution.file_path,
+        "result_type": contribution.result_type,
+        "result_type_label": contribution.get_result_type_display(),
         "status": contribution.status,
         "status_label": contribution.get_status_display(),
         "reviewer": uid_only_user_payload(contribution.reviewer) if contribution.reviewer else None,
@@ -336,6 +387,7 @@ def audit_log_payload(entry):
 AUDIT_ACTION_LABELS = {
     "interaction.review": "审核协作意向",
     "interaction.withdraw": "撤回协作意向",
+    "project.stage_auto_team_building": "自动进入组队中",
     "task.create": "创建任务",
     "task.update": "更新任务",
     "task.cancel": "取消任务",
@@ -343,8 +395,8 @@ AUDIT_ACTION_LABELS = {
     "task.status": "更新任务状态",
     "task.user_status": "用户更新任务",
     "task.submit_for_review": "任务提交审核",
-    "contribution.submit": "提交贡献",
-    "contribution.review": "审核贡献",
+    "contribution.submit": "提交任务结果",
+    "contribution.review": "审核任务结果",
     "user.reset_password": "恢复默认密码",
     "theme.create": "创建主题",
     "theme.update": "更新主题",

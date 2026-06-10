@@ -7,9 +7,10 @@ from django.core.management import call_command
 from django.conf import settings
 from django.test import Client, TestCase, override_settings
 
+from accounts.models import PLATFORM_ADMIN_UID
 from credits.models import Contribution, ContributionStatus, CreditLedger
 from interactions.models import InteractionStatus, ProjectClaimIntent, ProjectFollow, ProjectInterest, ProjectScore, SponsorIntent
-from projects.models import AuditLog, Project, ProjectStage, ProjectTask, Tag, Theme, ThemeFile
+from projects.models import AuditLog, Project, ProjectDocument, ProjectStage, ProjectTask, Tag, Theme, ThemeFile
 
 
 class ApiTests(TestCase):
@@ -72,6 +73,111 @@ class ApiTests(TestCase):
         self.assertEqual(detail_payload["data"]["problem_statement"], "随访证据分散，难以复核。")
         self.assertEqual(detail_payload["data"]["data_requirements"]["modalities"], ["随访表", "OCT 摘要"])
 
+    def test_lifecycle_stage_contract_and_public_filters(self):
+        stage_values = [value for value, _ in ProjectStage.choices]
+        self.assertEqual(
+            stage_values,
+            ["draft", "open_recruiting", "team_building", "active", "paused", "archived"],
+        )
+
+        draft = Project.objects.create(
+            topic_id="AntiVEGF-DRAFT",
+            title="草稿课题",
+            theme=self.theme,
+            stage=ProjectStage.DRAFT,
+            is_public=True,
+        )
+        archived = Project.objects.create(
+            topic_id="AntiVEGF-ARCHIVED",
+            title="归档课题",
+            theme=self.theme,
+            stage=ProjectStage.ARCHIVED,
+            is_public=True,
+        )
+
+        meta_response = self.client.get("/api/meta/")
+        self.assertEqual(meta_response.status_code, 200)
+        self.assertEqual([item["value"] for item in meta_response.json()["data"]["project_stages"]], stage_values)
+
+        list_response = self.client.get("/api/projects/?page_size=20")
+        self.assertEqual(list_response.status_code, 200)
+        topic_ids = {item["topic_id"] for item in list_response.json()["data"]["results"]}
+        self.assertIn(self.project.topic_id, topic_ids)
+        self.assertNotIn(draft.topic_id, topic_ids)
+        self.assertNotIn(archived.topic_id, topic_ids)
+
+        self.assertEqual(self.client.get(f"/api/projects/{draft.pk}/").status_code, 404)
+        self.assertEqual(self.client.get(f"/api/projects/{archived.pk}/").status_code, 404)
+
+        theme_space_response = self.client.get(f"/api/themes/{self.theme.slug}/space/")
+        self.assertEqual(theme_space_response.status_code, 200)
+        theme_space_ids = {item["topic_id"] for item in theme_space_response.json()["data"]["projects"]}
+        self.assertIn(self.project.topic_id, theme_space_ids)
+        self.assertNotIn(draft.topic_id, theme_space_ids)
+        self.assertNotIn(archived.topic_id, theme_space_ids)
+
+    def test_recruiting_and_follow_stage_rules(self):
+        user = User.objects.create_user(username="stageuser", email="stageuser@example.com", password="StrongPass12345")
+        self.client.force_login(user)
+
+        self.project.stage = ProjectStage.ACTIVE
+        self.project.save(update_fields=["stage", "updated_at"])
+        active_interest_response = self.post_json(
+            f"/api/projects/{self.project.pk}/interest/",
+            {"role": "学生", "available_hours_per_week": 2},
+        )
+        self.assertEqual(active_interest_response.status_code, 422)
+        self.assertEqual(active_interest_response.json()["error"]["code"], "project_not_recruiting")
+
+        follow_response = self.post_json(f"/api/projects/{self.project.pk}/follow/", {})
+        self.assertEqual(follow_response.status_code, 200)
+        self.project.stage = ProjectStage.PAUSED
+        self.project.save(update_fields=["stage", "updated_at"])
+        paused_follow_response = self.post_json(f"/api/projects/{self.project.pk}/follow/", {})
+        self.assertEqual(paused_follow_response.status_code, 404)
+        unfollow_response = self.post_json(f"/api/projects/{self.project.pk}/unfollow/", {})
+        self.assertEqual(unfollow_response.status_code, 200)
+        self.assertFalse(ProjectFollow.objects.filter(user=user, project=self.project).exists())
+
+        self.project.stage = ProjectStage.TEAM_BUILDING
+        self.project.save(update_fields=["stage", "updated_at"])
+        for path, payload in [
+            (f"/api/projects/{self.project.pk}/interest/", {"role": "学生", "available_hours_per_week": 2}),
+            (f"/api/projects/{self.project.pk}/claim/", {"claim_type": "leader"}),
+            (f"/api/projects/{self.project.pk}/sponsor/", {"sponsor_type": "compute"}),
+        ]:
+            response = self.post_json(path, payload)
+            self.assertEqual(response.status_code, 201)
+
+    def test_team_status_counts_only_approved_relationships(self):
+        doctor = User.objects.create_user(username="teamdoctor", email="teamdoctor@example.com", password="StrongPass12345")
+        student = User.objects.create_user(username="teamstudent", email="teamstudent@example.com", password="StrongPass12345")
+        sponsor = User.objects.create_user(username="teamsponsor", email="teamsponsor@example.com", password="StrongPass12345")
+        ProjectInterest.objects.create(user=doctor, project=self.project, role="医生", status=InteractionStatus.PENDING)
+        ProjectInterest.objects.create(user=student, project=self.project, role="学生", status=InteractionStatus.APPROVED)
+        SponsorIntent.objects.create(user=sponsor, project=self.project, sponsor_type="compute", status=InteractionStatus.REJECTED)
+
+        status = Project.objects.get(pk=self.project.pk).team_status
+        self.assertEqual(status["roles"]["医生"], 0)
+        self.assertEqual(status["roles"]["学生"], 1)
+        self.assertEqual(status["sponsor_count"], 0)
+
+    def test_score_does_not_change_project_stage_or_lifecycle_status_card_groups(self):
+        user = User.objects.create_user(username="scoreuser", email="scoreuser@example.com", password="StrongPass12345")
+        self.client.force_login(user)
+
+        response = self.post_json(f"/api/projects/{self.project.pk}/score/", {"score": 9, "comment": "关注"})
+        self.assertEqual(response.status_code, 200)
+        self.project.refresh_from_db()
+        self.assertEqual(self.project.stage, ProjectStage.OPEN_RECRUITING)
+
+        card_response = self.client.get(f"/api/projects/{self.project.pk}/status-card/")
+        self.assertEqual(card_response.status_code, 200)
+        card = card_response.json()["data"]
+        self.assertNotIn("已评分", " ".join(card["viewer_state"]["activity_labels"]))
+        group_types = {group["type"] for group in card["uid_groups"]["groups"]}
+        self.assertNotIn("score", group_types)
+
     def test_auth_required_for_dashboard(self):
         response = self.client.get("/api/me/dashboard/")
         self.assertEqual(response.status_code, 401)
@@ -90,7 +196,7 @@ class ApiTests(TestCase):
         self.assertIn("/api/auth/password/change-required/", schema["paths"])
         self.assertIn("/api/admin/users/", schema["paths"])
         self.assertIn("/api/admin/users/{uid}/reset-password/", schema["paths"])
-        self.assertIn("/api/admin/projects/import-json/", schema["paths"])
+        self.assertNotIn("/api/admin/projects/import-json/", schema["paths"])
         self.assertIn("/api/admin/theme-files/", schema["paths"])
         self.assertIn("/api/admin/projects/{project_id}/", schema["paths"])
         self.assertIn("/api/projects/{project_id}/status-card/", schema["paths"])
@@ -111,6 +217,9 @@ class ApiTests(TestCase):
         contract_fields = [field["name"] for field in contract_data["fields"]]
         self.assertIn("problem_statement", contract_fields)
         self.assertIn("data_requirements", contract_fields)
+        self.assertIn("markdown_template", contract_data)
+        self.assertIn("模板版本：v1", contract_data["markdown_template"])
+        self.assertNotIn("example", contract_data)
         theme_file_types = [item["value"] for item in contract_data["theme_file_types"]]
         self.assertIn("dataset", theme_file_types)
         self.assertIn("data_dictionary", theme_file_types)
@@ -136,6 +245,16 @@ class ApiTests(TestCase):
         self.assertIn("date", release["latest"])
         self.assertTrue(release["latest"]["sections"])
         self.assertIsInstance(release["history"], list)
+
+    def test_release_payload_reads_current_version_file(self):
+        from config import release as release_module
+
+        version = (settings.BASE_DIR / "VERSION").read_text(encoding="utf-8").strip()
+        with patch.object(release_module, "APP_VERSION", "0.0.0"):
+            payload = release_module.release_payload()
+
+        self.assertEqual(payload["version"], version)
+        self.assertEqual(payload["latest"]["version"], version)
 
     def test_theme_file_space_api(self):
         self.theme.file_space = {"sections": ["数据集文件", "数据字典"]}
@@ -173,7 +292,7 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "csrf_failed")
 
-    def test_admin_can_manage_theme_and_import_project_json(self):
+    def test_admin_can_manage_theme_and_create_project(self):
         call_command(
             "ensure_platform_admin",
             username="platform_admin",
@@ -195,29 +314,27 @@ class ApiTests(TestCase):
         self.assertEqual(theme_response.status_code, 201)
         self.assertEqual(theme_response.json()["data"]["file_space"]["sections"], ["数据集文件", "标注规范"])
 
-        import_response = self.post_json(
-            "/api/admin/projects/import-json/",
+        create_response = self.post_json(
+            "/api/admin/projects/",
             {
-                "projects": [
-                    {
-                        "topic_id": "RETINA-002",
-                        "theme": "视网膜影像",
-                        "title": "OCT 病灶分割评估",
-                        "summary": "面向 OCT 病灶分割模型的临床可用性评估。",
-                        "problem_statement": "需要验证分割结果是否可被医生复核。",
-                        "data_requirements": {"modalities": ["OCT"], "minimum_cases": 30},
-                        "expected_outputs": ["标注规范", "评估报告"],
-                        "tags": ["OCT", "分割"],
-                        "documents": [{"doc_type": "markdown", "title": "方案", "path": "topics/RETINA-002.md"}],
-                    }
-                ]
+                "topic_id": "RETINA-002",
+                "theme": "视网膜影像",
+                "title": "OCT 病灶分割评估",
+                "summary": "面向 OCT 病灶分割模型的临床可用性评估。",
+                "problem_statement": "需要验证分割结果是否可被医生复核。",
+                "data_requirements": {"modalities": ["OCT"], "minimum_cases": 30},
+                "expected_outputs": ["标注规范", "评估报告"],
+                "tags": ["OCT", "分割"],
+                "source_md_path": "topics/RETINA-002.md",
+                "documents": [{"doc_type": "markdown", "title": "方案", "path": "topics/RETINA-002.md"}],
             },
         )
-        self.assertEqual(import_response.status_code, 200)
-        self.assertEqual(import_response.json()["data"]["created_count"], 1)
+        self.assertEqual(create_response.status_code, 201)
         project = Project.objects.get(topic_id="RETINA-002")
         self.assertEqual(project.data_requirements["modalities"], ["OCT"])
         self.assertEqual(project.documents.count(), 1)
+        self.assertEqual(project.stage, ProjectStage.DRAFT)
+        self.assertFalse(project.is_public)
 
         file_response = self.post_json(
             "/api/admin/theme-files/",
@@ -255,6 +372,115 @@ class ApiTests(TestCase):
         self.assertEqual(file_delete_response.status_code, 200)
         self.assertFalse(ThemeFile.objects.get(pk=file_id).is_active)
 
+    def test_admin_project_create_update_boundaries(self):
+        self.login_platform_admin()
+
+        response = self.post_json(
+            "/api/admin/projects/",
+            {"topic_id": "NEW-001", "theme": self.theme.slug, "title": "新建课题", "stage": "active", "is_public": True},
+        )
+        self.assertEqual(response.status_code, 201)
+        created = Project.objects.get(topic_id="NEW-001")
+        self.assertEqual(created.stage, ProjectStage.DRAFT)
+        self.assertFalse(created.is_public)
+        self.assertEqual(response.json()["data"]["stage"], ProjectStage.DRAFT)
+        self.assertFalse(response.json()["data"]["is_public"])
+        self.assertFalse(Project.objects.filter(pk=created.pk, is_public=True).exists())
+
+        duplicate_response = self.post_json(
+            "/api/admin/projects/",
+            {"topic_id": "NEW-001", "theme": self.theme.slug, "title": "重复课题"},
+        )
+        self.assertEqual(duplicate_response.status_code, 422)
+        self.assertEqual(Project.objects.filter(topic_id="NEW-001").count(), 1)
+
+        topic_change_response = self.patch_json(
+            f"/api/admin/projects/{created.pk}/",
+            {"topic_id": "NEW-002", "title": "不允许改编号"},
+        )
+        self.assertEqual(topic_change_response.status_code, 422)
+        self.assertFalse(Project.objects.filter(topic_id="NEW-002").exists())
+
+        unknown_theme_response = self.post_json(
+            "/api/admin/projects/",
+            {"topic_id": "NEW-003", "theme": "不存在主题", "title": "未知主题课题"},
+        )
+        self.assertEqual(unknown_theme_response.status_code, 422)
+        self.assertFalse(Theme.objects.filter(name="不存在主题").exists())
+
+    def test_admin_project_list_supports_duplicate_detection_fields(self):
+        self.login_platform_admin()
+        self.project.source_md_path = "topics/AntiVEGF-001.md"
+        self.project.content_hash = "hash-for-duplicate-check"
+        self.project.save(update_fields=["source_md_path", "content_hash", "updated_at"])
+
+        topic_response = self.client.get("/api/admin/projects/?topic_id=AntiVEGF-001&page_size=10")
+        self.assertEqual(topic_response.status_code, 200)
+        topic_rows = topic_response.json()["data"]["results"]
+        self.assertEqual(len(topic_rows), 1)
+        self.assertEqual(topic_rows[0]["source_md_path"], "topics/AntiVEGF-001.md")
+        self.assertEqual(topic_rows[0]["content_hash"], "hash-for-duplicate-check")
+
+        source_response = self.client.get("/api/admin/projects/?source_md_path=topics/AntiVEGF-001.md&page_size=10")
+        self.assertEqual(source_response.json()["data"]["pagination"]["total_count"], 1)
+
+        hash_response = self.client.get("/api/admin/projects/?content_hash=hash-for-duplicate-check&page_size=10")
+        self.assertEqual(hash_response.json()["data"]["pagination"]["total_count"], 1)
+
+    def test_admin_user_list_orders_platform_admin_first_then_uid(self):
+        admin = self.login_platform_admin()
+        high_uid_user = User.objects.create_user(username="highuid", email="highuid@example.com", password="StrongPass12345")
+        low_uid_user = User.objects.create_user(username="lowuid", email="lowuid@example.com", password="StrongPass12345")
+        blank_uid_user = User.objects.create_user(username="blankuid", email="blankuid@example.com", password="StrongPass12345")
+        high_uid_user.profile.uid = "S00000050"
+        high_uid_user.profile.save(update_fields=["uid"])
+        low_uid_user.profile.uid = "D00000002"
+        low_uid_user.profile.save(update_fields=["uid"])
+        blank_uid_user.profile.uid = ""
+        blank_uid_user.profile.save(update_fields=["uid"])
+
+        response = self.client.get("/api/admin/users/?page_size=10")
+
+        self.assertEqual(response.status_code, 200)
+        rows = response.json()["data"]["results"]
+        self.assertEqual(rows[0]["username"], admin.username)
+        self.assertEqual(rows[0]["profile"]["uid"], PLATFORM_ADMIN_UID)
+        self.assertEqual([row["username"] for row in rows[:4]], ["platform_admin", "lowuid", "highuid", "blankuid"])
+
+        search_response = self.client.get("/api/admin/users/?q=example.com&page_size=10")
+        self.assertEqual(search_response.status_code, 200)
+        search_rows = search_response.json()["data"]["results"]
+        self.assertEqual(search_rows[0]["username"], admin.username)
+        self.assertEqual(search_rows[0]["profile"]["uid"], PLATFORM_ADMIN_UID)
+
+    def test_public_project_detail_hides_internal_source_fields(self):
+        self.project.source_md_path = "topics/AntiVEGF-001.md"
+        self.project.source_pdf_path = "/Users/wang/private/AntiVEGF-001.pdf"
+        self.project.page_path = "/internal/pages/AntiVEGF-001.html"
+        self.project.content_hash = "internal-hash"
+        self.project.source_payload = {"source": "api-admin", "payload": {"secret": "internal"}}
+        self.project.save(update_fields=["source_md_path", "source_pdf_path", "page_path", "content_hash", "source_payload", "updated_at"])
+        ProjectDocument.objects.create(
+            project=self.project,
+            doc_type=ProjectDocument.DocumentType.MARKDOWN,
+            title="内部 Markdown",
+            path="/Users/wang/private/topics/AntiVEGF-001.md",
+            content_hash="document-internal-hash",
+        )
+
+        response = self.client.get(f"/api/projects/{self.project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["data"]
+        self.assertNotIn("source_payload", payload)
+        self.assertNotIn("content_hash", payload)
+        self.assertNotIn("source_md_path", payload)
+        self.assertNotIn("source_pdf_path", payload)
+        self.assertNotIn("page_path", payload)
+        self.assertNotIn("imported_at", payload)
+        self.assertNotIn("/Users/wang/private", json.dumps(payload, ensure_ascii=False))
+        self.assertNotIn("document-internal-hash", json.dumps(payload, ensure_ascii=False))
+
     def test_regular_user_cannot_manage_content(self):
         user = User.objects.create_user(username="normaluser", password="StrongPass12345")
         self.client.force_login(user)
@@ -276,7 +502,7 @@ class ApiTests(TestCase):
             available_hours_per_week=4,
             status=InteractionStatus.APPROVED,
         )
-        ProjectClaimIntent.objects.create(user=doctor, project=self.project, claim_type="leader", status=InteractionStatus.RECORDED)
+        ProjectClaimIntent.objects.create(user=doctor, project=self.project, claim_type="leader", status=InteractionStatus.APPROVED)
         SponsorIntent.objects.create(user=student, project=self.project, sponsor_type="compute", status=InteractionStatus.APPROVED)
         ProjectInterest.objects.create(
             user=pending,
@@ -292,6 +518,8 @@ class ApiTests(TestCase):
         self.assertEqual(anonymous["participants"]["count"], 2)
         self.assertEqual(anonymous["participants"]["uids"], [])
         self.assertFalse(anonymous["participants"]["uids_visible"])
+        self.assertFalse(anonymous["uid_groups"]["uids_visible"])
+        self.assertEqual(anonymous["uid_groups"]["groups"], [])
 
         self.client.force_login(student)
         ProjectFollow.objects.create(user=student, project=self.project)
@@ -306,6 +534,18 @@ class ApiTests(TestCase):
         self.assertIn("已收藏", payload["viewer_state"]["activity_labels"])
         self.assertTrue(payload["participants"]["uids_visible"])
         self.assertEqual(set(payload["participants"]["uids"]), {student.profile.uid, doctor.profile.uid})
+        self.assertTrue(payload["uid_groups"]["uids_visible"])
+        group_labels = [group["label"] for group in payload["uid_groups"]["groups"]]
+        self.assertEqual(
+            group_labels,
+            ["收藏", "参与：学生（已通过）", "参与：医生（待处理）", "认领项目负责人（已通过）", "资助：算力（已通过）"],
+        )
+        uid_groups = {group["label"]: set(group["uids"]) for group in payload["uid_groups"]["groups"]}
+        self.assertIn(student.profile.uid, uid_groups["收藏"])
+        self.assertIn(student.profile.uid, uid_groups["参与：学生（已通过）"])
+        self.assertIn(pending.profile.uid, uid_groups["参与：医生（待处理）"])
+        self.assertIn(doctor.profile.uid, uid_groups["认领项目负责人（已通过）"])
+        self.assertIn(student.profile.uid, uid_groups["资助：算力（已通过）"])
         self.assertNotIn("studentuid@example.com", json.dumps(payload, ensure_ascii=False))
         self.assertNotIn("studentuid", json.dumps(payload, ensure_ascii=False))
 
@@ -317,6 +557,8 @@ class ApiTests(TestCase):
         self.assertEqual(follower_payload["status_uids"]["highlight_uid"], follower.profile.uid)
         self.assertIn(follower.profile.uid, follower_payload["status_uids"]["uids"])
         self.assertEqual(follower_payload["participants"]["count"], 2)
+        follow_group = next(group for group in follower_payload["uid_groups"]["groups"] if group["key"] == "follow")
+        self.assertEqual(follow_group["uids"], sorted([student.profile.uid, follower.profile.uid]))
 
     def test_admin_reviews_interactions_and_writes_audit_log(self):
         applicant = User.objects.create_user(username="applicant", email="applicant@example.com", password="StrongPass12345")
@@ -341,6 +583,16 @@ class ApiTests(TestCase):
         self.assertNotIn("applicant@example.com", json.dumps(rows[0], ensure_ascii=False))
         self.assertNotIn("applicant", json.dumps(rows[0], ensure_ascii=False))
 
+        recorded_response = self.patch_json(
+            f"/api/admin/interactions/interest/{interest.pk}/status/",
+            {"status": "recorded", "review_note": "旧状态不再允许"},
+        )
+        self.assertEqual(recorded_response.status_code, 422)
+        interest.refresh_from_db()
+        self.assertEqual(interest.status, InteractionStatus.PENDING)
+        self.project.refresh_from_db()
+        self.assertEqual(self.project.stage, ProjectStage.OPEN_RECRUITING)
+
         review_response = self.patch_json(
             f"/api/admin/interactions/interest/{interest.pk}/status/",
             {"status": "approved", "review_note": "匹配学生协作角色"},
@@ -348,7 +600,9 @@ class ApiTests(TestCase):
 
         self.assertEqual(review_response.status_code, 200)
         interest.refresh_from_db()
+        self.project.refresh_from_db()
         self.assertEqual(interest.status, InteractionStatus.APPROVED)
+        self.assertEqual(self.project.stage, ProjectStage.TEAM_BUILDING)
         self.assertTrue(
             AuditLog.objects.filter(
                 actor=admin,
@@ -358,6 +612,23 @@ class ApiTests(TestCase):
                 after__review_note="匹配学生协作角色",
             ).exists()
         )
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="project.stage_auto_team_building",
+                target_type="Project",
+                target_id=str(self.project.pk),
+                after__stage=ProjectStage.TEAM_BUILDING,
+            ).exists()
+        )
+        rereview_response = self.patch_json(
+            f"/api/admin/interactions/interest/{interest.pk}/status/",
+            {"status": "rejected", "review_note": "已处理申请不应重审"},
+        )
+        self.assertEqual(rereview_response.status_code, 422)
+        self.assertEqual(rereview_response.json()["error"]["code"], "interaction_not_pending")
+        interest.refresh_from_db()
+        self.assertEqual(interest.status, InteractionStatus.APPROVED)
         audit_response = self.client.get("/api/admin/audit-logs/?action=interaction.review")
         self.assertEqual(audit_response.status_code, 200)
         audit_entry = audit_response.json()["data"]["results"][0]
@@ -392,6 +663,13 @@ class ApiTests(TestCase):
         assignee = User.objects.create_user(username="worker", email="worker@example.com", password="StrongPass12345")
         starting_balance = assignee.profile.credit_balance
         admin = self.login_platform_admin()
+        ProjectInterest.objects.create(
+            user=assignee,
+            project=self.project,
+            role="学生",
+            available_hours_per_week=4,
+            status=InteractionStatus.APPROVED,
+        )
 
         create_response = self.post_json(
             "/api/admin/tasks/",
@@ -426,18 +704,23 @@ class ApiTests(TestCase):
         self.assertEqual(progress_response.status_code, 200)
         self.assertEqual(progress_response.json()["data"]["progress_percent"], 60)
 
+        self.project.stage = ProjectStage.ACTIVE
+        self.project.save(update_fields=["stage", "updated_at"])
         contribution_response = self.post_json(
             "/api/me/contributions/",
             {
                 "project_id": self.project.pk,
                 "task_id": task_id,
                 "title": "数据字典初稿",
+                "result_type": "stage",
                 "description": "已经完成主要字段说明。",
                 "file_path": "workspace/data-dictionary.md",
             },
         )
         self.assertEqual(contribution_response.status_code, 201)
         contribution_id = contribution_response.json()["data"]["id"]
+        self.assertEqual(contribution_response.json()["data"]["result_type"], "stage")
+        self.assertEqual(contribution_response.json()["data"]["result_type_label"], "阶段性成果")
         self.assertEqual(ProjectTask.objects.get(pk=task_id).status, ProjectTask.TaskStatus.REVIEW)
 
         self.client.force_login(admin)
@@ -481,6 +764,58 @@ class ApiTests(TestCase):
             1,
         )
         self.assertFalse(duplicate_review_response.json()["data"]["reviewer"].get("username"))
+
+    def test_task_result_requires_active_project_and_review_status_is_limited(self):
+        user = User.objects.create_user(username="resultuser", email="result@example.com", password="StrongPass12345")
+        self.client.force_login(user)
+
+        blocked_response = self.post_json(
+            "/api/me/contributions/",
+            {"project_id": self.project.pk, "title": "开放招募阶段不能交结果"},
+        )
+        self.assertEqual(blocked_response.status_code, 422)
+        self.assertEqual(blocked_response.json()["error"]["code"], "project_not_active")
+
+        self.project.stage = ProjectStage.ACTIVE
+        self.project.save(update_fields=["stage", "updated_at"])
+        unapproved_response = self.post_json(
+            "/api/me/contributions/",
+            {"project_id": self.project.pk, "title": "未获批不能交结果"},
+        )
+        self.assertEqual(unapproved_response.status_code, 403)
+        self.assertEqual(unapproved_response.json()["error"]["code"], "interaction_not_approved")
+
+        ProjectInterest.objects.create(
+            user=user,
+            project=self.project,
+            role="学生",
+            available_hours_per_week=4,
+            status=InteractionStatus.APPROVED,
+        )
+        invalid_type_response = self.post_json(
+            "/api/me/contributions/",
+            {"project_id": self.project.pk, "title": "非法结果类型", "result_type": "paper"},
+        )
+        self.assertEqual(invalid_type_response.status_code, 422)
+        self.assertEqual(invalid_type_response.json()["error"]["code"], "validation_error")
+
+        create_response = self.post_json(
+            "/api/me/contributions/",
+            {"project_id": self.project.pk, "title": "进行中课题任务结果", "result_type": "final"},
+        )
+        self.assertEqual(create_response.status_code, 201)
+        contribution_id = create_response.json()["data"]["id"]
+        self.assertEqual(create_response.json()["data"]["result_type"], "final")
+        self.assertEqual(create_response.json()["data"]["result_type_label"], "最终结果")
+
+        self.login_platform_admin()
+        revision_response = self.patch_json(
+            f"/api/admin/contributions/{contribution_id}/review/",
+            {"status": "needs_revision", "review_comment": "旧状态不再允许"},
+        )
+        self.assertEqual(revision_response.status_code, 422)
+        contribution = Contribution.objects.get(pk=contribution_id)
+        self.assertEqual(contribution.status, ContributionStatus.SUBMITTED)
 
     def test_admin_overview_user_detail_credits_and_audit_logs_are_permissioned(self):
         user = User.objects.create_user(username="detailuser", email="detail@example.com", password="StrongPass12345")

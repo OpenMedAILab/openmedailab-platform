@@ -123,7 +123,10 @@ GET    /api/admin/projects/
 POST   /api/admin/projects/
 PATCH  /api/admin/projects/<id>/
 DELETE /api/admin/projects/<id>/
-POST   /api/admin/projects/import-json/
+GET    /api/admin/theme-files/
+POST   /api/admin/theme-files/
+PATCH  /api/admin/theme-files/<id>/
+DELETE /api/admin/theme-files/<id>/
 ```
 
 Registration keeps the existing `POST /api/auth/register/` path and fields: `username`, `email`, `display_name`, `role_type`, `password1`, and `password2`. Email is required, normalized to lowercase, and unique case-insensitively. Validation errors return field-level details in `error.details`, so the frontend can show errors beside the relevant form field.
@@ -154,7 +157,7 @@ OPENMEDAILAB_DEFAULT_PASSWORD='<strong-default-password>'
 
 If `OPENMEDAILAB_DEFAULT_PASSWORD` is empty or does not pass Django password validators, administrator password recovery returns a validation error.
 
-Admin endpoints require RBAC capabilities returned by `/api/rbac/` and `/api/me/`. Only the unique platform administrator receives `manage_themes`, `manage_projects`, `manage_users`, and `import_projects`.
+Admin endpoints require RBAC capabilities returned by `/api/rbac/` and `/api/me/`. Only the unique platform administrator receives `manage_themes`, `manage_projects`, `manage_users`, and the other backend management capabilities.
 
 The platform administrator is not created through public registration. Create or repair it with:
 
@@ -164,7 +167,9 @@ conda run -n openmedailab python manage.py ensure_platform_admin --username plat
 
 The platform administrator has fixed UID `ADM00000001`. The command fails if another staff/superuser account already exists, because the platform currently supports exactly one administrator account.
 
-Project JSON imports should follow the field contract from `GET /api/project-schema/`. The backend stores structured fields such as `problem_statement`, `research_goal`, `technical_route`, `data_requirements`, `evaluation_metrics`, `expected_outputs`, `compliance_notes`, project documents, and the original `source_payload`.
+Projects can only be created or edited by the administrator. The web workflow supports system-form creation/editing and Markdown template import. `GET /api/project-schema/` returns the field contract plus `markdown_template`; the frontend reads `.md` files locally, parses them into the existing `POST /api/admin/projects/` or `PATCH /api/admin/projects/<id>/` payload, and never exposes a public project-creation API. New projects default to `stage=draft` and `is_public=false`; publish by updating the same project to a public recruiting stage.
+
+The backend stores structured fields such as `problem_statement`, `research_goal`, `technical_route`, `data_requirements`, `evaluation_metrics`, `expected_outputs`, `compliance_notes`, project documents, and administrator-only source metadata. Public project APIs do not expose `source_payload`, `content_hash`, or internal Markdown source paths.
 
 Project list query parameters:
 

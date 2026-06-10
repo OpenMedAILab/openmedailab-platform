@@ -102,8 +102,7 @@ export const api = {
   adminProject: (id) => request(`/api/admin/projects/${id}/`),
   adminCreateProject: (payload) => request("/api/admin/projects/", { method: "POST", body: payload }),
   adminUpdateProject: (id, payload) => request(`/api/admin/projects/${id}/`, { method: "PATCH", body: payload }),
-  adminDeleteProject: (id) => request(`/api/admin/projects/${id}/`, { method: "DELETE", body: {} }),
-  adminImportProjects: (payload) => request("/api/admin/projects/import-json/", { method: "POST", body: payload })
+  adminDeleteProject: (id) => request(`/api/admin/projects/${id}/`, { method: "DELETE", body: {} })
 };
 
 function cleanParams(params) {

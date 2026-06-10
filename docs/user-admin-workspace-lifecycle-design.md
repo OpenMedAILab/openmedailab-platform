@@ -44,7 +44,7 @@
 | 文件空间 | `#/space/:slug` | 查看主题文件域和关联课题 |
 | 我的协作 | `#/dashboard` | 展示用户身份卡片和收藏/参与/评分数量 |
 | 我的收藏 | `#/favorites` | 使用 dashboard 的 follows 展示收藏课题 |
-| 管理 | `#/admin` | 课题、主题与文件域、用户、JSON 导入、字段契约 |
+| 管理 | `#/admin` | 课题、主题与文件域、用户、Markdown 模板导入、字段契约 |
 | 账号 | `#/login`、`#/register`、`#/password-change`、`#/password-reset` | 登录注册、强制改密、管理员恢复密码说明 |
 
 ### 2.2 已有后端模型
@@ -91,7 +91,7 @@
 | 管理主题 | `/api/admin/themes/` | 复用 |
 | 管理主题文件 | `/api/admin/theme-files/` | 复用 |
 | 管理课题 | `/api/admin/projects/` | 复用 |
-| JSON 导入 | `POST /api/admin/projects/import-json/` | 复用 |
+| Markdown 模板导入 | `POST/PATCH /api/admin/projects/` | 复用现有课题创建/更新 API |
 
 ### 2.4 当前缺口
 
@@ -138,7 +138,6 @@
 | `manage_themes` | 管理主题和文件域 |
 | `manage_projects` | 管理课题 |
 | `manage_users` | 管理用户 |
-| `import_projects` | 导入课题 |
 | `view_admin_console` | 进入管理员空间 |
 
 建议新增 capability：
@@ -445,9 +444,9 @@ API：
 | 贡献审核 | 审核用户贡献，发放积分 | 需接入 `Contribution`、`CreditLedger` |
 | 主题与文件域 | 主题、文件域维护 | 已有 |
 | 用户管理 | 用户查询、默认密码恢复、用户详情 | 已有，需增强用户详情 |
-| JSON 导入 | 导入课题 | 已有 |
+| Markdown 模板导入 | 导入课题 | 使用现有课题创建/更新 API |
 | 审计日志 | 查看管理员操作 | 需新增查询 API |
-| 字段契约 | 查看字段契约 | 已有 |
+| 字段契约 | 查看字段契约和 Markdown 模板 | 已有 |
 
 ### 6.2 管理总览
 
@@ -531,7 +530,7 @@ PATCH /api/admin/interactions/{type}/{id}/status/
 - `POST /api/admin/projects/`
 - `PATCH /api/admin/projects/{id}/`
 - `DELETE /api/admin/projects/{id}/`
-- `POST /api/admin/projects/import-json/`
+- Markdown 模板导入不再使用独立 JSON 导入 API，前端解析后复用 `POST /api/admin/projects/` 和 `PATCH /api/admin/projects/{id}/`
 
 增强方向：
 
@@ -900,7 +899,7 @@ GET /api/projects/{id}/status-card/
     贡献审核
     主题与文件域
     用户管理
-    JSON 导入
+    Markdown 模板导入
     审计日志
     字段契约
 ```

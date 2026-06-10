@@ -7,7 +7,6 @@ class InteractionStatus(models.TextChoices):
     PENDING = "pending", "待处理"
     APPROVED = "approved", "已通过"
     REJECTED = "rejected", "已拒绝"
-    RECORDED = "recorded", "已记录"
     WITHDRAWN = "withdrawn", "已撤回"
 
 
