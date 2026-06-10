@@ -169,7 +169,7 @@ The platform administrator has fixed UID `ADM00000001`. The command fails if ano
 
 Projects can only be created or edited by the administrator. The web workflow supports system-form creation/editing and JSON/JSONL import. `GET /api/project-schema/` returns the field contract plus `jsonl_template`; the frontend reads `.json` and `.jsonl` files locally, shows a confirmation preview, then writes through the existing `POST /api/admin/projects/` or `PATCH /api/admin/projects/<id>/` payload. New projects default to `stage=draft` and `is_public=false`; publish by updating the same project to a public recruiting stage.
 
-The business project ID is `topic_id` in the backend and must be a globally unique positive integer. Import templates expose it as `id`. Project content is intentionally minimal and strictly structured: `title`, optional `title_en`, `problem_statement`, `clinical_endpoint`, and `existing_foundation`. Public project APIs do not expose `source_payload` or other internal operational metadata.
+The business project ID is `topic_id` in the backend and is generated automatically from the current global maximum. JSON/JSONL imports may still include optional `id` to update an existing project; omitting it creates a new project with the next ID. Project content is intentionally minimal and strictly structured: `title`, optional `title_en`, `problem_statement`, `clinical_endpoint`, and `existing_foundation`. The three structured content fields accept up to 250 Chinese characters; list/card displays truncate them to 100 characters. Public project APIs do not expose `source_payload` or other internal operational metadata.
 
 Project list query parameters:
 

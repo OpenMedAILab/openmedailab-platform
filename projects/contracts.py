@@ -1,18 +1,18 @@
 PROJECT_FIELD_CONTRACT = [
-    {"name": "id", "label": "课题 ID", "type": "integer", "required": True, "source": "project.topic_id"},
+    {"name": "id", "label": "课题 ID（选填，留空自动生成）", "type": "integer", "required": False, "source": "project.topic_id"},
     {"name": "theme", "label": "主题", "type": "string", "required": True, "source": "theme.name 或 theme.slug"},
     {"name": "title", "label": "Title（中文）", "type": "string", "required": True, "source": "project.title"},
     {"name": "title_en", "label": "Title（英文，选填）", "type": "string", "required": False, "source": "project.title_en"},
-    {"name": "problem_statement", "label": "科学问题（50字以内）", "type": "text", "required": True, "source": "project.problem_statement"},
-    {"name": "clinical_endpoint", "label": "临床终点（50字以内）", "type": "string", "required": True, "source": "project.clinical_endpoint"},
-    {"name": "existing_foundation", "label": "已有基础（50字以内）", "type": "string", "required": True, "source": "project.existing_foundation"},
+    {"name": "problem_statement", "label": "科学问题（250字以内）", "type": "text", "required": True, "source": "project.problem_statement"},
+    {"name": "clinical_endpoint", "label": "临床终点（250字以内）", "type": "string", "required": True, "source": "project.clinical_endpoint"},
+    {"name": "existing_foundation", "label": "已有基础（250字以内）", "type": "string", "required": True, "source": "project.existing_foundation"},
     {"name": "stage", "label": "阶段", "type": "enum", "required": False, "source": "ProjectStage"},
     {"name": "is_public", "label": "是否公开", "type": "boolean", "required": False, "source": "project.is_public"},
 ]
 
 
-PROJECT_JSONL_TEMPLATE = """{"id":1,"theme":"示例主题","title":"中文课题标题","title_en":"English title optional","problem_statement":"50字以内说明科学问题","clinical_endpoint":"50字以内说明临床终点","existing_foundation":"50字以内说明已有基础"}
-{"id":2,"theme":"示例主题","title":"第二个中文课题标题","title_en":"","problem_statement":"科学问题","clinical_endpoint":"临床终点","existing_foundation":"已有基础"}
+PROJECT_JSONL_TEMPLATE = """{"theme":"示例主题","title":"中文课题标题","title_en":"English title optional","problem_statement":"250字以内说明科学问题","clinical_endpoint":"250字以内说明临床终点","existing_foundation":"250字以内说明已有基础"}
+{"theme":"示例主题","title":"第二个中文课题标题","title_en":"","problem_statement":"科学问题","clinical_endpoint":"临床终点","existing_foundation":"已有基础"}
 """
 
 

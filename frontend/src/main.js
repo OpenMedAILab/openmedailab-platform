@@ -1243,8 +1243,8 @@ const App = {
       if (!can("manage_projects")) return;
       try {
         const formPayload = projectFormPayload(state.admin.projectForm);
-        if (!Number.isInteger(formPayload.topic_id) || formPayload.topic_id <= 0 || !formPayload.title || !formPayload.theme) {
-          showToast("课题 ID 必须是正整数，标题和主题不能为空");
+        if (!formPayload.title || !formPayload.theme) {
+          showToast("标题和主题不能为空");
           return;
         }
         const quality = qualityCheckProjectPayload(formPayload);
@@ -2733,11 +2733,11 @@ const App = {
                     <span>{{ project.stage_label }}</span>
                   </div>
                   <h3>{{ project.title }}</h3>
-                  <p>{{ shortText(project.problem_statement, 160) }}</p>
+                  <p>{{ shortText(project.problem_statement, 100) }}</p>
                   <div class="project-key-fields">
-                    <div><dt>科学问题</dt><dd>{{ shortText(project.problem_statement, 80) }}</dd></div>
-                    <div><dt>临床终点</dt><dd>{{ shortText(project.clinical_endpoint, 80) }}</dd></div>
-                    <div><dt>已有基础</dt><dd>{{ shortText(project.existing_foundation, 80) }}</dd></div>
+                    <div><dt>科学问题</dt><dd>{{ shortText(project.problem_statement, 100) }}</dd></div>
+                    <div><dt>临床终点</dt><dd>{{ shortText(project.clinical_endpoint, 100) }}</dd></div>
+                    <div><dt>已有基础</dt><dd>{{ shortText(project.existing_foundation, 100) }}</dd></div>
                   </div>
                   <div class="tag-row">
                     <span v-for="tag in project.tags.slice(0, 5)" :key="tag.id">{{ tag.name }}</span>
@@ -3058,7 +3058,7 @@ const App = {
                         <span class="status-chip strong">{{ myTaskStatusLabel(task) }}</span>
                       </div>
                       <h2>{{ task.project.title }}</h2>
-                      <p>{{ shortText(task.project.problem_statement, 180) }}</p>
+                      <p>{{ shortText(task.project.problem_statement, 100) }}</p>
                       <small>{{ task.project.topic_id }} · {{ task.project.theme?.name || '未分类' }}</small>
                       <div class="relation-summary">{{ taskRelationSummary(task) }}</div>
                       <div v-if="task.contributions.length" class="task-result-strip">
@@ -3150,7 +3150,7 @@ const App = {
                     <span>{{ project.stage_label }}</span>
                   </div>
                   <h3>{{ project.title }}</h3>
-                  <p>{{ shortText(project.problem_statement, 180) }}</p>
+                  <p>{{ shortText(project.problem_statement, 100) }}</p>
                   <div class="tag-row">
                     <span v-for="tag in project.tags.slice(0, 5)" :key="tag.id">{{ tag.name }}</span>
                   </div>
@@ -3315,7 +3315,7 @@ const App = {
                 <div class="admin-table task-project-table">
                   <div class="admin-table-head"><span>课题名称</span><span>主题</span><span>课题状态</span><span>课题 ID</span><span>操作</span></div>
                   <div class="admin-table-row" v-for="project in state.admin.taskProjects" :key="project.id">
-                    <span><strong>{{ project.title }}</strong><small>{{ shortText(project.problem_statement, 80) }}</small></span>
+                    <span><strong>{{ project.title }}</strong><small>{{ shortText(project.problem_statement, 100) }}</small></span>
                     <span>{{ project.theme?.name || '未分类' }}</span>
                     <span>{{ project.stage_label }}</span>
                     <span>{{ project.topic_id }}</span>
@@ -3467,7 +3467,6 @@ const App = {
                     </header>
                     <form class="stack-form project-edit-form project-form-dialog-body" @submit.prevent="saveProject()">
                       <div class="form-grid">
-                        <label><span>课题 ID</span><input v-model="state.admin.projectForm.topic_id" type="number" min="1" :disabled="Boolean(state.admin.projectForm.id)" /></label>
                         <label><span>主题</span>
                           <select v-model="state.admin.projectForm.theme">
                             <option value="">请选择主题</option>
@@ -3483,9 +3482,9 @@ const App = {
                       <label><span>Title（中文）</span><input v-model="state.admin.projectForm.title" type="text" /></label>
                       <label><span>Title（英文，选填）</span><input v-model="state.admin.projectForm.title_en" type="text" /></label>
                       <div class="form-grid">
-                        <label><span>科学问题（50字以内）</span><input v-model="state.admin.projectForm.problem_statement" type="text" maxlength="50" /></label>
-                        <label><span>临床终点（50字以内）</span><input v-model="state.admin.projectForm.clinical_endpoint" type="text" maxlength="50" /></label>
-                        <label><span>已有基础（50字以内）</span><input v-model="state.admin.projectForm.existing_foundation" type="text" maxlength="50" /></label>
+                        <label><span>科学问题（250字以内）</span><textarea v-model="state.admin.projectForm.problem_statement" maxlength="250"></textarea></label>
+                        <label><span>临床终点（250字以内）</span><textarea v-model="state.admin.projectForm.clinical_endpoint" maxlength="250"></textarea></label>
+                        <label><span>已有基础（250字以内）</span><textarea v-model="state.admin.projectForm.existing_foundation" maxlength="250"></textarea></label>
                       </div>
                       <div class="form-grid">
                         <label><span>标签（逗号分隔）</span><input v-model="state.admin.projectForm.tags" type="text" /></label>
@@ -4023,7 +4022,7 @@ const App = {
                   <div>
                     <strong>{{ state.admin.taskProjectDetail.project.title }}</strong>
                     <small>{{ state.admin.taskProjectDetail.project.theme?.name || '未分类' }} · {{ state.admin.taskProjectDetail.project.stage_label }}</small>
-                    <p>{{ shortText(state.admin.taskProjectDetail.project.problem_statement, 180) }}</p>
+                    <p>{{ shortText(state.admin.taskProjectDetail.project.problem_statement, 100) }}</p>
                   </div>
                   <div class="button-row">
                     <button v-if="state.admin.taskProjectDetail.project.stage !== 'active' && state.admin.taskProjectDetail.project.stage !== 'archived'" class="ghost-button" type="button" @click="updateTaskProjectStage(state.admin.taskProjectDetail.project, 'active')">进入进行中</button>
@@ -4088,13 +4087,13 @@ const App = {
                     <strong>{{ row.payload.title || row.fileName }}</strong>
                     <small>{{ row.sourcePath }}</small>
                   </div>
-                  <label class="inline-row-field"><span>ID</span><input v-model="row.payload.topic_id" type="number" min="1" /></label>
+                  <div class="inline-row-field readonly-row-field"><span>ID</span><strong>{{ row.payload.topic_id || '自动生成' }}</strong></div>
                   <label class="inline-row-field"><span>Title（中文）</span><input v-model="row.payload.title" type="text" /></label>
                   <label class="inline-row-field"><span>Title（英文）</span><input v-model="row.payload.title_en" type="text" /></label>
                   <label class="inline-row-field"><span>主题</span><input v-model="row.payload.theme" type="text" /></label>
-                  <label class="inline-row-field"><span>科学问题</span><input v-model="row.payload.problem_statement" type="text" maxlength="50" /></label>
-                  <label class="inline-row-field"><span>临床终点</span><input v-model="row.payload.clinical_endpoint" type="text" maxlength="50" /></label>
-                  <label class="inline-row-field"><span>已有基础</span><input v-model="row.payload.existing_foundation" type="text" maxlength="50" /></label>
+                  <label class="inline-row-field"><span>科学问题</span><input v-model="row.payload.problem_statement" type="text" maxlength="250" /></label>
+                  <label class="inline-row-field"><span>临床终点</span><input v-model="row.payload.clinical_endpoint" type="text" maxlength="250" /></label>
+                  <label class="inline-row-field"><span>已有基础</span><input v-model="row.payload.existing_foundation" type="text" maxlength="250" /></label>
                   <span>{{ row.actionLabel }}</span>
                   <span class="markdown-import-notes">
                     <template v-if="row.errors.length">错误：{{ row.errors.join('；') }}</template>
@@ -4349,7 +4348,6 @@ function projectToForm(project) {
 
 function projectFormPayload(form) {
   return {
-    topic_id: Number(String(form.topic_id).trim()),
     theme: form.theme,
     title: form.title.trim(),
     title_en: form.title_en.trim(),

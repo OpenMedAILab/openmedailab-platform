@@ -1,5 +1,5 @@
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Max, Q
 from django.utils import timezone
 from django.utils.text import slugify
 
@@ -81,14 +81,18 @@ def sync_themes(themes):
 
 def upsert_project(item, source_label="api-json", allow_create_theme=True):
     normalized = normalize_project_item(item, source_label, allow_create_theme=allow_create_theme)
-    project, created = Project.objects.update_or_create(topic_id=normalized["topic_id"], defaults=normalized["defaults"])
+    if normalized["topic_id"]:
+        project, created = Project.objects.update_or_create(topic_id=normalized["topic_id"], defaults=normalized["defaults"])
+    else:
+        project = Project.objects.create(topic_id=next_topic_id(), **normalized["defaults"])
+        created = True
     sync_project_tags(project, normalized["tags"])
     return created
 
 
 def create_project(item, source_label="api-admin", allow_create_theme=False):
     normalized = normalize_project_item(item, source_label, allow_create_theme=allow_create_theme)
-    project = Project.objects.create(topic_id=normalized["topic_id"], **normalized["defaults"])
+    project = Project.objects.create(topic_id=normalized["topic_id"] or next_topic_id(), **normalized["defaults"])
     sync_project_tags(project, normalized["tags"])
     return project
 
@@ -104,9 +108,9 @@ def update_project(project, item, source_label="api-admin", allow_create_theme=F
 
 def normalize_project_item(item, source_label="api-json", allow_create_theme=True):
     topic_id = normalize_topic_id(item.get("topic_id") or item.get("id"))
-    if not topic_id:
-        raise ValueError("missing topic_id")
-    title = item.get("title") or str(topic_id)
+    title = item.get("title") or (str(topic_id) if topic_id else "")
+    if not title:
+        raise ValueError("title is required")
     return {
         "topic_id": topic_id,
         "defaults": {
@@ -201,6 +205,10 @@ def normalize_topic_id(value):
     if number <= 0:
         raise ValueError("topic_id must be a positive integer")
     return number
+
+
+def next_topic_id():
+    return (Project.objects.aggregate(max_topic_id=Max("topic_id"))["max_topic_id"] or 0) + 1
 
 
 def unique_slug(model, text):

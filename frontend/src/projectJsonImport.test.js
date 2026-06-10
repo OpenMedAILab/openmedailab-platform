@@ -15,7 +15,6 @@ test("parseProjectJsonImport maps jsonl records to strict project payloads", () 
       existing_foundation: "已有随访数据"
     }),
     JSON.stringify({
-      id: 2,
       theme: "眼底病",
       title: "DME 治疗预测",
       problem_statement: "预测疗效",
@@ -30,7 +29,8 @@ test("parseProjectJsonImport maps jsonl records to strict project payloads", () 
   assert.equal(rows[0].payload.topic_id, 1);
   assert.equal(rows[0].payload.title_en, "Follow-up strategy for DR");
   assert.equal(rows[0].errors.length, 0);
-  assert.equal(rows[1].payload.topic_id, 2);
+  assert.equal(rows[1].payload.topic_id, null);
+  assert.equal(rows[1].errors.length, 0);
 });
 
 test("parseProjectJsonImport supports arrays and projects wrapper in json files", () => {
@@ -57,16 +57,15 @@ test("parseProjectJsonImport rejects legacy topic_id and unknown fields", () => 
   assert.match(rows[0].errors.join("；"), /未知字段/);
 });
 
-test("qualityCheckProjectPayload requires core short fields and enforces 50 characters", () => {
+test("qualityCheckProjectPayload requires core fields and enforces 250 characters", () => {
   const quality = qualityCheckProjectPayload({
-    topic_id: 6,
     theme: "主题",
     title: "标题",
-    problem_statement: "这是一段超过五十个字的科学问题描述，用来确认前端会阻止过长核心字段进入数据库保存流程。" + "补充更多文字确保超过限制。",
+    problem_statement: "问".repeat(251),
     clinical_endpoint: "",
     existing_foundation: "基础"
   });
 
-  assert.match(quality.errors.join("；"), /科学问题不能超过50字/);
+  assert.match(quality.errors.join("；"), /科学问题不能超过250字/);
   assert.match(quality.errors.join("；"), /缺少临床终点/);
 });

@@ -1633,7 +1633,7 @@ def admin_project_create(request, payload: ProjectWriteRequest):
         return error
     data["stage"] = ProjectStage.DRAFT
     data["is_public"] = False
-    if Project.objects.filter(topic_id=data["topic_id"]).exists():
+    if data.get("topic_id") and Project.objects.filter(topic_id=data["topic_id"]).exists():
         return fail("id already exists.", status=422, code="validation_error")
     try:
         project = create_project(data, source_label="api-admin", allow_create_theme=False)
@@ -2162,9 +2162,12 @@ def profile_form_initial(profile):
 def validate_admin_project_payload(data, creating, current_project=None):
     topic_id = normalize_project_topic_id(data.get("topic_id"))
     title = (data.get("title") or "").strip()
-    if not topic_id or not title:
-        return fail("id and title are required.", status=422, code="validation_error")
-    data["topic_id"] = topic_id
+    if not title:
+        return fail("title is required.", status=422, code="validation_error")
+    if data.get("topic_id") not in (None, ""):
+        if not topic_id:
+            return fail("id must be a positive integer.", status=422, code="validation_error")
+        data["topic_id"] = topic_id
     data["title"] = title
 
     for field, label in [
@@ -2175,8 +2178,8 @@ def validate_admin_project_payload(data, creating, current_project=None):
         value = str(data.get(field) or "").strip()
         if not value:
             return fail(f"{label} is required.", status=422, code="validation_error")
-        if len(value) > 50:
-            return fail(f"{label} must be within 50 characters.", status=422, code="validation_error")
+        if len(value) > 250:
+            return fail(f"{label} must be within 250 characters.", status=422, code="validation_error")
         data[field] = value
 
     theme = data.get("theme")

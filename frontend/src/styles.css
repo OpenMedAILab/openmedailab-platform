@@ -1715,6 +1715,19 @@ textarea:focus {
   font: inherit;
 }
 
+.readonly-row-field strong {
+  min-height: 41px;
+  display: flex;
+  align-items: center;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f8fafc;
+  color: var(--text);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
 .markdown-template-preview {
   max-height: 360px;
   overflow: auto;

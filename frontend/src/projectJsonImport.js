@@ -9,7 +9,6 @@ const ALLOWED_FIELDS = new Set([
 ]);
 
 const REQUIRED_FIELDS = [
-  ["topic_id", "课题ID"],
   ["title", "Title（中文）"],
   ["theme", "主题"],
   ["problem_statement", "科学问题"],
@@ -32,8 +31,8 @@ export function parseProjectJsonImport(text, sourcePath = "") {
 export function qualityCheckProjectPayload(payload) {
   const errors = REQUIRED_FIELDS.filter(([key]) => isEmptyValue(payload[key])).map(([, label]) => `缺少${label}`);
   for (const [key, label] of SHORT_FIELDS) {
-    if (!isEmptyValue(payload[key]) && String(payload[key]).trim().length > 50) {
-      errors.push(`${label}不能超过50字`);
+    if (!isEmptyValue(payload[key]) && String(payload[key]).trim().length > 250) {
+      errors.push(`${label}不能超过250字`);
     }
   }
   return { errors, warnings: [] };
@@ -79,7 +78,7 @@ function normalizeRecord(record, sourcePath) {
     tags: [],
     is_public: false
   };
-  if (!topicId) errors.push("id 必须是正整数");
+  if ("id" in record && !topicId) errors.push("id 必须是正整数");
   const quality = qualityCheckProjectPayload(payload);
   return {
     templateVersion: "json-v1",

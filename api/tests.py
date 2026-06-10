@@ -226,7 +226,8 @@ class ApiTests(TestCase):
         self.assertNotIn("source_md_path", contract_fields)
         self.assertNotIn("source_pdf_path", contract_fields)
         self.assertIn("jsonl_template", contract_data)
-        self.assertIn('"id":1', contract_data["jsonl_template"])
+        self.assertNotIn('"id":1', contract_data["jsonl_template"])
+        self.assertIn("250字以内", contract_data["jsonl_template"])
         self.assertNotIn("markdown_template", contract_data)
         self.assertNotIn("example", contract_data)
         theme_file_types = [item["value"] for item in contract_data["theme_file_types"]]
@@ -440,7 +441,6 @@ class ApiTests(TestCase):
         response = self.post_json(
             "/api/admin/projects/",
             {
-                "id": 5,
                 "theme": self.theme.slug,
                 "title": "新建课题",
                 "problem_statement": "科学问题",
@@ -451,7 +451,8 @@ class ApiTests(TestCase):
             },
         )
         self.assertEqual(response.status_code, 201)
-        created = Project.objects.get(topic_id=5)
+        created = Project.objects.get(title="新建课题")
+        self.assertEqual(created.topic_id, 2)
         self.assertEqual(created.stage, ProjectStage.DRAFT)
         self.assertFalse(created.is_public)
         self.assertEqual(response.json()["data"]["stage"], ProjectStage.DRAFT)
@@ -461,7 +462,7 @@ class ApiTests(TestCase):
         duplicate_response = self.post_json(
             "/api/admin/projects/",
             {
-                "id": 5,
+                "id": created.topic_id,
                 "theme": self.theme.slug,
                 "title": "重复课题",
                 "problem_statement": "科学问题",
@@ -470,7 +471,7 @@ class ApiTests(TestCase):
             },
         )
         self.assertEqual(duplicate_response.status_code, 422)
-        self.assertEqual(Project.objects.filter(topic_id=5).count(), 1)
+        self.assertEqual(Project.objects.filter(topic_id=created.topic_id).count(), 1)
 
         legacy_id_response = self.post_json(
             "/api/admin/projects/",
@@ -487,15 +488,14 @@ class ApiTests(TestCase):
 
         topic_change_response = self.patch_json(
             f"/api/admin/projects/{created.pk}/",
-            {"id": 6, "title": "不允许改编号"},
+            {"id": created.topic_id + 1, "title": "不允许改编号"},
         )
         self.assertEqual(topic_change_response.status_code, 422)
-        self.assertFalse(Project.objects.filter(topic_id=6).exists())
+        self.assertFalse(Project.objects.filter(topic_id=created.topic_id + 1).exists())
 
         unknown_theme_response = self.post_json(
             "/api/admin/projects/",
             {
-                "id": 7,
                 "theme": "不存在主题",
                 "title": "未知主题课题",
                 "problem_statement": "科学问题",

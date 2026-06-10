@@ -254,9 +254,10 @@ test("admin project form uses structured project inputs instead of json textarea
   assert.doesNotMatch(mainSource, /评分维度 JSON/);
   assert.match(mainSource, /Title（中文）/);
   assert.match(mainSource, /Title（英文，选填）/);
-  assert.match(mainSource, /科学问题（50字以内）/);
-  assert.match(mainSource, /临床终点（50字以内）/);
-  assert.match(mainSource, /已有基础（50字以内）/);
+  assert.match(mainSource, /科学问题（250字以内）/);
+  assert.match(mainSource, /临床终点（250字以内）/);
+  assert.match(mainSource, /已有基础（250字以内）/);
+  assert.doesNotMatch(mainSource, /<label><span>课题 ID<\/span><input v-model="state\.admin\.projectForm\.topic_id"/);
   assert.doesNotMatch(mainSource, /数据类型/);
   assert.doesNotMatch(mainSource, /最小样本量/);
   assert.doesNotMatch(mainSource, /评价指标（每行一条）/);
