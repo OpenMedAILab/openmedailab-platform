@@ -7,7 +7,7 @@ from django.contrib.auth.forms import SetPasswordForm
 from django.contrib.auth.models import User
 from django.core.paginator import Paginator
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Case, IntegerField, Q, Value, When
 from django.http import Http404
 from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404
@@ -19,7 +19,7 @@ from ninja.security import SessionAuth
 
 from config.release import APP_VERSION, release_payload
 from accounts.forms import RegisterForm, UserProfileForm
-from accounts.models import RoleType, UserProfile
+from accounts.models import PLATFORM_ADMIN_UID, RoleType, UserProfile
 from accounts.services import (
     DefaultPasswordConfigError,
     create_registered_user,
@@ -40,9 +40,21 @@ from interactions.models import (
     SponsorType,
 )
 from interactions.services import project_stat_annotations, recalculate_project_community_score
-from projects.contracts import DEFAULT_THEME_FILE_SPACE, PROJECT_FIELD_CONTRACT, PROJECT_JSON_EXAMPLE
-from projects.importing import import_topic_bundle, unique_slug, upsert_project
-from projects.models import AuditLog, Project, ProjectDocument, ProjectStage, ProjectTask, Tag, Theme, ThemeFile
+from projects.contracts import DEFAULT_THEME_FILE_SPACE, PROJECT_FIELD_CONTRACT, PROJECT_MARKDOWN_TEMPLATE
+from projects.importing import create_project, unique_slug, update_project
+from projects.models import (
+    FOLLOWABLE_PROJECT_STAGES,
+    PUBLIC_PROJECT_STAGES,
+    RECRUITING_PROJECT_STAGES,
+    AuditLog,
+    Project,
+    ProjectDocument,
+    ProjectStage,
+    ProjectTask,
+    Tag,
+    Theme,
+    ThemeFile,
+)
 
 from .rbac import capabilities_for_user, has_capability
 from .responses import form_errors
@@ -53,8 +65,10 @@ from .serializers import (
     contribution_payload,
     credit_ledger_payload,
     dashboard_payload,
+    admin_project_summary_payload,
     interest_payload,
     project_detail_payload,
+    public_project_detail_payload,
     project_summary_payload,
     score_payload,
     sponsor_payload,
@@ -76,6 +90,9 @@ api = NinjaAPI(
     openapi_url="/openapi.json",
     auth=SessionAuth(),
 )
+
+REVIEWABLE_INTERACTION_STATUSES = {InteractionStatus.APPROVED, InteractionStatus.REJECTED}
+REVIEWABLE_CONTRIBUTION_STATUSES = {ContributionStatus.APPROVED, ContributionStatus.REJECTED}
 
 
 class Envelope(Schema):
@@ -184,9 +201,10 @@ class ProjectWriteRequest(Schema):
     source_md_path: Optional[str] = ""
     source_pdf_path: Optional[str] = ""
     page_path: Optional[str] = ""
+    content_hash: Optional[str] = ""
     documents: Optional[list[dict[str, Any]]] = None
     has_pdf: Optional[bool] = None
-    is_public: Optional[bool] = True
+    is_public: Optional[bool] = None
 
 
 class ThemeFileWriteRequest(Schema):
@@ -199,12 +217,6 @@ class ThemeFileWriteRequest(Schema):
     path: Optional[str] = None
     sort_order: Optional[int] = 0
     is_active: Optional[bool] = True
-
-
-class ProjectImportRequest(Schema):
-    themes: Optional[list[dict[str, Any]]] = []
-    projects: list[dict[str, Any]]
-    dry_run: bool = False
 
 
 class InteractionStatusRequest(Schema):
@@ -256,6 +268,7 @@ class ContributionWriteRequest(Schema):
     project_id: int
     task_id: Optional[int] = None
     title: str
+    result_type: Optional[str] = "stage"
     description: Optional[str] = ""
     file_path: Optional[str] = ""
 
@@ -328,7 +341,8 @@ def project_schema(request):
     return ok(
         {
             "fields": PROJECT_FIELD_CONTRACT,
-            "example": PROJECT_JSON_EXAMPLE,
+            "markdown_template": PROJECT_MARKDOWN_TEMPLATE,
+            "template_version": "v1",
             "stage_values": choice_payload(ProjectStage.choices),
             "document_types": choice_payload(ProjectDocument.DocumentType.choices),
             "theme_file_types": choice_payload(ThemeFile.FileType.choices),
@@ -342,7 +356,9 @@ def theme_space(request, slug: str):
     theme = get_object_or_404(Theme, slug=slug, is_active=True)
     projects = list(
         project_stat_annotations(
-            Project.objects.filter(theme=theme, is_public=True).select_related("theme").prefetch_related("tags")
+            Project.objects.filter(theme=theme, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
+            .select_related("theme")
+            .prefetch_related("tags")
         ).order_by("-composite_score", "-updated_at")[:80]
     )
     files = list(ThemeFile.objects.filter(theme=theme, is_active=True).order_by("sort_order", "section", "title")[:300])
@@ -468,7 +484,9 @@ def project_list(
     page: int = 1,
     page_size: int = 20,
 ):
-    projects = project_stat_annotations(Project.objects.filter(is_public=True).select_related("theme").prefetch_related("tags"))
+    projects = project_stat_annotations(
+        Project.objects.filter(is_public=True, stage__in=PUBLIC_PROJECT_STAGES).select_related("theme").prefetch_related("tags")
+    )
     q = q.strip()
     theme = theme.strip()
     tag = tag.strip()
@@ -520,10 +538,14 @@ def project_list(
 @api.get("/projects/{project_id}/", response={200: Envelope, 404: ErrorEnvelope}, tags=["Projects"], auth=None)
 def project_detail(request, project_id: int):
     project = get_object_or_404(
-        project_stat_annotations(Project.objects.filter(is_public=True).select_related("theme").prefetch_related("tags", "documents")),
+        project_stat_annotations(
+            Project.objects.filter(is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
+            .select_related("theme")
+            .prefetch_related("tags", "documents")
+        ),
         pk=project_id,
     )
-    data = project_detail_payload(project)
+    data = public_project_detail_payload(project)
     if request.user.is_authenticated:
         data["viewer_state"] = viewer_state(request.user, project)
     return ok(data)
@@ -532,12 +554,15 @@ def project_detail(request, project_id: int):
 @api.get("/projects/{project_id}/status-card/", response={200: Envelope, 404: ErrorEnvelope}, tags=["Projects"], auth=None)
 def project_status_card(request, project_id: int):
     project = get_object_or_404(
-        project_stat_annotations(Project.objects.filter(is_public=True).select_related("theme").prefetch_related("tags")),
+        project_stat_annotations(
+            Project.objects.filter(is_public=True, stage__in=PUBLIC_PROJECT_STAGES).select_related("theme").prefetch_related("tags")
+        ),
         pk=project_id,
     )
     participant_uids = participant_uids_for_project(project)
     viewer_state_payload = viewer_state(request.user, project) if request.user.is_authenticated else {"is_following": False}
     status_uids = status_uids_for_project(participant_uids, viewer_state_payload, bool(request.user.is_authenticated))
+    uid_groups = status_uid_groups_for_project(project, bool(request.user.is_authenticated))
     return ok(
         {
             "project": project_summary_payload(project),
@@ -548,6 +573,7 @@ def project_status_card(request, project_id: int):
                 "uids": participant_uids if request.user.is_authenticated else [],
             },
             "status_uids": status_uids,
+            "uid_groups": uid_groups,
             "status": {
                 "stage": project.stage,
                 "stage_label": project.get_stage_display(),
@@ -596,7 +622,23 @@ def admin_user_list(request, q: str = "", page: int = 1, page_size: int = 50):
     auth_error = require_capability(request, "manage_users")
     if auth_error:
         return auth_error
-    users = User.objects.select_related("profile").order_by("id")
+    users = (
+        User.objects.select_related("profile")
+        .annotate(
+            admin_sort=Case(
+                When(profile__uid=PLATFORM_ADMIN_UID, then=Value(0)),
+                default=Value(1),
+                output_field=IntegerField(),
+            ),
+            empty_uid_sort=Case(
+                When(profile__uid__isnull=True, then=Value(1)),
+                When(profile__uid="", then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+        )
+        .order_by("admin_sort", "empty_uid_sort", "profile__uid", "id")
+    )
     q = q.strip()
     if q:
         users = users.filter(
@@ -655,6 +697,7 @@ def admin_overview(request):
                 "active_tasks": ProjectTask.objects.exclude(status__in=[ProjectTask.TaskStatus.DONE, ProjectTask.TaskStatus.CANCELLED]).count(),
                 "submitted_contributions": Contribution.objects.filter(status=ContributionStatus.SUBMITTED).count(),
                 "credit_entries": CreditLedger.objects.count(),
+                "audit_logs": AuditLog.objects.count(),
             }
         }
     )
@@ -735,21 +778,41 @@ def admin_interaction_update_status(request, type: str, interaction_id: int, pay
     auth_error = require_capability(request, "review_interactions")
     if auth_error:
         return auth_error
-    if payload.status not in InteractionStatus.values:
+    if payload.status not in REVIEWABLE_INTERACTION_STATUSES:
         return fail("Invalid interaction status.", status=422, code="validation_error")
-    item = get_interaction_or_404(type, interaction_id)
-    before = interaction_payload(type, item)
-    item.status = payload.status
-    item.save(update_fields=["status", "updated_at"])
-    after = interaction_payload(type, item)
-    audit(
-        request.user,
-        "interaction.review",
-        item.__class__.__name__,
-        item.pk,
-        before=before,
-        after={**after, "review_note": payload.review_note or ""},
-    )
+    with transaction.atomic():
+        item = get_interaction_or_404(type, interaction_id)
+        item = item.__class__.objects.select_for_update().select_related("user", "user__profile", "project", "project__theme").get(pk=item.pk)
+        project = Project.objects.select_for_update().get(pk=item.project_id)
+        before = interaction_payload(type, item)
+        if item.status != InteractionStatus.PENDING:
+            return fail("Only pending interactions can be reviewed.", status=422, code="interaction_not_pending")
+        previous_project_stage = project.stage
+        item.status = payload.status
+        item.save(update_fields=["status", "updated_at"])
+        if payload.status == InteractionStatus.APPROVED and project.stage == ProjectStage.OPEN_RECRUITING:
+            before_project = project_detail_payload(project)
+            project.stage = ProjectStage.TEAM_BUILDING
+            project.save(update_fields=["stage", "updated_at"])
+            project.refresh_from_db()
+            audit(
+                request.user,
+                "project.stage_auto_team_building",
+                "Project",
+                project.pk,
+                before=before_project,
+                after=project_detail_payload(project),
+            )
+        item.project.refresh_from_db()
+        after = interaction_payload(type, item)
+        audit(
+            request.user,
+            "interaction.review",
+            item.__class__.__name__,
+            item.pk,
+            before=before,
+            after={**after, "review_note": payload.review_note or "", "previous_project_stage": previous_project_stage},
+        )
     return ok(after)
 
 
@@ -817,7 +880,14 @@ def me_contribution_create(request, payload: ContributionWriteRequest):
     title = payload.title.strip()
     if not title:
         return fail("Contribution title is required.", status=422, code="validation_error")
-    project = get_object_or_404(Project.objects.select_related("theme"), pk=payload.project_id, is_public=True)
+    result_type = payload.result_type or Contribution.ResultType.STAGE
+    if result_type not in Contribution.ResultType.values:
+        return fail("Invalid contribution result type.", status=422, code="validation_error")
+    project = get_object_or_404(Project.objects.select_related("theme"), pk=payload.project_id, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
+    if project.stage != ProjectStage.ACTIVE:
+        return fail("Project is not active.", status=422, code="project_not_active")
+    if not user_has_approved_project_relation(request.user, project):
+        return fail("Only approved participants can submit task results.", status=403, code="interaction_not_approved")
     task = None
     if payload.task_id:
         task = get_object_or_404(ProjectTask.objects.select_related("project", "project__theme", "assignee"), pk=payload.task_id, assignee=request.user)
@@ -829,6 +899,7 @@ def me_contribution_create(request, payload: ContributionWriteRequest):
             project=project,
             task=task,
             title=title,
+            result_type=result_type,
             description=payload.description or "",
             file_path=payload.file_path or "",
         )
@@ -1029,7 +1100,7 @@ def admin_contribution_review(request, contribution_id: int, payload: Contributi
     auth_error = require_capability(request, "review_contributions")
     if auth_error:
         return auth_error
-    if payload.status not in ContributionStatus.values:
+    if payload.status not in REVIEWABLE_CONTRIBUTION_STATUSES:
         return fail("Invalid contribution status.", status=422, code="validation_error")
     with transaction.atomic():
         contribution = get_object_or_404(
@@ -1278,24 +1349,57 @@ def admin_theme_file_delete(request, file_id: int):
 
 
 @api.get("/admin/projects/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Admin"])
-def admin_project_list(request, q: str = "", theme: str = "", page: int = 1, page_size: int = 20):
+def admin_project_list(
+    request,
+    q: str = "",
+    theme: str = "",
+    stage: str = "",
+    is_public: str = "",
+    topic_id: str = "",
+    source_md_path: str = "",
+    content_hash: str = "",
+    page: int = 1,
+    page_size: int = 20,
+):
     auth_error = require_capability(request, "manage_projects")
     if auth_error:
         return auth_error
     projects = project_stat_annotations(Project.objects.all().select_related("theme").prefetch_related("tags"))
     q = q.strip()
     theme = theme.strip()
+    stage = stage.strip()
+    is_public = is_public.strip().lower()
+    topic_id = topic_id.strip()
+    source_md_path = source_md_path.strip()
+    content_hash = content_hash.strip()
     if q:
-        projects = projects.filter(Q(title__icontains=q) | Q(summary__icontains=q) | Q(topic_id__icontains=q)).distinct()
+        projects = projects.filter(
+            Q(title__icontains=q)
+            | Q(summary__icontains=q)
+            | Q(topic_id__icontains=q)
+            | Q(source_md_path__icontains=q)
+        ).distinct()
     if theme:
         projects = projects.filter(Q(theme__slug=theme) | Q(theme__name=theme))
+    if stage:
+        projects = projects.filter(stage=stage)
+    if is_public in {"1", "true", "yes"}:
+        projects = projects.filter(is_public=True)
+    elif is_public in {"0", "false", "no"}:
+        projects = projects.filter(is_public=False)
+    if topic_id:
+        projects = projects.filter(topic_id=topic_id)
+    if source_md_path:
+        projects = projects.filter(source_md_path=source_md_path)
+    if content_hash:
+        projects = projects.filter(content_hash=content_hash)
     projects = projects.order_by("-updated_at", "topic_id")
     page_size = max(1, min(page_size, 100))
     paginator = Paginator(projects, page_size)
     page_obj = paginator.get_page(page)
     return ok(
         {
-            "results": [project_summary_payload(project) for project in page_obj.object_list],
+            "results": [admin_project_summary_payload(project) for project in page_obj.object_list],
             "pagination": {
                 "page": page_obj.number,
                 "page_size": page_size,
@@ -1308,19 +1412,6 @@ def admin_project_list(request, q: str = "", theme: str = "", page: int = 1, pag
     )
 
 
-@api.post("/admin/projects/import-json/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
-def admin_project_import_json(request, payload: ProjectImportRequest):
-    auth_error = require_capability(request, "import_projects")
-    if auth_error:
-        return auth_error
-    try:
-        result = import_topic_bundle(payload.model_dump(), source_label=f"api-json:{request.user.username}", dry_run=payload.dry_run)
-    except Exception as exc:
-        return fail(str(exc), status=422, code="validation_error")
-    audit(request.user, "project.import_json", "Project", "bundle", after=result)
-    return ok(result)
-
-
 @api.get("/admin/projects/{project_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope}, tags=["Admin"])
 def admin_project_get(request, project_id: int):
     auth_error = require_capability(request, "manage_projects")
@@ -1330,18 +1421,26 @@ def admin_project_get(request, project_id: int):
     return ok(project_detail_payload(project))
 
 
-@api.post("/admin/projects/", response={201: Envelope, 200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+@api.post("/admin/projects/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
 def admin_project_create(request, payload: ProjectWriteRequest):
     auth_error = require_capability(request, "manage_projects")
     if auth_error:
         return auth_error
-    data = payload.model_dump(exclude_none=True)
-    if not data.get("topic_id") or not data.get("title"):
-        return fail("topic_id and title are required.", status=422, code="validation_error")
-    created = upsert_project(data, source_label="api-admin")
-    project = get_object_or_404(Project.objects.select_related("theme").prefetch_related("tags", "documents"), topic_id=data["topic_id"])
-    audit(request.user, "project.create" if created else "project.upsert", "Project", project.id, after=project_detail_payload(project))
-    return (201 if created else 200), ok(project_detail_payload(project))
+    data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    error = validate_admin_project_payload(data, creating=True)
+    if error:
+        return error
+    data["stage"] = ProjectStage.DRAFT
+    data["is_public"] = False
+    if Project.objects.filter(topic_id=data["topic_id"].strip()).exists():
+        return fail("topic_id already exists.", status=422, code="validation_error")
+    try:
+        project = create_project(data, source_label="api-admin", allow_create_theme=False)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="validation_error")
+    project = get_object_or_404(Project.objects.select_related("theme").prefetch_related("tags", "documents"), pk=project.pk)
+    audit(request.user, "project.create", "Project", project.id, after=project_detail_payload(project))
+    return 201, ok(project_detail_payload(project))
 
 
 @api.patch("/admin/projects/{project_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
@@ -1351,11 +1450,21 @@ def admin_project_update(request, project_id: int, payload: ProjectWriteRequest)
         return auth_error
     project = get_object_or_404(Project.objects.select_related("theme").prefetch_related("tags", "documents"), pk=project_id)
     before = project_detail_payload(project)
+    patch_data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    if "topic_id" in patch_data and patch_data["topic_id"] != project.topic_id:
+        return fail("topic_id cannot be changed.", status=422, code="validation_error")
     data = project_import_payload(project)
-    data.update(payload.model_dump(exclude_unset=True, exclude_none=True))
-    created = upsert_project(data, source_label="api-admin")
-    project = get_object_or_404(Project.objects.select_related("theme").prefetch_related("tags", "documents"), topic_id=data["topic_id"])
-    audit(request.user, "project.update" if not created else "project.create", "Project", project.id, before=before, after=project_detail_payload(project))
+    data.update(patch_data)
+    data["topic_id"] = project.topic_id
+    error = validate_admin_project_payload(data, creating=False)
+    if error:
+        return error
+    try:
+        project = update_project(project, data, source_label="api-admin", allow_create_theme=False)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="validation_error")
+    project = get_object_or_404(Project.objects.select_related("theme").prefetch_related("tags", "documents"), pk=project.pk)
+    audit(request.user, "project.update", "Project", project.id, before=before, after=project_detail_payload(project))
     return ok(project_detail_payload(project))
 
 
@@ -1378,7 +1487,7 @@ def follow_project(request, project_id: int):
     auth_error = require_login(request)
     if auth_error:
         return auth_error
-    project = get_object_or_404(Project, pk=project_id, is_public=True)
+    project = get_object_or_404(Project, pk=project_id, is_public=True, stage__in=FOLLOWABLE_PROJECT_STAGES)
     ProjectFollow.objects.get_or_create(user=request.user, project=project)
     return ok({"is_following": True})
 
@@ -1399,7 +1508,7 @@ def unfollow_project(request, project_id: int):
     auth_error = require_login(request)
     if auth_error:
         return auth_error
-    project = get_object_or_404(Project, pk=project_id, is_public=True)
+    project = get_object_or_404(Project, pk=project_id)
     ProjectFollow.objects.filter(user=request.user, project=project).delete()
     return ok({"is_following": False})
 
@@ -1409,7 +1518,7 @@ def score_project(request, project_id: int, payload: ScoreRequest):
     auth_error = require_login(request)
     if auth_error:
         return auth_error
-    project = get_object_or_404(Project, pk=project_id, is_public=True)
+    project = get_object_or_404(Project, pk=project_id, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
     form = ProjectScoreForm(payload.model_dump())
     if not form.is_valid():
         return fail("Score submit failed.", status=422, code="validation_error", errors=form_errors(form))
@@ -1427,7 +1536,9 @@ def interest_project(request, project_id: int, payload: InterestRequest):
     auth_error = require_login(request)
     if auth_error:
         return auth_error
-    project = get_object_or_404(Project, pk=project_id, is_public=True)
+    project = get_object_or_404(Project, pk=project_id, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
+    if project.stage not in RECRUITING_PROJECT_STAGES:
+        return fail("Project is not recruiting.", status=422, code="project_not_recruiting")
     form = ProjectInterestForm(payload.model_dump())
     if not form.is_valid():
         return fail("Interest submit failed.", status=422, code="validation_error", errors=form_errors(form))
@@ -1439,7 +1550,7 @@ def interest_project(request, project_id: int, payload: InterestRequest):
             "available_hours_per_week": form.cleaned_data["available_hours_per_week"],
             "experience": form.cleaned_data.get("experience", ""),
             "message": form.cleaned_data.get("message", ""),
-            "status": "pending",
+            "status": InteractionStatus.PENDING,
         },
     )
     return 201, ok(interest_payload(interest))
@@ -1450,7 +1561,9 @@ def claim_project(request, project_id: int, payload: ClaimRequest):
     auth_error = require_login(request)
     if auth_error:
         return auth_error
-    project = get_object_or_404(Project, pk=project_id, is_public=True)
+    project = get_object_or_404(Project, pk=project_id, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
+    if project.stage not in RECRUITING_PROJECT_STAGES:
+        return fail("Project is not recruiting.", status=422, code="project_not_recruiting")
     form = ProjectClaimIntentForm(payload.model_dump())
     if not form.is_valid():
         return fail("Claim submit failed.", status=422, code="validation_error", errors=form_errors(form))
@@ -1458,7 +1571,7 @@ def claim_project(request, project_id: int, payload: ClaimRequest):
         user=request.user,
         project=project,
         claim_type=form.cleaned_data["claim_type"],
-        defaults={"message": form.cleaned_data.get("message", ""), "status": "pending"},
+        defaults={"message": form.cleaned_data.get("message", ""), "status": InteractionStatus.PENDING},
     )
     return 201, ok(claim_payload(claim))
 
@@ -1468,7 +1581,9 @@ def sponsor_project(request, project_id: int, payload: SponsorRequest):
     auth_error = require_login(request)
     if auth_error:
         return auth_error
-    project = get_object_or_404(Project, pk=project_id, is_public=True)
+    project = get_object_or_404(Project, pk=project_id, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
+    if project.stage not in RECRUITING_PROJECT_STAGES:
+        return fail("Project is not recruiting.", status=422, code="project_not_recruiting")
     form = SponsorIntentForm(payload.model_dump())
     if not form.is_valid():
         return fail("Sponsor intent submit failed.", status=422, code="validation_error", errors=form_errors(form))
@@ -1476,7 +1591,7 @@ def sponsor_project(request, project_id: int, payload: SponsorRequest):
         user=request.user,
         project=project,
         sponsor_type=form.cleaned_data["sponsor_type"],
-        defaults={"note": form.cleaned_data.get("note", ""), "status": "pending"},
+        defaults={"note": form.cleaned_data.get("note", ""), "status": InteractionStatus.PENDING},
     )
     return 201, ok(sponsor_payload(sponsor))
 
@@ -1563,19 +1678,12 @@ def paginated_list(rows, page, page_size, max_page_size=100):
 
 
 def participant_uids_for_project(project):
-    active_statuses = [InteractionStatus.APPROVED, InteractionStatus.RECORDED]
+    active_statuses = [InteractionStatus.APPROVED]
     user_ids = set(
         ProjectInterest.objects.filter(project=project, status__in=active_statuses).values_list("user_id", flat=True)
     )
     user_ids.update(ProjectClaimIntent.objects.filter(project=project, status__in=active_statuses).values_list("user_id", flat=True))
     user_ids.update(SponsorIntent.objects.filter(project=project, status__in=active_statuses).values_list("user_id", flat=True))
-    user_ids.update(
-        ProjectTask.objects.filter(project=project)
-        .exclude(status=ProjectTask.TaskStatus.CANCELLED)
-        .exclude(assignee__isnull=True)
-        .values_list("assignee_id", flat=True)
-    )
-    user_ids.update(Contribution.objects.filter(project=project, status=ContributionStatus.APPROVED).values_list("user_id", flat=True))
     return list(UserProfile.objects.filter(user_id__in=user_ids).order_by("uid").values_list("uid", flat=True))
 
 
@@ -1603,11 +1711,92 @@ def status_uids_for_project(participant_uids, viewer_state_payload, authenticate
     }
 
 
+def status_uid_groups_for_project(project, authenticated):
+    if not authenticated:
+        return {"uids_visible": False, "groups": []}
+
+    grouped = {}
+    status_order = {
+        InteractionStatus.APPROVED: 0,
+        InteractionStatus.PENDING: 1,
+        InteractionStatus.REJECTED: 2,
+        InteractionStatus.WITHDRAWN: 3,
+    }
+
+    def profile_uid_for(user):
+        if not user:
+            return None
+        try:
+            return user.profile.uid
+        except UserProfile.DoesNotExist:
+            return None
+
+    def add_uid(group_type, key, label, uid, sort_key):
+        if not uid:
+            return
+        group = grouped.setdefault(
+            key,
+            {
+                "key": key,
+                "type": group_type,
+                "label": label,
+                "uids": set(),
+                "sort_key": sort_key,
+            },
+        )
+        group["uids"].add(uid)
+
+    follow_rows = ProjectFollow.objects.filter(project=project).select_related("user__profile")
+    for follow in follow_rows:
+        add_uid("follow", "follow", "收藏", profile_uid_for(follow.user), (0, 0, "收藏"))
+
+    interest_rows = ProjectInterest.objects.filter(project=project).select_related("user__profile").order_by("status", "role")
+    for interest in interest_rows:
+        key = f"interest-{interest.role}-{interest.status}"
+        label = f"参与：{interest.get_role_display()}（{interest.get_status_display()}）"
+        add_uid("interest", key, label, profile_uid_for(interest.user), (1, status_order.get(interest.status, 99), label))
+
+    claim_rows = ProjectClaimIntent.objects.filter(project=project).select_related("user__profile").order_by("status", "claim_type")
+    for claim in claim_rows:
+        key = f"claim-{claim.claim_type}-{claim.status}"
+        label = f"{claim.get_claim_type_display()}（{claim.get_status_display()}）"
+        add_uid("claim", key, label, profile_uid_for(claim.user), (2, status_order.get(claim.status, 99), label))
+
+    sponsor_rows = SponsorIntent.objects.filter(project=project).select_related("user__profile").order_by("status", "sponsor_type")
+    for sponsor in sponsor_rows:
+        key = f"sponsor-{sponsor.sponsor_type}-{sponsor.status}"
+        label = f"资助：{sponsor.get_sponsor_type_display()}（{sponsor.get_status_display()}）"
+        add_uid("sponsor", key, label, profile_uid_for(sponsor.user), (3, status_order.get(sponsor.status, 99), label))
+
+    groups = []
+    for group in sorted(grouped.values(), key=lambda item: item["sort_key"]):
+        uids = sorted(group["uids"])
+        groups.append(
+            {
+                "key": group["key"],
+                "type": group["type"],
+                "label": group["label"],
+                "count": len(uids),
+                "uids": uids,
+            }
+        )
+    return {"uids_visible": True, "groups": groups}
+
+
 def pending_interaction_count():
     return (
         ProjectInterest.objects.filter(status=InteractionStatus.PENDING).count()
         + ProjectClaimIntent.objects.filter(status=InteractionStatus.PENDING).count()
         + SponsorIntent.objects.filter(status=InteractionStatus.PENDING).count()
+    )
+
+
+def user_has_approved_project_relation(user, project):
+    filters = {"user": user, "project": project, "status": InteractionStatus.APPROVED}
+    return (
+        ProjectInterest.objects.filter(**filters).exists()
+        or ProjectClaimIntent.objects.filter(**filters).exists()
+        or SponsorIntent.objects.filter(**filters).exists()
     )
 
 
@@ -1735,8 +1924,6 @@ def viewer_state(user, project):
     activity_labels = []
     if is_following:
         activity_labels.append("已收藏")
-    if score:
-        activity_labels.append(f"已评分 {score.score}/10")
     activity_labels.extend(
         f"参与：{interest.get_role_display()}（{interest.get_status_display()}）" for interest in interests
     )
@@ -1768,6 +1955,29 @@ def profile_form_initial(profile):
         "contact_wechat": profile.contact_wechat,
         "bio": profile.bio,
     }
+
+
+def validate_admin_project_payload(data, creating):
+    topic_id = (data.get("topic_id") or "").strip()
+    title = (data.get("title") or "").strip()
+    if not topic_id or not title:
+        return fail("topic_id and title are required.", status=422, code="validation_error")
+    data["topic_id"] = topic_id
+    data["title"] = title
+
+    theme = data.get("theme")
+    if isinstance(theme, dict):
+        theme_name = (theme.get("name") or theme.get("slug") or "").strip()
+    else:
+        theme_name = str(theme or "").strip()
+    if not theme_name:
+        return fail("theme is required.", status=422, code="validation_error")
+
+    stage = data.get("stage")
+    stage_labels = {label for _, label in ProjectStage.choices}
+    if stage and stage not in ProjectStage.values and stage not in stage_labels:
+        return fail("stage is invalid.", status=422, code="validation_error")
+    return None
 
 
 def project_import_payload(project):

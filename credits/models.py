@@ -10,12 +10,17 @@ class ContributionStatus(models.TextChoices):
 
 
 class Contribution(models.Model):
+    class ResultType(models.TextChoices):
+        STAGE = "stage", "阶段性成果"
+        FINAL = "final", "最终结果"
+
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="contributions")
     project = models.ForeignKey("projects.Project", on_delete=models.CASCADE, related_name="contributions")
     task = models.ForeignKey("projects.ProjectTask", on_delete=models.SET_NULL, null=True, blank=True, related_name="contributions")
     title = models.CharField(max_length=180)
     description = models.TextField(blank=True)
     file_path = models.CharField(max_length=500, blank=True)
+    result_type = models.CharField(max_length=16, choices=ResultType.choices, default=ResultType.STAGE)
     status = models.CharField(max_length=32, choices=ContributionStatus.choices, default=ContributionStatus.SUBMITTED)
     reviewer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="reviewed_contributions")
     review_comment = models.TextField(blank=True)

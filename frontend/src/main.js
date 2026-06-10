@@ -1,9 +1,22 @@
 import { createApp, computed, onBeforeUnmount, onMounted, reactive, watch } from "vue";
 import { api, initCsrf } from "./api.js";
 import { isPointInsideProfileHoverZone } from "./profileMenu.js";
+import { parseProjectMarkdown, qualityCheckProjectPayload } from "./projectMarkdown.js";
 import { latestRelease, releaseHistory, sectionEntries } from "./release.js";
 
 const PAGE_SIZE = 9;
+const WORKSPACE_TABS = new Set(["overview", "favorites", "interactions", "profile"]);
+const ADMIN_TABS = new Set(["overview", "interactions", "contributions", "projects", "themes", "users", "audit"]);
+const FOLLOWABLE_STAGE_VALUES = new Set(["open_recruiting", "team_building", "active"]);
+const RECRUITING_STAGE_VALUES = new Set(["open_recruiting", "team_building"]);
+const TASK_MANAGEMENT_STAGE_VALUES = ["team_building", "active", "paused"];
+const RELATION_STATUS_PRIORITY = { approved: 4, pending: 3, rejected: 2, withdrawn: 1 };
+const RELATION_STATUS_LABELS = {
+  approved: "获批",
+  pending: "申请中",
+  rejected: "被拒绝",
+  withdrawn: "已撤回"
+};
 
 const state = reactive({
   booting: true,
@@ -55,6 +68,14 @@ const state = reactive({
   favoritesLoaded: false,
   profileMenuOpen: false,
   releaseModalOpen: false,
+  confirmDialog: {
+    open: false,
+    title: "",
+    message: "",
+    confirmText: "确认",
+    cancelText: "取消",
+    tone: "default"
+  },
   expandedReleaseVersions: [],
   heroTitleScrollProgress: 0,
   schema: null,
@@ -64,9 +85,11 @@ const state = reactive({
     themes: [],
     projects: [],
     projectPagination: {},
-    projectFilters: { q: "", theme: "", page: 1, page_size: 50 },
+    projectFilters: { q: "", theme: "", page: 1, page_size: 25 },
     hasMoreProjects: false,
     loadingProjects: false,
+    updatingProjectStageId: null,
+    projectFormOpen: false,
     projectForm: emptyProjectForm(),
     themeForm: emptyThemeForm(),
     selectedThemeId: null,
@@ -83,8 +106,17 @@ const state = reactive({
     interactionPagination: {},
     interactionFilters: { type: "", status: "pending", q: "", page: 1, page_size: 50 },
     loadingInteractions: false,
-    approvedInteractions: [],
-    loadingApprovedInteractions: false,
+    taskProjects: [],
+    loadingTaskProjects: false,
+    taskProjectFilters: { stage: "", q: "", page_size: 100 },
+    taskProjectDetail: {
+      open: false,
+      loading: false,
+      project: null,
+      interactions: [],
+      contributions: [],
+      reviewDrafts: {}
+    },
     tasks: [],
     taskPagination: {},
     taskFilters: { status: "", q: "", page: 1, page_size: 50 },
@@ -101,7 +133,11 @@ const state = reactive({
     auditPagination: {},
     auditFilters: { action: "", target_type: "", page: 1, page_size: 50 },
     loadingAuditLogs: false,
-    importText: ""
+    markdownImport: {
+      rows: [],
+      applying: false,
+      fileCount: 0
+    }
   },
   forms: {
     login: { username: "", password: "" },
@@ -113,6 +149,12 @@ const state = reactive({
     sponsor: { sponsor_type: "compute", note: "" },
     profile: emptyProfileForm(),
     contribution: emptyContributionForm()
+  },
+  contributionModal: {
+    open: false,
+    project: null,
+    relation: null,
+    submitting: false
   },
   formState: {
     registerSubmitting: false,
@@ -150,31 +192,29 @@ const App = {
     const selectedAdminTheme = computed(() => state.admin.themes.find((theme) => theme.id === Number(state.admin.selectedThemeId)) || null);
     const roleCards = computed(() => roleCardsFor(capabilities.value));
     const favoriteProjects = computed(() => (state.dashboard?.follows || []).map((item) => item.project));
+    const myProjectTasks = computed(() => buildMyProjectTasks(state.dashboard));
+    const workspaceOverviewCards = computed(() => {
+      const dashboard = state.dashboard || {};
+      const approvedCount = [
+        ...(dashboard.interests || []),
+        ...(dashboard.claims || []),
+        ...(dashboard.sponsors || [])
+      ].filter((item) => item.status === "approved").length;
+      return [
+        { title: "收藏课题", value: `${(dashboard.follows || []).length} 个`, tab: "favorites" },
+        { title: "我的任务", value: `${myProjectTasks.value.length} 个`, tab: "interactions" },
+        { title: "任务结果", value: `${(dashboard.contributions || []).length} 条`, tab: "interactions" },
+        { title: "已通过协作", value: `${approvedCount} 条`, tab: "interactions" }
+      ];
+    });
     const adminOverviewCards = computed(() => [
       { title: "用户", value: state.admin.overview?.counts?.users || 0, tab: "users" },
       { title: "课题", value: state.admin.overview?.counts?.projects || 0, tab: "projects" },
-      { title: "待审核协作", value: state.admin.overview?.counts?.pending_interactions || 0, tab: "interactions" },
-      { title: "活跃任务", value: state.admin.overview?.counts?.active_tasks || 0, tab: "tasks" },
-      { title: "待审贡献", value: state.admin.overview?.counts?.submitted_contributions || 0, tab: "contributions" },
-      { title: "积分流水", value: state.admin.overview?.counts?.credit_entries || 0, tab: "credits" }
+      { title: "任务审批", value: state.admin.overview?.counts?.pending_interactions || 0, tab: "interactions" },
+      { title: "任务结果", value: state.admin.overview?.counts?.submitted_contributions || 0, tab: "contributions" },
+      { title: "主题文件域", value: state.admin.overview?.counts?.themes || 0, tab: "themes" },
+      { title: "审计日志", value: state.admin.overview?.counts?.audit_logs || 0, tab: "audit" }
     ]);
-    const approvedInteractionGroups = computed(() => {
-      const groups = new Map();
-      for (const item of state.admin.approvedInteractions) {
-        const projectId = item.project?.id;
-        if (!projectId) continue;
-        if (!groups.has(projectId)) {
-          groups.set(projectId, { project: item.project, members: [] });
-        }
-        groups.get(projectId).members.push({
-          uid: item.user?.uid || "-",
-          type_label: item.type_label,
-          subtype_label: item.subtype_label,
-          status_label: item.status_label
-        });
-      }
-      return Array.from(groups.values());
-    });
     const releaseLatest = computed(() => latestRelease(state.meta.release));
     const releaseHistoryItems = computed(() => releaseHistory(state.meta.release));
     const heroTitleStyle = computed(() => {
@@ -188,6 +228,7 @@ const App = {
       };
     });
     const profilePointer = { x: 0, y: 0 };
+    let confirmDialogResolver = null;
 
     onMounted(async () => {
       window.addEventListener("hashchange", handleRouteChange);
@@ -226,7 +267,6 @@ const App = {
         state.rbac = rbac;
         state.user = user;
         state.schema = schema;
-        state.admin.importText = JSON.stringify({ themes: [], projects: [schema.example] }, null, 2);
         state.booting = false;
         if (requiresPasswordChange() && state.route.name !== "password-change") {
           navigate("password-change");
@@ -434,7 +474,99 @@ const App = {
       };
     }
 
+    function buildMyProjectTasks(dashboard) {
+      if (!dashboard) return [];
+      const groups = new Map();
+      const ensureGroup = (project) => {
+        if (!project?.id) return null;
+        if (!groups.has(project.id)) {
+          groups.set(project.id, { project, relations: [], contributions: [] });
+        }
+        return groups.get(project.id);
+      };
+      const addRelation = (collection, type, typeLabel, subtypeKey, subtypeLabelKey) => {
+        for (const item of collection || []) {
+          const group = ensureGroup(item.project);
+          if (!group) continue;
+          group.relations.push({
+            ...item,
+            relation_type: type,
+            relation_type_label: typeLabel,
+            subtype_label: item[subtypeLabelKey] || item[subtypeKey] || ""
+          });
+        }
+      };
+      addRelation(dashboard.interests, "interest", "参与", "role", "role_label");
+      addRelation(dashboard.claims, "claim", "认领", "claim_type", "claim_type_label");
+      addRelation(dashboard.sponsors, "sponsor", "资助", "sponsor_type", "sponsor_type_label");
+      for (const contribution of dashboard.contributions || []) {
+        const group = ensureGroup(contribution.project);
+        if (group) group.contributions.push(contribution);
+      }
+      return Array.from(groups.values())
+        .map((group) => ({ ...group, status: bestTaskRelationStatus(group.relations) }))
+        .sort((a, b) => {
+          const priorityDiff = (RELATION_STATUS_PRIORITY[b.status] || 0) - (RELATION_STATUS_PRIORITY[a.status] || 0);
+          if (priorityDiff) return priorityDiff;
+          return String(a.project.topic_id || "").localeCompare(String(b.project.topic_id || ""));
+        });
+    }
+
+    function bestTaskRelationStatus(relations = []) {
+      let best = "";
+      for (const relation of relations) {
+        if ((RELATION_STATUS_PRIORITY[relation.status] || 0) > (RELATION_STATUS_PRIORITY[best] || 0)) {
+          best = relation.status;
+        }
+      }
+      return best || "none";
+    }
+
+    function myTaskStatusLabel(task) {
+      return RELATION_STATUS_LABELS[task?.status] || (task?.relations?.length ? "状态待确认" : "暂无申请");
+    }
+
+    function approvedTaskRelations(task) {
+      return (task?.relations || []).filter((relation) => relation.status === "approved");
+    }
+
+    function canSubmitProjectTask(task) {
+      return task?.project?.stage === "active" && approvedTaskRelations(task).length > 0;
+    }
+
+    function taskSubmitHint(task) {
+      if (canSubmitProjectTask(task)) return "";
+      if (!approvedTaskRelations(task).length) {
+        if (task?.status === "pending") return "申请审核中，获批后可提交";
+        if (task?.status === "rejected") return "申请未通过，不能提交";
+        if (task?.status === "withdrawn") return "申请已撤回，不能提交";
+        return "获批后可提交";
+      }
+      const stage = task?.project?.stage;
+      if (stage === "team_building") return "组队中，进入进行中后可提交";
+      if (stage === "paused") return "课题暂停中，暂不可提交";
+      if (stage === "archived") return "课题已归档，不能提交";
+      return "当前阶段暂不可提交";
+    }
+
+    function taskRelationSummary(task) {
+      const relations = task?.relations || [];
+      if (!relations.length) return "暂无申请记录";
+      return relations
+        .map((relation) => `${relation.relation_type_label}${relation.subtype_label ? `：${relation.subtype_label}` : ""}（${relation.status_label || myTaskStatusLabel({ status: relation.status })}）`)
+        .join("；");
+    }
+
+    function contributionStatusText(contribution) {
+      const typeLabel = contribution.result_type_label || (contribution.result_type === "final" ? "最终结果" : "阶段性成果");
+      return `${typeLabel} · ${contribution.status_label || "已提交"}`;
+    }
+
     function setWorkspaceTab(tab) {
+      if (!WORKSPACE_TABS.has(tab)) {
+        state.workspaceTab = "overview";
+        return;
+      }
       state.workspaceTab = tab;
       if (tab === "favorites") {
         loadFavorites({ force: true });
@@ -464,11 +596,31 @@ const App = {
     }
 
     function prepareContribution(task = null) {
-      state.forms.contribution = emptyContributionForm(task, state.currentProject || task?.project || null);
-      state.workspaceTab = "contributions";
+      const projectTask = task?.project ? { project: task.project, relations: [{ status: "approved" }] } : task;
+      openContributionModal(projectTask || { project: state.currentProject, relations: [{ status: "approved" }] });
       if (state.route.name !== "dashboard") {
         navigate("dashboard");
       }
+    }
+
+    function openContributionModal(task) {
+      if (!canSubmitProjectTask(task)) {
+        showToast(taskSubmitHint(task));
+        return;
+      }
+      closeMutuallyExclusiveModals("contribution");
+      const relation = approvedTaskRelations(task)[0] || null;
+      state.contributionModal.open = true;
+      state.contributionModal.project = task.project;
+      state.contributionModal.relation = relation;
+      state.forms.contribution = emptyContributionForm(null, task.project);
+    }
+
+    function closeContributionModal() {
+      state.contributionModal.open = false;
+      state.contributionModal.project = null;
+      state.contributionModal.relation = null;
+      state.forms.contribution = emptyContributionForm();
     }
 
     async function submitContribution() {
@@ -478,19 +630,23 @@ const App = {
           project_id: Number(state.forms.contribution.project_id),
           task_id: state.forms.contribution.task_id ? Number(state.forms.contribution.task_id) : null,
           title: state.forms.contribution.title,
+          result_type: state.forms.contribution.result_type || "stage",
           description: state.forms.contribution.description,
           file_path: state.forms.contribution.file_path
         };
         if (!payload.project_id || !payload.title.trim()) {
-          showToast("贡献需要选择课题并填写标题");
+          showToast("任务结果需要选择课题并填写标题");
           return;
         }
+        state.contributionModal.submitting = true;
         await api.createMeContribution(payload);
-        state.forms.contribution = emptyContributionForm();
-        showToast("贡献已提交，等待管理员审核");
+        closeContributionModal();
+        showToast("任务结果已提交，等待管理员审核");
         await loadDashboard();
       } catch (error) {
-        showToast(error.message || "贡献提交失败");
+        showToast(error.message || "任务结果提交失败");
+      } finally {
+        state.contributionModal.submitting = false;
       }
     }
 
@@ -513,16 +669,17 @@ const App = {
     }
 
     async function loadActiveAdminTab() {
+      if (!ADMIN_TABS.has(state.admin.activeTab)) {
+        state.admin.activeTab = "overview";
+      }
       if (state.admin.activeTab === "overview") return;
       if (state.admin.activeTab === "projects") await loadAdminProjects({ reset: true });
       if (state.admin.activeTab === "themes") await loadThemeFiles();
       if (state.admin.activeTab === "users") await loadAdminUsers({ reset: true });
       if (state.admin.activeTab === "interactions") {
-        await Promise.all([loadAdminInteractions({ reset: true }), loadApprovedInteractions()]);
+        await loadAdminInteractions({ reset: true });
       }
-      if (state.admin.activeTab === "tasks") await loadAdminTasks({ reset: true });
-      if (state.admin.activeTab === "contributions") await loadAdminContributions({ reset: true });
-      if (state.admin.activeTab === "credits") await loadAdminCredits({ reset: true });
+      if (state.admin.activeTab === "contributions") await loadAdminTaskProjects({ reset: true });
       if (state.admin.activeTab === "audit") await loadAdminAuditLogs({ reset: true });
     }
 
@@ -583,7 +740,11 @@ const App = {
       if (!can("manage_users") || state.admin.resettingUid) return;
       const uid = user.profile?.uid;
       if (!uid) return;
-      const confirmed = window.confirm(`确认将「${user.username}」恢复为系统默认密码吗？`);
+      const confirmed = await openConfirmDialog({
+        title: "确认恢复默认密码",
+        message: `确认将「${user.username}」恢复为系统默认密码吗？`,
+        confirmText: "恢复默认密码"
+      });
       if (!confirmed) return;
       state.admin.resettingUid = uid;
       state.admin.passwordResetResult = null;
@@ -727,6 +888,10 @@ const App = {
     async function toggleFollow(project) {
       if (!ensureLogin()) return;
       const wasFollowing = isProjectFollowing(project);
+      if (!wasFollowing && !canFollowProject(project)) {
+        showToast("当前阶段暂不可收藏");
+        return;
+      }
       try {
         if (wasFollowing) {
           await api.unfollow(project.id);
@@ -744,18 +909,18 @@ const App = {
 
     async function openProjectStatusCard(project) {
       state.activeProjectStatusId = project.id;
-      if (state.projectStatusCards[project.id]) return;
-      state.projectStatusLoadingId = project.id;
+      const hasCachedCard = Boolean(state.projectStatusCards[project.id]);
+      if (!hasCachedCard) {
+        state.projectStatusLoadingId = project.id;
+      }
       try {
         state.projectStatusCards[project.id] = await api.projectStatusCard(project.id);
       } catch (error) {
-        state.projectStatusCards[project.id] = {
-          project,
-          participants: { count: project.interest_count || 0, uids: [], uids_visible: false },
-          status: { stage_label: project.stage_label, follow_count: project.follow_count || 0, interest_count: project.interest_count || 0 }
-        };
+        showToast(error.message || "课题状态读取失败");
       } finally {
-        state.projectStatusLoadingId = null;
+        if (state.projectStatusLoadingId === project.id) {
+          state.projectStatusLoadingId = null;
+        }
       }
     }
 
@@ -767,6 +932,12 @@ const App = {
 
     function statusCardFor(project) {
       return state.projectStatusCards[project.id] || null;
+    }
+
+    function invalidateProjectStatusCard(projectOrId = null) {
+      const id = typeof projectOrId === "object" ? projectOrId?.id : projectOrId;
+      if (!id) return;
+      delete state.projectStatusCards[id];
     }
 
     function viewerStateFor(project) {
@@ -789,6 +960,10 @@ const App = {
       const labels = new Set((viewerStateFor(project).activity_labels || []).filter(Boolean));
       if (isProjectFollowing(project)) labels.add("已收藏");
       return labels.size ? Array.from(labels) : ["暂未参与"];
+    }
+
+    function projectStageLabelFor(project) {
+      return statusCardFor(project)?.status?.stage_label || project.stage_label || "课题状态";
     }
 
     function participantCountFor(project) {
@@ -816,6 +991,45 @@ const App = {
 
     function statusHighlightUidFor(project) {
       return statusUidStateFor(project).highlight_uid || "";
+    }
+
+    function statusUidGroupsFor(project) {
+      const groups = statusCardFor(project)?.uid_groups?.groups || [];
+      const lifecycleGroups = groups.filter((group) => ["follow", "interest", "claim", "sponsor"].includes(group.type));
+      if (lifecycleGroups.length) return lifecycleGroups;
+      const uids = statusUidListFor(project);
+      return uids.length
+        ? [{ key: "participants", type: "participant", label: "参与者", count: statusUidCountFor(project), uids }]
+        : [];
+    }
+
+    function visibleGroupUids(group) {
+      return group?.uids || [];
+    }
+
+    function hiddenGroupUidCount(group) {
+      const count = group?.count ?? group?.uids?.length ?? 0;
+      return Math.max(0, count - visibleGroupUids(group).length);
+    }
+
+    function projectStageValue(project) {
+      return project?.stage || "";
+    }
+
+    function canFollowProject(project) {
+      return FOLLOWABLE_STAGE_VALUES.has(projectStageValue(project));
+    }
+
+    function shouldShowFollowButton(project) {
+      return canFollowProject(project) || isProjectFollowing(project);
+    }
+
+    function canRecruitProject(project) {
+      return RECRUITING_STAGE_VALUES.has(projectStageValue(project));
+    }
+
+    function canReviewInteraction(item) {
+      return item?.status === "pending";
     }
 
     function taskProgressLabel(task) {
@@ -878,16 +1092,28 @@ const App = {
 
     async function submitInterest() {
       if (!ensureLogin()) return;
+      if (!canRecruitProject(state.currentProject)) {
+        showToast("当前阶段暂不接受新的参与申请");
+        return;
+      }
       await submitInteraction(() => api.interest(state.currentProject.id, state.forms.interest), "参与意向已提交");
     }
 
     async function submitClaim() {
       if (!ensureLogin()) return;
+      if (!canRecruitProject(state.currentProject)) {
+        showToast("当前阶段暂不接受新的认领意向");
+        return;
+      }
       await submitInteraction(() => api.claim(state.currentProject.id, state.forms.claim), "认领意向已提交");
     }
 
     async function submitSponsor() {
       if (!ensureLogin()) return;
+      if (!canRecruitProject(state.currentProject)) {
+        showToast("当前阶段暂不接受新的资助意向");
+        return;
+      }
       await submitInteraction(() => api.sponsor(state.currentProject.id, state.forms.sponsor), "资助意向已记录");
     }
 
@@ -895,6 +1121,7 @@ const App = {
       if (!ensureLogin()) return;
       try {
         await api.withdrawInteraction(type, item.id, { reason: "用户主动撤回" });
+        invalidateProjectStatusCard(item.project?.id);
         showToast("已撤回");
         await loadDashboard();
       } catch (error) {
@@ -903,10 +1130,12 @@ const App = {
     }
 
     async function submitInteraction(action, message) {
+      const projectId = state.currentProject?.id;
       try {
         await action();
+        invalidateProjectStatusCard(projectId);
         showToast(message);
-        await loadProject(state.currentProject.id);
+        await loadProject(projectId);
       } catch (error) {
         showToast(error.message);
       }
@@ -963,39 +1192,65 @@ const App = {
     }
 
     function newProject() {
+      closeMutuallyExclusiveModals("projectForm");
+      state.admin.projectForm = emptyProjectForm();
+      state.admin.projectFormOpen = true;
+    }
+
+    function closeProjectForm() {
+      state.admin.projectFormOpen = false;
       state.admin.projectForm = emptyProjectForm();
     }
 
     async function editProject(project) {
       if (!can("manage_projects")) return;
       try {
+        closeMutuallyExclusiveModals("projectForm");
         const detail = await api.adminProject(project.id);
         state.admin.projectForm = projectToForm(detail);
         state.admin.activeTab = "projects";
-        window.requestAnimationFrame(() => {
-          document.querySelector("#admin-project-form")?.scrollIntoView({ behavior: "smooth", block: "start" });
-        });
+        state.admin.projectFormOpen = true;
       } catch (error) {
         showToast(error.message);
       }
     }
 
-    async function saveProject() {
+    async function saveProject({ publish = false } = {}) {
       if (!can("manage_projects")) return;
       try {
-        const payload = projectFormPayload(state.admin.projectForm);
-        if (!payload.topic_id || !payload.title) {
-          showToast("课题 ID 和标题不能为空");
+        const formPayload = projectFormPayload(state.admin.projectForm);
+        if (!formPayload.topic_id || !formPayload.title || !formPayload.theme) {
+          showToast("课题 ID、标题和主题不能为空");
           return;
         }
-        if (state.admin.projectForm.id) {
-          await api.adminUpdateProject(state.admin.projectForm.id, payload);
-          showToast("课题已更新");
-        } else {
-          await api.adminCreateProject(payload);
-          showToast("课题已创建");
+        if (publish) {
+          const quality = qualityCheckProjectPayload(formPayload);
+          if (quality.errors.length) {
+            showToast(quality.errors.join("；"));
+            return;
+          }
+          if (quality.warnings.length) {
+            const confirmed = await openConfirmDialog({
+              title: "确认发布课题",
+              message: `这些建议字段仍待补充：${quality.warnings.join("、")}。确认发布吗？`,
+              confirmText: "继续发布"
+            });
+            if (!confirmed) return;
+          }
         }
-        state.admin.projectForm = emptyProjectForm();
+        const draftPayload = draftProjectPayload(formPayload);
+        const publishPayload = publishProjectPayload(formPayload);
+        if (state.admin.projectForm.id) {
+          await api.adminUpdateProject(state.admin.projectForm.id, publish ? publishPayload : draftPayload);
+          showToast(publish ? "课题已发布" : "课题已更新");
+        } else {
+          const createdProject = await api.adminCreateProject(draftPayload);
+          if (publish) {
+            await api.adminUpdateProject(createdProject.id, publishPayload);
+          }
+          showToast(publish ? "课题已创建并发布" : "课题草稿已创建");
+        }
+        closeProjectForm();
         await loadAdminProjects({ reset: true });
         await loadProjects({ reset: true });
       } catch (error) {
@@ -1005,7 +1260,11 @@ const App = {
 
     async function archiveProject(project) {
       if (!can("manage_projects")) return;
-      const confirmed = window.confirm(`确认删除课题「${project.title}」吗？系统会做归档停用，不会物理删除历史数据。`);
+      const confirmed = await openConfirmDialog({
+        title: "确认归档课题",
+        message: `确认删除课题「${project.title}」吗？系统会做归档停用，不会物理删除历史数据。`,
+        confirmText: "归档课题"
+      });
       if (!confirmed) return;
       try {
         await api.adminDeleteProject(project.id);
@@ -1091,7 +1350,11 @@ const App = {
 
     async function deactivateThemeFile(file) {
       if (!can("manage_themes")) return;
-      const confirmed = window.confirm(`确认停用主题文件「${file.title}」吗？`);
+      const confirmed = await openConfirmDialog({
+        title: "确认停用主题文件",
+        message: `确认停用主题文件「${file.title}」吗？`,
+        confirmText: "停用文件"
+      });
       if (!confirmed) return;
       try {
         await api.adminDeleteThemeFile(file.id);
@@ -1117,25 +1380,130 @@ const App = {
       }
     }
 
-    async function loadApprovedInteractions() {
-      if (!can("review_interactions")) return;
-      state.admin.loadingApprovedInteractions = true;
+    async function loadAdminTaskProjects({ reset = false } = {}) {
+      if (!can("manage_projects")) return;
+      state.admin.loadingTaskProjects = true;
       try {
-        const data = await api.adminInteractions({ status: "approved", page: 1, page_size: 100 });
-        state.admin.approvedInteractions = data.results;
+        const filters = state.admin.taskProjectFilters;
+        const baseParams = { q: filters.q, page_size: filters.page_size || 100 };
+        let rows = [];
+        if (filters.stage) {
+          rows = await fetchAllAdminProjects({ ...baseParams, stage: filters.stage });
+        } else {
+          const grouped = await Promise.all(
+            TASK_MANAGEMENT_STAGE_VALUES.map((stage) => fetchAllAdminProjects({ ...baseParams, stage }))
+          );
+          rows = grouped.flat();
+        }
+        const unique = new Map();
+        for (const project of rows) unique.set(project.id, project);
+        state.admin.taskProjects = Array.from(unique.values()).sort((a, b) => {
+          const updated = String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
+          return updated || String(a.topic_id || "").localeCompare(String(b.topic_id || ""));
+        });
       } catch (error) {
-        showToast(error.message);
+        showToast(error.message || "任务管理课题读取失败");
       } finally {
-        state.admin.loadingApprovedInteractions = false;
+        state.admin.loadingTaskProjects = false;
       }
+    }
+
+    async function fetchAllAdminProjects(params = {}) {
+      const rows = [];
+      let page = 1;
+      let hasNext = true;
+      while (hasNext) {
+        const data = await api.adminProjects({ ...params, page });
+        rows.push(...(data.results || []));
+        hasNext = Boolean(data.pagination?.has_next);
+        page += 1;
+      }
+      return rows;
+    }
+
+    async function openTaskProjectDetail(project) {
+      closeMutuallyExclusiveModals("taskProjectDetail");
+      state.admin.taskProjectDetail.open = true;
+      state.admin.taskProjectDetail.loading = true;
+      state.admin.taskProjectDetail.project = project;
+      state.admin.taskProjectDetail.interactions = [];
+      state.admin.taskProjectDetail.contributions = [];
+      state.admin.taskProjectDetail.reviewDrafts = {};
+      try {
+        const detail = await api.adminProject(project.id);
+        const [interactions, contributions] = await Promise.all([
+          fetchProjectApprovedInteractions(detail),
+          fetchProjectContributions(detail)
+        ]);
+        state.admin.taskProjectDetail.project = detail;
+        state.admin.taskProjectDetail.interactions = interactions;
+        state.admin.taskProjectDetail.contributions = contributions;
+        state.admin.taskProjectDetail.reviewDrafts = Object.fromEntries(
+          contributions.map((item) => [item.id, { review_comment: item.review_comment || "" }])
+        );
+      } catch (error) {
+        showToast(error.message || "任务详情读取失败");
+      } finally {
+        state.admin.taskProjectDetail.loading = false;
+      }
+    }
+
+    function closeTaskProjectDetail() {
+      state.admin.taskProjectDetail.open = false;
+      state.admin.taskProjectDetail.loading = false;
+      state.admin.taskProjectDetail.project = null;
+      state.admin.taskProjectDetail.interactions = [];
+      state.admin.taskProjectDetail.contributions = [];
+      state.admin.taskProjectDetail.reviewDrafts = {};
+    }
+
+    async function fetchProjectApprovedInteractions(project) {
+      const rows = [];
+      let page = 1;
+      let hasNext = true;
+      while (hasNext) {
+        const data = await api.adminInteractions({ status: "approved", project: project.topic_id, page, page_size: 100 });
+        rows.push(...(data.results || []));
+        hasNext = Boolean(data.pagination?.has_next);
+        page += 1;
+      }
+      return rows.filter((item) => item.project?.id === project.id);
+    }
+
+    async function fetchProjectContributions(project) {
+      const rows = [];
+      let page = 1;
+      let hasNext = true;
+      while (hasNext) {
+        const data = await api.adminContributions({ project: project.topic_id, page, page_size: 100 });
+        rows.push(...(data.results || []));
+        hasNext = Boolean(data.pagination?.has_next);
+        page += 1;
+      }
+      return rows.filter((item) => item.project?.id === project.id);
+    }
+
+    function approvedInteractionGroupsFor(rows = []) {
+      const groups = new Map();
+      for (const item of rows) {
+        const label = item.type_label || "协作";
+        if (!groups.has(label)) groups.set(label, []);
+        groups.get(label).push(item);
+      }
+      return Array.from(groups.entries()).map(([label, items]) => ({ label, items }));
     }
 
     async function reviewInteraction(item, status) {
       if (!can("review_interactions")) return;
+      if (!canReviewInteraction(item)) {
+        showToast("只有待处理申请可以审核");
+        return;
+      }
       try {
         await api.reviewAdminInteraction(item.type, item.id, { status, review_note: status === "approved" ? "管理员通过" : "管理员处理" });
+        invalidateProjectStatusCard(item.project?.id);
         showToast(status === "approved" ? "协作意向已通过" : "协作意向已更新");
-        await Promise.all([loadAdminInteractions({ reset: true }), loadApprovedInteractions(), loadDashboard().catch(() => null)]);
+        await Promise.all([loadAdminInteractions({ reset: true }), loadDashboard().catch(() => null)]);
       } catch (error) {
         showToast(error.message);
       }
@@ -1226,15 +1594,114 @@ const App = {
       }
     }
 
-    async function reviewContribution(contribution, status, grantReward = false) {
+    async function updateTaskProjectStage(project, stage) {
+      if (!can("manage_projects")) return;
+      const payload = { stage };
+      if (stage === "archived") {
+        payload.is_public = false;
+      }
       try {
+        await api.adminUpdateProject(project.id, payload);
+        invalidateProjectStatusCard(project.id);
+        showToast(stage === "active" ? "课题已进入进行中" : stage === "archived" ? "课题已结题归档" : "课题阶段已更新");
+        await Promise.all([
+          loadAdminTaskProjects({ reset: true }),
+          loadProjects({ reset: true }).catch(() => null)
+        ]);
+        if (state.admin.taskProjectDetail.open && state.admin.taskProjectDetail.project?.id === project.id) {
+          await openTaskProjectDetail({ ...project, stage });
+        }
+      } catch (error) {
+        showToast(error.message || "课题阶段更新失败");
+      }
+    }
+
+    function adminProjectVisibilityLabel(project) {
+      if (project.stage === "archived") return "归档/未公开";
+      if (project.stage === "draft") return "草稿/未公开";
+      return project.is_public ? "公开" : "未公开";
+    }
+
+    async function updateAdminProjectStage(project, stage, event = null) {
+      if (!can("manage_projects")) return;
+      const previousStage = project.stage;
+      if (!stage || stage === previousStage) return;
+      if (stage === "archived") {
+        const confirmed = await openConfirmDialog({
+          title: "确认归档课题",
+          message: `确认将「${project.title}」归档吗？归档后公开课题库不可见，但会保留数据和审计记录。`,
+          confirmText: "归档",
+          tone: "danger"
+        });
+        if (!confirmed) {
+          if (event?.target) event.target.value = previousStage;
+          return;
+        }
+      }
+      const payload = { stage };
+      if (["draft", "archived"].includes(stage)) {
+        payload.is_public = false;
+      }
+      state.admin.updatingProjectStageId = project.id;
+      try {
+        await api.adminUpdateProject(project.id, payload);
+        invalidateProjectStatusCard(project.id);
+        showToast(stage === "archived" ? "课题已归档" : "课题阶段已更新");
+        await Promise.all([
+          loadAdminProjects({ reset: true }),
+          loadAdminTaskProjects({ reset: true }).catch(() => null),
+          loadProjects({ reset: true }).catch(() => null)
+        ]);
+      } catch (error) {
+        if (event?.target) event.target.value = previousStage;
+        showToast(error.message || "课题阶段更新失败");
+      } finally {
+        state.admin.updatingProjectStageId = null;
+      }
+    }
+
+    function closeMutuallyExclusiveModals(next = "") {
+      if (next !== "contribution" && state.contributionModal.open) {
+        closeContributionModal();
+      }
+      if (next !== "taskProjectDetail" && state.admin.taskProjectDetail.open) {
+        closeTaskProjectDetail();
+      }
+      if (next !== "projectForm" && state.admin.projectFormOpen) {
+        closeProjectForm();
+      }
+      if (state.preview.open) {
+        closeProjectPreview();
+      }
+    }
+
+    async function reviewContribution(contribution, status, options = {}) {
+      try {
+        const draft = state.admin.taskProjectDetail.reviewDrafts[contribution.id] || {};
+        if (options.closeProject) {
+          const confirmed = await openConfirmDialog({
+            title: "通过并结题归档",
+            message: `确认将「${contribution.project?.title || state.admin.taskProjectDetail.project?.title || "该课题"}」结题归档吗？归档后公开课题库不可见，但会保留数据库和审计记录。`,
+            confirmText: "通过并结题",
+            tone: "danger"
+          });
+          if (!confirmed) return;
+        }
         await api.reviewAdminContribution(contribution.id, {
           status,
-          review_comment: status === "approved" ? "审核通过" : "需要继续完善",
-          grant_reward: grantReward
+          review_comment: draft.review_comment || "",
+          grant_reward: false
         });
-        showToast(status === "approved" ? "贡献已通过" : "贡献状态已更新");
-        await loadAdminContributions({ reset: true });
+        if (options.closeProject) {
+          await api.adminUpdateProject(contribution.project.id, { stage: "archived", is_public: false });
+        }
+        showToast(options.closeProject ? "任务结果已通过，课题已结题归档" : status === "approved" ? "任务结果已通过" : "任务结果状态已更新");
+        if (state.admin.taskProjectDetail.open && state.admin.taskProjectDetail.project) {
+          await openTaskProjectDetail(state.admin.taskProjectDetail.project);
+        } else {
+          await loadAdminTaskProjects({ reset: true });
+        }
+        await loadProjects({ reset: true }).catch(() => null);
       } catch (error) {
         showToast(error.message);
       }
@@ -1268,25 +1735,177 @@ const App = {
     }
 
     async function setAdminTab(tab) {
+      if (!ADMIN_TABS.has(tab)) {
+        state.admin.activeTab = "overview";
+        return;
+      }
       state.admin.activeTab = tab;
       await loadActiveAdminTab();
     }
 
-    function useExampleJson() {
-      state.admin.importText = JSON.stringify({ themes: [], projects: [state.schema.example] }, null, 2);
+    function clearMarkdownImport() {
+      state.admin.markdownImport.rows = [];
+      state.admin.markdownImport.fileCount = 0;
+      showToast("Markdown 导入提示已清除");
     }
 
-    async function importJson() {
-      if (!can("import_projects")) return;
-      try {
-        const payload = JSON.parse(state.admin.importText);
-        const result = await api.adminImportProjects(payload);
-        showToast(`导入完成：新增 ${result.created_count}，更新 ${result.updated_count}`);
-        await loadAdmin();
-        await loadProjects({ reset: true });
-      } catch (error) {
-        showToast(error.message || "JSON 格式不正确");
+    async function copyMarkdownTemplate() {
+      const template = state.schema?.markdown_template || "";
+      if (!template) {
+        showToast("模板暂未加载");
+        return;
       }
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(template);
+          showToast("Markdown 模板已复制");
+        } else {
+          showToast("当前浏览器不支持自动复制");
+        }
+      } catch (error) {
+        showToast(error.message || "复制失败");
+      }
+    }
+
+    async function handleMarkdownFiles(event) {
+      const files = Array.from(event.target.files || []).filter((file) => file.name.toLowerCase().endsWith(".md"));
+      state.admin.markdownImport.fileCount = files.length;
+      state.admin.markdownImport.rows = [];
+      if (!files.length) {
+        showToast("请选择 .md 文件");
+        return;
+      }
+      const rows = [];
+      for (const file of files) {
+        rows.push(await buildMarkdownImportRow(file));
+      }
+      state.admin.markdownImport.rows = rows;
+      event.target.value = "";
+    }
+
+    async function buildMarkdownImportRow(file) {
+      const sourcePath = file.webkitRelativePath || file.name;
+      const text = await file.text();
+      const parsed = parseProjectMarkdown(text, sourcePath);
+      parsed.payload.content_hash = await sha256Hex(text);
+      const row = {
+        id: `${sourcePath}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        fileName: file.name,
+        sourcePath,
+        ...parsed,
+        existingProjectId: null,
+        actionLabel: parsed.errors.length ? "需修复" : "创建草稿"
+      };
+      await refreshMarkdownImportRow(row);
+      return row;
+    }
+
+    async function refreshMarkdownImportRow(row) {
+      row.errors = row.templateVersion !== "v1" ? [`暂不支持模板版本 ${row.templateVersion}`] : [];
+      row.errors = [...row.errors, ...qualityCheckProjectPayload(row.payload).errors];
+      row.payload.stage = "draft";
+      row.payload.is_public = false;
+      row.existingProjectId = null;
+      row.actionLabel = row.errors.length ? "需修复" : "创建草稿";
+      if (row.errors.length) return;
+      try {
+        const duplicates = await findMarkdownImportDuplicates(row.payload);
+        const existing = duplicates.find((item) => item.topic_id === row.payload.topic_id);
+        const warnings = duplicateWarningsForImport(row.payload, duplicates);
+        row.warnings = [...new Set([...qualityCheckProjectPayload(row.payload).warnings, ...warnings])];
+        if (existing) {
+          row.existingProjectId = existing.id;
+          row.actionLabel = existing.is_public || existing.stage !== "draft" ? "更新为草稿（暂不公开）" : "更新已有草稿";
+        }
+      } catch (error) {
+        row.errors = [...row.errors, error.message || "重复检测失败"];
+        row.actionLabel = "需修复";
+      }
+    }
+
+    async function applyMarkdownImport() {
+      if (!can("manage_projects")) return;
+      const rows = state.admin.markdownImport.rows.filter((row) => !row.errors.length);
+      if (!rows.length) {
+        showToast("没有可提交的 Markdown 课题");
+        return;
+      }
+      state.admin.markdownImport.applying = true;
+      let created = 0;
+      let updated = 0;
+      let failed = 0;
+      try {
+        for (const row of rows) {
+          try {
+            await ensureThemeForProject(row.payload.theme);
+            const payload = draftProjectPayload(row.payload);
+            if (row.existingProjectId) {
+              await api.adminUpdateProject(row.existingProjectId, payload);
+              updated += 1;
+            } else {
+              await api.adminCreateProject(payload);
+              created += 1;
+            }
+            row.actionLabel = row.existingProjectId ? "已更新为草稿" : "已创建草稿";
+          } catch (error) {
+            failed += 1;
+            row.errors = [...row.errors, error.message || "提交失败"];
+            row.actionLabel = "提交失败";
+          }
+        }
+        showToast(`Markdown 导入完成：新增 ${created}，更新 ${updated}，失败 ${failed}`);
+        await loadAdminProjects({ reset: true });
+        await loadProjects({ reset: true });
+        const [meta, themes] = await Promise.all([api.meta(), api.adminThemes()]);
+        state.meta = meta;
+        state.admin.themes = themes.results;
+      } finally {
+        state.admin.markdownImport.applying = false;
+      }
+    }
+
+    async function ensureThemeForProject(themeName) {
+      const name = String(themeName || "").trim();
+      if (!name) throw new Error("主题不能为空");
+      const existing = state.admin.themes.find((theme) => theme.name === name || theme.slug === name);
+      if (existing) return existing;
+      const confirmed = await openConfirmDialog({
+        title: "确认创建新主题",
+        message: `主题「${name}」不存在，是否创建为新主题？`,
+        confirmText: "创建主题"
+      });
+      if (!confirmed) throw new Error(`未确认创建主题「${name}」`);
+      const confirmedName = window.prompt("请确认主题名称", name);
+      if (!confirmedName?.trim()) throw new Error("主题名称不能为空");
+      const slug = window.prompt("主题 slug（可留空自动生成）", uniqueSlugHint(confirmedName));
+      const description = window.prompt("主题说明", "由 Markdown 导入确认创建") || "";
+      const theme = await api.adminCreateTheme({ name: confirmedName.trim(), slug: String(slug || "").trim(), description });
+      state.admin.themes = [...state.admin.themes, theme];
+      return theme;
+    }
+
+    function openConfirmDialog(options = {}) {
+      if (confirmDialogResolver) {
+        confirmDialogResolver(false);
+      }
+      state.confirmDialog = {
+        open: true,
+        title: options.title || "确认操作",
+        message: options.message || "",
+        confirmText: options.confirmText || "确认",
+        cancelText: options.cancelText || "取消",
+        tone: options.tone || "default"
+      };
+      return new Promise((resolve) => {
+        confirmDialogResolver = resolve;
+      });
+    }
+
+    function resolveConfirmDialog(result) {
+      state.confirmDialog.open = false;
+      const resolver = confirmDialogResolver;
+      confirmDialogResolver = null;
+      if (resolver) resolver(Boolean(result));
     }
 
     function can(capability) {
@@ -1313,8 +1932,33 @@ const App = {
       const previousName = state.route.name;
       state.route = parseRoute();
       if (state.route.name !== previousName) {
+        closeRouteScopedOverlays();
         state.heroTitleScrollProgress = 0;
         window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "auto" }));
+      }
+    }
+
+    function closeRouteScopedOverlays() {
+      if (state.confirmDialog.open) {
+        resolveConfirmDialog(false);
+      }
+      if (state.contributionModal.open) {
+        closeContributionModal();
+      }
+      if (state.admin.taskProjectDetail.open) {
+        closeTaskProjectDetail();
+      }
+      if (state.admin.projectFormOpen) {
+        closeProjectForm();
+      }
+      if (state.preview.open) {
+        closeProjectPreview();
+      }
+      if (state.releaseModalOpen) {
+        closeReleaseModal();
+      }
+      if (state.profileMenuOpen) {
+        closeProfileMenu();
       }
     }
 
@@ -1337,6 +1981,18 @@ const App = {
     }
 
     function handleKeydown(event) {
+      if (event.key === "Escape" && state.confirmDialog.open) {
+        resolveConfirmDialog(false);
+        return;
+      }
+      if (event.key === "Escape" && state.contributionModal.open) {
+        closeContributionModal();
+        return;
+      }
+      if (event.key === "Escape" && state.admin.taskProjectDetail.open) {
+        closeTaskProjectDetail();
+        return;
+      }
       if (event.key === "Escape" && state.preview.open) {
         closeProjectPreview();
         return;
@@ -1516,8 +2172,9 @@ const App = {
       selectedAdminTheme,
       roleCards,
       favoriteProjects,
+      myProjectTasks,
+      workspaceOverviewCards,
       adminOverviewCards,
-      approvedInteractionGroups,
       releaseLatest,
       releaseHistoryItems,
       heroTitleStyle,
@@ -1536,6 +2193,10 @@ const App = {
       logout,
       toggleFollow,
       isProjectFollowing,
+      canFollowProject,
+      shouldShowFollowButton,
+      canRecruitProject,
+      canReviewInteraction,
       openProfileMenu,
       scheduleCloseProfileMenu,
       closeProfileMenu,
@@ -1555,23 +2216,35 @@ const App = {
       statusCardFor,
       viewerUidFor,
       viewerStatusLabelsFor,
+      projectStageLabelFor,
       participantCountFor,
       statusUidListFor,
       statusUidCountFor,
       statusHighlightUidFor,
+      statusUidGroupsFor,
+      visibleGroupUids,
+      hiddenGroupUidCount,
       taskProgressLabel,
       taskParticipantUids,
       setWorkspaceTab,
       saveProfile,
       startMyTask,
       prepareContribution,
+      openContributionModal,
+      closeContributionModal,
       submitContribution,
+      myTaskStatusLabel,
+      taskRelationSummary,
+      canSubmitProjectTask,
+      taskSubmitHint,
+      contributionStatusText,
       saveTheme,
       newTheme,
       editTheme,
       deactivateTheme,
       newProject,
       editProject,
+      closeProjectForm,
       saveProject,
       prepareTaskForProject,
       newThemeFile,
@@ -1585,12 +2258,19 @@ const App = {
       copyDefaultPassword,
       loadAdminInteractions,
       reviewInteraction,
+      adminProjectVisibilityLabel,
+      updateAdminProjectStage,
       loadAdminTasks,
       saveAdminTask,
       assignTaskToUid,
       updateTaskStatus,
       loadAdminContributions,
       reviewContribution,
+      loadAdminTaskProjects,
+      openTaskProjectDetail,
+      closeTaskProjectDetail,
+      updateTaskProjectStage,
+      approvedInteractionGroupsFor,
       loadAdminCredits,
       loadAdminAuditLogs,
       auditActionLabel,
@@ -1598,8 +2278,11 @@ const App = {
       auditTargetLabel,
       auditSummary,
       formatAuditTime,
-      useExampleJson,
-      importJson,
+      clearMarkdownImport,
+      copyMarkdownTemplate,
+      handleMarkdownFiles,
+      refreshMarkdownImportRow,
+      applyMarkdownImport,
       archiveProject,
       searchAdminProjects,
       loadMoreAdminProjects,
@@ -1614,7 +2297,8 @@ const App = {
       fieldErrorId,
       describedBy,
       formSummaryErrors,
-      clearFieldError
+      clearFieldError,
+      resolveConfirmDialog
     };
   },
   template: `
@@ -1801,7 +2485,7 @@ const App = {
                     <div><dt>参与</dt><dd>{{ project.interest_count || 0 }}</dd></div>
                   </dl>
                   <div class="card-actions">
-                    <button class="ghost-button follow-button" :class="{ active: isProjectFollowing(project) }" type="button" @click.stop="toggleFollow(project)">
+                    <button v-if="shouldShowFollowButton(project)" class="ghost-button follow-button" :class="{ active: isProjectFollowing(project) }" type="button" @click.stop="toggleFollow(project)">
                       <span class="material-symbols-rounded" style="font-size: 18px;">bookmark</span>
                       {{ isProjectFollowing(project) ? '已收藏' : '收藏' }}
                     </button>
@@ -1816,7 +2500,7 @@ const App = {
                     <small>协作状态更新中</small>
                   </template>
                   <template v-else>
-                    <strong>{{ isProjectFollowing(project) ? '已收藏' : '未收藏' }} · {{ statusCardFor(project)?.status?.stage_label || project.stage_label }}</strong>
+                    <strong>{{ projectStageLabelFor(project) }}</strong>
                     <div v-if="state.user" class="viewer-status-block">
                       <small>我的状态</small>
                       <div class="status-pill-row">
@@ -1824,9 +2508,20 @@ const App = {
                       </div>
                     </div>
                     <p v-else>登录后可查看你的 UID 和收藏、参与状态。</p>
-                    <small>课题状态 · 参与者 {{ participantCountFor(project) }} 人</small>
-                    <div v-if="statusUidListFor(project).length" class="uid-strip">
-                      <span v-for="uid in statusUidListFor(project).slice(0, 8)" :key="uid" :class="{ highlighted: uid === statusHighlightUidFor(project) }">{{ uid }}</span>
+                    <small>课题状态</small>
+                    <div v-if="statusUidGroupsFor(project).length" class="status-uid-groups">
+                      <div
+                        v-for="group in statusUidGroupsFor(project)"
+                        :key="group.key"
+                        class="status-uid-group"
+                        :class="'status-uid-group--' + group.type"
+                      >
+                        <small>{{ group.label }}<template v-if="group.count"> · {{ group.count }} 人</template></small>
+                        <div class="uid-strip">
+                          <span v-for="uid in visibleGroupUids(group)" :key="group.key + '-' + uid" :class="{ highlighted: uid === statusHighlightUidFor(project) }">{{ uid }}</span>
+                          <span v-if="hiddenGroupUidCount(group)" class="uid-more">+{{ hiddenGroupUidCount(group) }}</span>
+                        </div>
+                      </div>
                     </div>
                     <p v-else>{{ state.user ? '暂无 UID。收藏、申请或参与后会显示你的 UID。' : '登录后可查看 UID。' }}</p>
                   </template>
@@ -1861,7 +2556,7 @@ const App = {
               <div class="score-panel">
                 <strong>{{ displayScore(state.currentProject.composite_score) }}</strong>
                 <span>综合评分</span>
-                <button class="primary-button follow-button" :class="{ active: isProjectFollowing(state.currentProject) }" type="button" @click="toggleFollow(state.currentProject)">
+                <button v-if="shouldShowFollowButton(state.currentProject)" class="primary-button follow-button" :class="{ active: isProjectFollowing(state.currentProject) }" type="button" @click="toggleFollow(state.currentProject)">
                   {{ isProjectFollowing(state.currentProject) ? '已收藏' : '收藏课题' }}
                 </button>
               </div>
@@ -1926,20 +2621,23 @@ const App = {
               </article>
               <aside class="side-panel">
                 <h2>参与操作</h2>
-                <form class="stack-form" @submit.prevent="submitInterest">
-                  <select v-model="state.forms.interest.role">
-                    <option v-for="role in state.meta.participation_roles" :key="role.value" :value="role.value">{{ role.label }}</option>
-                  </select>
-                  <input v-model.number="state.forms.interest.available_hours_per_week" type="number" min="0" placeholder="每周可投入小时" />
-                  <textarea v-model="state.forms.interest.message" placeholder="补充说明"></textarea>
-                  <button class="primary-button" type="submit">申请参与</button>
-                </form>
+                <template v-if="canRecruitProject(state.currentProject)">
+                  <form class="stack-form" @submit.prevent="submitInterest">
+                    <select v-model="state.forms.interest.role">
+                      <option v-for="role in state.meta.participation_roles" :key="role.value" :value="role.value">{{ role.label }}</option>
+                    </select>
+                    <input v-model.number="state.forms.interest.available_hours_per_week" type="number" min="0" placeholder="每周可投入小时" />
+                    <textarea v-model="state.forms.interest.message" placeholder="补充说明"></textarea>
+                    <button class="primary-button" type="submit">申请参与</button>
+                  </form>
+                </template>
+                <p v-else>当前阶段不接受新的参与、认领或资助意向。</p>
                 <form class="stack-form compact-form" @submit.prevent="submitScore">
                   <input v-model.number="state.forms.score.score" type="number" min="1" max="10" />
                   <input v-model="state.forms.score.comment" type="text" placeholder="评分备注" />
                   <button class="ghost-button" type="submit">提交评分</button>
                 </form>
-                <div class="button-row">
+                <div v-if="canRecruitProject(state.currentProject)" class="button-row">
                   <button class="ghost-button" type="button" @click="submitClaim">认领意向</button>
                   <button class="ghost-button" type="button" @click="submitSponsor">资助意向</button>
                 </div>
@@ -2056,20 +2754,23 @@ const App = {
             <div class="workspace-tabs" role="tablist" aria-label="我的空间">
               <button type="button" :class="{ active: state.workspaceTab === 'overview' }" @click="setWorkspaceTab('overview')">总览</button>
               <button type="button" :class="{ active: state.workspaceTab === 'favorites' }" @click="setWorkspaceTab('favorites')">我的收藏</button>
-              <button type="button" :class="{ active: state.workspaceTab === 'interactions' }" @click="setWorkspaceTab('interactions')">我的申请</button>
-              <button type="button" :class="{ active: state.workspaceTab === 'tasks' }" @click="setWorkspaceTab('tasks')">我的任务</button>
-              <button type="button" :class="{ active: state.workspaceTab === 'contributions' }" @click="setWorkspaceTab('contributions')">我的贡献</button>
-              <button type="button" :class="{ active: state.workspaceTab === 'credits' }" @click="setWorkspaceTab('credits')">积分流水</button>
+              <button type="button" :class="{ active: state.workspaceTab === 'interactions' }" @click="setWorkspaceTab('interactions')">我的任务</button>
               <button type="button" :class="{ active: state.workspaceTab === 'profile' }" @click="setWorkspaceTab('profile')">个人资料</button>
             </div>
 
             <template v-if="state.dashboard">
               <section v-if="state.workspaceTab === 'overview'" class="workspace-panel">
-                <div class="dashboard-grid">
-                  <article class="content-panel"><h2>收藏课题</h2><p>{{ state.dashboard.follows.length }} 个</p></article>
-                  <article class="content-panel"><h2>协作申请</h2><p>{{ (state.dashboard.interests.length + state.dashboard.claims.length + state.dashboard.sponsors.length) }} 条</p></article>
-                  <article class="content-panel"><h2>任务</h2><p>{{ state.dashboard.tasks.length }} 个</p></article>
-                  <article class="content-panel"><h2>积分</h2><p>{{ state.user?.profile?.credit_balance ?? 0 }}</p></article>
+                <div class="dashboard-grid admin-overview-grid workspace-overview-grid">
+                  <button
+                    v-for="card in workspaceOverviewCards"
+                    :key="card.title"
+                    class="content-panel admin-overview-card workspace-overview-card"
+                    type="button"
+                    @click="setWorkspaceTab(card.tab)"
+                  >
+                    <h2>{{ card.title }}</h2>
+                    <p>{{ card.value }}</p>
+                  </button>
                 </div>
                 <div class="role-card-grid">
                   <article v-for="card in roleCards" :key="card.title" class="role-card">
@@ -2098,72 +2799,45 @@ const App = {
               </section>
 
               <section v-else-if="state.workspaceTab === 'interactions'" class="workspace-panel">
-                <div class="workspace-list">
-                  <article class="workspace-row" v-for="item in state.dashboard.interests" :key="'interest-' + item.id">
-                    <span><strong>{{ item.project.title }}</strong><small>参与 · {{ item.role_label }} · {{ item.status_label }}</small></span>
-                    <span>{{ item.available_hours_per_week }} 小时/周</span>
-                    <button class="ghost-button danger" type="button" v-if="item.status !== 'withdrawn'" @click="withdrawInteraction('interest', item)">撤回</button>
-                  </article>
-                  <article class="workspace-row" v-for="item in state.dashboard.claims" :key="'claim-' + item.id">
-                    <span><strong>{{ item.project.title }}</strong><small>认领 · {{ item.claim_type_label }} · {{ item.status_label }}</small></span>
-                    <span>{{ item.project.topic_id }}</span>
-                    <button class="ghost-button danger" type="button" v-if="item.status !== 'withdrawn'" @click="withdrawInteraction('claim', item)">撤回</button>
-                  </article>
-                  <article class="workspace-row" v-for="item in state.dashboard.sponsors" :key="'sponsor-' + item.id">
-                    <span><strong>{{ item.project.title }}</strong><small>资助 · {{ item.sponsor_type_label }} · {{ item.status_label }}</small></span>
-                    <span>{{ item.project.topic_id }}</span>
-                    <button class="ghost-button danger" type="button" v-if="item.status !== 'withdrawn'" @click="withdrawInteraction('sponsor', item)">撤回</button>
-                  </article>
-                </div>
-                <p v-if="!state.dashboard.interests.length && !state.dashboard.claims.length && !state.dashboard.sponsors.length">暂无申请记录。</p>
-              </section>
-
-              <section v-else-if="state.workspaceTab === 'tasks'" class="workspace-panel">
-                <div class="workspace-list">
-                  <article class="workspace-row" v-for="task in state.dashboard.tasks" :key="task.id">
-                    <span><strong>{{ task.title }}</strong><small>{{ task.project.title }} · {{ task.status_label }} · 进度 {{ taskProgressLabel(task) }} · 奖励 {{ task.credit_reward }} 分</small></span>
-                    <span><strong>参与 UID</strong><small>{{ taskParticipantUids(task).join('、') || '未分配' }}</small></span>
-                    <div class="button-row">
-                      <button class="ghost-button" type="button" v-if="task.status === 'claimed'" @click="startMyTask(task)">开始</button>
-                      <button class="primary-button" type="button" @click="prepareContribution(task)">提交贡献</button>
+                <div v-if="myProjectTasks.length" class="my-task-list">
+                  <article class="my-task-card" v-for="task in myProjectTasks" :key="task.project.id">
+                    <div class="my-task-main">
+                      <div class="my-task-title-row">
+                        <span class="eyebrow">课题情况</span>
+                        <span class="status-chip">{{ task.project.stage_label }}</span>
+                        <span class="status-chip strong">{{ myTaskStatusLabel(task) }}</span>
+                      </div>
+                      <h2>{{ task.project.title }}</h2>
+                      <p>{{ shortText(task.project.summary || task.project.problem_statement, 180) }}</p>
+                      <small>{{ task.project.topic_id }} · {{ task.project.theme?.name || '未分类' }}</small>
+                      <div class="relation-summary">{{ taskRelationSummary(task) }}</div>
+                      <div v-if="task.contributions.length" class="task-result-strip">
+                        <span v-for="item in task.contributions" :key="item.id">
+                          <strong>{{ item.title }}</strong>
+                          <small>{{ contributionStatusText(item) }}{{ item.review_comment ? ' · ' + item.review_comment : '' }}</small>
+                        </span>
+                      </div>
+                      <p v-else class="muted-inline">暂无任务结果记录。</p>
+                    </div>
+                    <div class="my-task-actions">
+                      <button class="ghost-button" type="button" @click="openProjectPreview(task.project)">查看课题</button>
+                      <button
+                        class="primary-button"
+                        type="button"
+                        :disabled="!canSubmitProjectTask(task)"
+                        @click="openContributionModal(task)"
+                      >
+                        提交任务结果
+                      </button>
+                      <small v-if="!canSubmitProjectTask(task)">{{ taskSubmitHint(task) }}</small>
                     </div>
                   </article>
                 </div>
-                <p v-if="!state.dashboard.tasks.length">暂无分配给你的任务。</p>
-              </section>
-
-              <section v-else-if="state.workspaceTab === 'contributions'" class="workspace-panel workspace-split">
-                <article class="content-panel">
-                  <h2>提交贡献</h2>
-                  <form class="stack-form" @submit.prevent="submitContribution">
-                    <label><span>课题 ID</span><input v-model="state.forms.contribution.project_id" type="number" min="1" placeholder="填写课题数据库 ID" /></label>
-                    <label><span>任务 ID</span><input v-model="state.forms.contribution.task_id" type="number" min="1" placeholder="可选，关联任务 ID" /></label>
-                    <label><span>贡献标题</span><input v-model="state.forms.contribution.title" type="text" /></label>
-                    <label><span>说明</span><textarea v-model="state.forms.contribution.description"></textarea></label>
-                    <label><span>文件路径或链接</span><input v-model="state.forms.contribution.file_path" type="text" /></label>
-                    <button class="primary-button" type="submit">提交贡献</button>
-                  </form>
-                </article>
-                <article class="content-panel">
-                  <h2>我的贡献</h2>
-                  <div class="workspace-list compact-workspace-list">
-                    <div class="workspace-row" v-for="item in state.dashboard.contributions" :key="item.id">
-                      <span><strong>{{ item.title }}</strong><small>{{ item.project.title }} · {{ item.status_label }}</small></span>
-                      <span>{{ item.review_comment || '待审核' }}</span>
-                    </div>
-                  </div>
-                  <p v-if="!state.dashboard.contributions.length">暂无贡献记录。</p>
-                </article>
-              </section>
-
-              <section v-else-if="state.workspaceTab === 'credits'" class="workspace-panel">
-                <div class="workspace-list">
-                  <article class="workspace-row" v-for="entry in state.dashboard.credits" :key="entry.id">
-                    <span><strong>{{ entry.action_type_label }}</strong><small>{{ entry.reason || entry.project?.title || '系统记录' }}</small></span>
-                    <span>{{ entry.amount > 0 ? '+' : '' }}{{ entry.amount }} · 余额 {{ entry.balance_after }}</span>
-                  </article>
-                </div>
-                <p v-if="!state.dashboard.credits.length">暂无积分流水。</p>
+                <section v-else class="empty-state favorites-empty">
+                  <h2>还没有任务</h2>
+                  <p>申请参与、认领或资助课题后，会在这里看到课题状态和你的任务进展。</p>
+                  <button class="primary-button" type="button" @click="navigate('projects')">去课题库</button>
+                </section>
               </section>
 
               <section v-else class="workspace-panel">
@@ -2248,7 +2922,7 @@ const App = {
                     <small>协作状态更新中</small>
                   </template>
                   <template v-else>
-                    <strong>{{ isProjectFollowing(project) ? '已收藏' : '未收藏' }} · {{ statusCardFor(project)?.status?.stage_label || project.stage_label }}</strong>
+                    <strong>{{ projectStageLabelFor(project) }}</strong>
                     <div v-if="state.user" class="viewer-status-block">
                       <small>我的状态</small>
                       <div class="status-pill-row">
@@ -2256,9 +2930,20 @@ const App = {
                       </div>
                     </div>
                     <p v-else>登录后可查看你的 UID 和收藏、参与状态。</p>
-                    <small>课题状态 · 参与者 {{ participantCountFor(project) }} 人</small>
-                    <div v-if="statusUidListFor(project).length" class="uid-strip">
-                      <span v-for="uid in statusUidListFor(project).slice(0, 8)" :key="uid" :class="{ highlighted: uid === statusHighlightUidFor(project) }">{{ uid }}</span>
+                    <small>课题状态</small>
+                    <div v-if="statusUidGroupsFor(project).length" class="status-uid-groups">
+                      <div
+                        v-for="group in statusUidGroupsFor(project)"
+                        :key="group.key"
+                        class="status-uid-group"
+                        :class="'status-uid-group--' + group.type"
+                      >
+                        <small>{{ group.label }}<template v-if="group.count"> · {{ group.count }} 人</template></small>
+                        <div class="uid-strip">
+                          <span v-for="uid in visibleGroupUids(group)" :key="group.key + '-' + uid" :class="{ highlighted: uid === statusHighlightUidFor(project) }">{{ uid }}</span>
+                          <span v-if="hiddenGroupUidCount(group)" class="uid-more">+{{ hiddenGroupUidCount(group) }}</span>
+                        </div>
+                      </div>
                     </div>
                     <p v-else>{{ state.user ? '暂无 UID。收藏、申请或参与后会显示你的 UID。' : '登录后可查看 UID。' }}</p>
                   </template>
@@ -2284,16 +2969,12 @@ const App = {
 
               <div class="admin-tabs" role="tablist" aria-label="管理功能">
                 <button type="button" :class="{ active: state.admin.activeTab === 'overview' }" @click="setAdminTab('overview')">总览</button>
-                <button type="button" :class="{ active: state.admin.activeTab === 'interactions' }" @click="setAdminTab('interactions')">协作管理</button>
-                <button type="button" :class="{ active: state.admin.activeTab === 'tasks' }" @click="setAdminTab('tasks')">任务管理</button>
-                <button type="button" :class="{ active: state.admin.activeTab === 'contributions' }" @click="setAdminTab('contributions')">贡献审核</button>
+                <button type="button" :class="{ active: state.admin.activeTab === 'interactions' }" @click="setAdminTab('interactions')">任务审批</button>
+                <button type="button" :class="{ active: state.admin.activeTab === 'contributions' }" @click="setAdminTab('contributions')">任务管理</button>
                 <button type="button" :class="{ active: state.admin.activeTab === 'projects' }" @click="setAdminTab('projects')">课题管理</button>
                 <button type="button" :class="{ active: state.admin.activeTab === 'themes' }" @click="setAdminTab('themes')">主题与文件域</button>
                 <button type="button" :class="{ active: state.admin.activeTab === 'users' }" @click="setAdminTab('users')">用户管理</button>
-                <button type="button" :class="{ active: state.admin.activeTab === 'credits' }" @click="setAdminTab('credits')">积分流水</button>
                 <button type="button" :class="{ active: state.admin.activeTab === 'audit' }" @click="setAdminTab('audit')">审计日志</button>
-                <button type="button" :class="{ active: state.admin.activeTab === 'import' }" @click="setAdminTab('import')">JSON 导入</button>
-                <button type="button" :class="{ active: state.admin.activeTab === 'schema' }" @click="setAdminTab('schema')">字段契约</button>
               </div>
 
               <section v-if="state.admin.activeTab === 'overview'" class="workspace-panel">
@@ -2314,15 +2995,15 @@ const App = {
               <section v-else-if="state.admin.activeTab === 'interactions'" class="workspace-panel collaboration-management">
                 <div class="collaboration-management-head">
                   <div>
-                    <h2>协作管理</h2>
-                    <p>先审核参与、认领和资助意向；通过后在已审核项目状态里查看人员 UID，并进入任务分配。</p>
+                    <h2>任务审批</h2>
+                    <p>审核用户提交的参与、认领和资助申请。审核通过后，开放招募课题会自动进入组队中。</p>
                   </div>
                 </div>
-                <div class="collaboration-grid">
+                <div class="collaboration-grid single-column">
                   <article class="content-panel">
                     <div class="panel-title-row compact-title-row">
                       <div>
-                        <h3>协作审核</h3>
+                        <h3>申请审批</h3>
                         <p>处理待审核申请，状态变更会写入审计日志。</p>
                       </div>
                     </div>
@@ -2338,7 +3019,6 @@ const App = {
                         <option value="pending">待处理</option>
                         <option value="approved">已通过</option>
                         <option value="rejected">已拒绝</option>
-                        <option value="recorded">已记录</option>
                         <option value="withdrawn">已撤回</option>
                       </select>
                       <input v-model="state.admin.interactionFilters.q" type="search" placeholder="搜索课题、用户或 UID" @keyup.enter="loadAdminInteractions({ reset: true })" />
@@ -2354,140 +3034,49 @@ const App = {
                         <span>{{ item.type_label }} · {{ item.subtype_label }}</span>
                         <span>{{ item.status_label }}</span>
                         <span class="button-row">
-                          <button class="ghost-button" type="button" @click="reviewInteraction(item, 'approved')">通过</button>
-                          <button class="ghost-button" type="button" @click="reviewInteraction(item, 'recorded')">记录</button>
-                          <button class="ghost-button danger" type="button" @click="reviewInteraction(item, 'rejected')">拒绝</button>
+                          <template v-if="canReviewInteraction(item)">
+                            <button class="ghost-button" type="button" @click="reviewInteraction(item, 'approved')">通过</button>
+                            <button class="ghost-button danger" type="button" @click="reviewInteraction(item, 'rejected')">拒绝</button>
+                          </template>
+                          <small v-else>已处理</small>
                         </span>
                       </div>
                     </div>
                     <p v-if="!state.admin.loadingInteractions && !state.admin.interactions.length">没有匹配的协作申请。</p>
                   </article>
-
-                  <article class="content-panel">
-                    <div class="panel-title-row compact-title-row">
-                      <div>
-                        <h3>审核后任务管理</h3>
-                        <p>已审核项目状态：展示批准项目的人员 UID 和协作状态，可直接进入建任务。</p>
-                      </div>
-                    </div>
-                    <div class="approved-project-list" v-if="approvedInteractionGroups.length">
-                      <article class="approved-project-row" v-for="group in approvedInteractionGroups" :key="group.project.id">
-                        <div class="approved-project-main">
-                          <strong>{{ group.project.title }}</strong>
-                          <small>{{ group.project.topic_id }} · {{ group.project.stage_label }}</small>
-                          <div class="member-status-list">
-                            <span v-for="member in group.members" :key="member.uid + member.type_label + member.subtype_label">
-                              <strong>{{ member.uid }}</strong>
-                              <small>{{ member.type_label }} · {{ member.subtype_label }} · {{ member.status_label }}</small>
-                            </span>
-                          </div>
-                        </div>
-                        <button class="ghost-button" type="button" @click="prepareTaskForProject(group.project)">建任务</button>
-                      </article>
-                    </div>
-                    <p v-else-if="state.admin.loadingApprovedInteractions">正在读取已审核项目状态...</p>
-                    <p v-else>暂无已批准协作项目。</p>
-                  </article>
                 </div>
-              </section>
-
-              <section v-else-if="state.admin.activeTab === 'tasks'" class="admin-workbench">
-                <article class="content-panel admin-list-panel">
-                  <div class="panel-title-row">
-                    <div>
-                      <h2>任务管理</h2>
-                      <p>将课题拆成可交付任务，分配 UID，用户提交贡献后进入审核。</p>
-                    </div>
-                  </div>
-                  <div class="admin-filter-row">
-                    <select v-model="state.admin.taskFilters.status" @change="loadAdminTasks({ reset: true })">
-                      <option value="">全部状态</option>
-                      <option value="todo">待认领</option>
-                      <option value="claimed">已认领</option>
-                      <option value="in_progress">进行中</option>
-                      <option value="review">待审核</option>
-                      <option value="done">已完成</option>
-                      <option value="cancelled">已取消</option>
-                    </select>
-                    <input v-model="state.admin.taskFilters.q" type="search" placeholder="搜索任务或课题" @keyup.enter="loadAdminTasks({ reset: true })" />
-                    <button class="ghost-button" type="button" @click="loadAdminTasks({ reset: true })">查询</button>
-                  </div>
-                  <div class="admin-table task-table">
-                    <div class="admin-table-head"><span>任务</span><span>参与 UID</span><span>进度</span><span>状态</span><span>操作</span></div>
-                    <div class="admin-table-row" v-for="task in state.admin.tasks" :key="task.id">
-                      <span><strong>{{ task.title }}</strong><small>{{ task.project.title }}</small></span>
-                      <span><strong>{{ taskParticipantUids(task).join('、') || '未分配' }}</strong><small>奖励 {{ task.credit_reward }} 分</small></span>
-                      <span>{{ taskProgressLabel(task) }}</span>
-                      <span>{{ task.status_label }}</span>
-                      <span class="button-row">
-                        <button class="ghost-button" type="button" @click="assignTaskToUid(task)">分配</button>
-                        <button class="ghost-button" type="button" @click="updateTaskStatus(task, 'done')">完成</button>
-                        <button class="ghost-button danger" type="button" @click="updateTaskStatus(task, 'cancelled')">取消</button>
-                      </span>
-                    </div>
-                  </div>
-                </article>
-                <article class="content-panel admin-form-panel">
-                  <h2>新增任务</h2>
-                  <form class="stack-form" @submit.prevent="saveAdminTask">
-                    <label><span>课题数据库 ID</span><input v-model="state.admin.taskForm.project_id" type="number" min="1" /></label>
-                    <label><span>任务标题</span><input v-model="state.admin.taskForm.title" type="text" /></label>
-                    <label><span>说明</span><textarea v-model="state.admin.taskForm.description"></textarea></label>
-                    <div class="form-grid">
-                      <label><span>任务类型</span><input v-model="state.admin.taskForm.task_type" type="text" /></label>
-                      <label><span>所需角色</span><input v-model="state.admin.taskForm.required_role" type="text" /></label>
-                      <label><span>分配 UID</span><input v-model="state.admin.taskForm.assignee_uid" type="text" /></label>
-                      <label><span>奖励积分</span><input v-model.number="state.admin.taskForm.credit_reward" type="number" min="0" /></label>
-                    </div>
-                    <button class="primary-button" type="submit">创建任务</button>
-                  </form>
-                </article>
               </section>
 
               <section v-else-if="state.admin.activeTab === 'contributions'" class="content-panel">
                 <div class="panel-title-row">
-                  <div><h2>贡献审核</h2><p>审核用户提交的任务产出，必要时发放任务奖励。</p></div>
+                  <div><h2>任务管理</h2><p>按课题查看已获批人员 UID 和任务结果，在详情弹窗中完成审核与结题。</p></div>
                 </div>
                 <div class="admin-filter-row">
-                  <select v-model="state.admin.contributionFilters.status" @change="loadAdminContributions({ reset: true })">
-                    <option value="">全部状态</option>
-                    <option value="submitted">已提交</option>
-                    <option value="approved">已通过</option>
-                    <option value="rejected">已拒绝</option>
-                    <option value="needs_revision">需修改</option>
+                  <input v-model="state.admin.taskProjectFilters.q" type="search" placeholder="搜索课题、课题 ID 或摘要" @keyup.enter="loadAdminTaskProjects({ reset: true })" />
+                  <select v-model="state.admin.taskProjectFilters.stage" @change="loadAdminTaskProjects({ reset: true })">
+                    <option value="">组队中 / 进行中 / 暂停</option>
+                    <option value="open_recruiting">开放招募</option>
+                    <option value="team_building">组队中</option>
+                    <option value="active">进行中</option>
+                    <option value="paused">暂停</option>
+                    <option value="archived">归档</option>
                   </select>
-                  <input v-model="state.admin.contributionFilters.user" type="search" placeholder="用户 UID/用户名" @keyup.enter="loadAdminContributions({ reset: true })" />
-                  <button class="ghost-button" type="button" @click="loadAdminContributions({ reset: true })">查询</button>
+                  <button class="ghost-button" type="button" @click="loadAdminTaskProjects({ reset: true })">查询</button>
                 </div>
-                <div class="admin-table contribution-table">
-                  <div class="admin-table-head"><span>贡献</span><span>用户</span><span>任务</span><span>状态</span><span>操作</span></div>
-                  <div class="admin-table-row" v-for="item in state.admin.contributions" :key="item.id">
-                    <span><strong>{{ item.title }}</strong><small>{{ item.file_path || item.description }}</small></span>
-                    <span>{{ item.user.uid }}</span>
-                    <span>{{ item.task?.title || '无任务' }}</span>
-                    <span>{{ item.status_label }}</span>
+                <div class="admin-table task-project-table">
+                  <div class="admin-table-head"><span>课题名称</span><span>主题</span><span>课题状态</span><span>课题 ID</span><span>操作</span></div>
+                  <div class="admin-table-row" v-for="project in state.admin.taskProjects" :key="project.id">
+                    <span><strong>{{ project.title }}</strong><small>{{ shortText(project.summary || project.problem_statement, 80) }}</small></span>
+                    <span>{{ project.theme?.name || '未分类' }}</span>
+                    <span>{{ project.stage_label }}</span>
+                    <span>{{ project.topic_id }}</span>
                     <span class="button-row">
-                      <button class="ghost-button" type="button" @click="reviewContribution(item, 'approved', true)">通过并奖励</button>
-                      <button class="ghost-button" type="button" @click="reviewContribution(item, 'needs_revision')">需修改</button>
-                      <button class="ghost-button danger" type="button" @click="reviewContribution(item, 'rejected')">拒绝</button>
+                      <button class="primary-button" type="button" @click="openTaskProjectDetail(project)">查看任务详情</button>
                     </span>
                   </div>
                 </div>
-                <p v-if="!state.admin.loadingContributions && !state.admin.contributions.length">暂无贡献记录。</p>
-              </section>
-
-              <section v-else-if="state.admin.activeTab === 'credits'" class="content-panel">
-                <div class="panel-title-row"><div><h2>积分流水</h2><p>查看注册奖励、任务奖励和管理员调整记录。</p></div></div>
-                <div class="admin-filter-row">
-                  <input v-model="state.admin.creditFilters.uid" type="search" placeholder="按 UID 查询" @keyup.enter="loadAdminCredits({ reset: true })" />
-                  <button class="ghost-button" type="button" @click="loadAdminCredits({ reset: true })">查询</button>
-                </div>
-                <div class="admin-table credit-table">
-                  <div class="admin-table-head"><span>用户</span><span>动作</span><span>金额</span><span>原因</span><span>余额</span></div>
-                  <div class="admin-table-row" v-for="entry in state.admin.credits" :key="entry.id">
-                    <span>{{ entry.user.uid }}</span><span>{{ entry.action_type_label }}</span><span>{{ entry.amount }}</span><span>{{ entry.reason || '-' }}</span><span>{{ entry.balance_after }}</span>
-                  </div>
-                </div>
+                <p v-if="!state.admin.loadingTaskProjects && !state.admin.taskProjects.length">暂无匹配的任务课题。</p>
+                <p v-if="state.admin.loadingTaskProjects">正在读取任务课题...</p>
               </section>
 
               <section v-else-if="state.admin.activeTab === 'audit'" class="content-panel">
@@ -2509,7 +3098,7 @@ const App = {
                 </div>
               </section>
 
-              <section v-else-if="state.admin.activeTab === 'projects'" class="admin-workbench">
+              <section v-else-if="state.admin.activeTab === 'projects'" class="admin-workbench project-management-workbench">
                 <article class="content-panel admin-list-panel">
                   <div class="panel-title-row">
                     <div>
@@ -2540,11 +3129,20 @@ const App = {
                         <small>{{ project.topic_id }}</small>
                       </span>
                       <span>{{ project.theme?.name || '未分类' }}</span>
-                      <span>{{ stageLabel(project) }}</span>
-                      <span>{{ project.is_public ? '公开' : '已停用' }}</span>
+                      <span>
+                        <select
+                          class="admin-stage-select"
+                          :value="project.stage"
+                          :disabled="state.admin.updatingProjectStageId === project.id"
+                          @click.stop
+                          @change="updateAdminProjectStage(project, $event.target.value, $event)"
+                        >
+                          <option v-for="stage in state.meta.project_stages" :key="stage.value" :value="stage.value">{{ stage.label }}</option>
+                        </select>
+                      </span>
+                      <span>{{ adminProjectVisibilityLabel(project) }}</span>
                       <span class="button-row">
                         <button class="ghost-button" type="button" @click="editProject(project)">编辑</button>
-                        <button class="ghost-button" type="button" @click="prepareTaskForProject(project)">建任务</button>
                         <button class="ghost-button danger" type="button" @click="archiveProject(project)">删除</button>
                       </span>
                     </div>
@@ -2557,63 +3155,140 @@ const App = {
                   </div>
                 </article>
 
-                <article id="admin-project-form" class="content-panel admin-form-panel">
+                <article class="content-panel markdown-import-panel">
                   <div class="panel-title-row">
                     <div>
-                      <h2>{{ state.admin.projectForm.id ? '编辑课题' : '新增课题' }}</h2>
-                      <p>JSON 字段会按固定契约写入数据库。</p>
+                      <h2>Markdown 导入</h2>
+                      <p>读取单个 Markdown 文件或文件夹下的多个 Markdown 文件，解析后先预览，再写入现有课题 API。</p>
                     </div>
-                    <button class="ghost-button" type="button" @click="newProject">清空</button>
+                    <button class="ghost-button" type="button" @click="copyMarkdownTemplate">复制 Markdown 模板</button>
                   </div>
-                  <form class="stack-form project-edit-form" @submit.prevent="saveProject">
-                    <div class="form-grid">
-                      <label><span>课题 ID</span><input v-model="state.admin.projectForm.topic_id" type="text" /></label>
-                      <label><span>主题</span>
-                        <select v-model="state.admin.projectForm.theme">
-                          <option value="">未分类</option>
-                          <option v-for="theme in state.admin.themes" :key="theme.id" :value="theme.slug">{{ theme.name }}</option>
-                        </select>
-                      </label>
-                      <label><span>主题内编号</span><input v-model="state.admin.projectForm.project_no" type="number" min="0" /></label>
-                      <label><span>阶段</span>
-                        <select v-model="state.admin.projectForm.stage">
-                          <option v-for="stage in state.meta.project_stages" :key="stage.value" :value="stage.value">{{ stage.label }}</option>
-                        </select>
-                      </label>
+                  <div class="markdown-import-actions">
+                    <label class="file-picker">
+                      <span>选择 Markdown 文件</span>
+                      <input type="file" accept=".md,text/markdown" multiple @change="handleMarkdownFiles" />
+                    </label>
+                    <label class="file-picker">
+                      <span>选择 Markdown 文件夹</span>
+                      <input type="file" accept=".md,text/markdown" webkitdirectory directory multiple @change="handleMarkdownFiles" />
+                    </label>
+                    <button class="primary-button" type="button" :disabled="state.admin.markdownImport.applying || !state.admin.markdownImport.rows.length" @click="applyMarkdownImport">
+                      {{ state.admin.markdownImport.applying ? '正在提交' : '提交可导入项' }}
+                    </button>
+                    <button class="ghost-button" type="button" :disabled="state.admin.markdownImport.applying || (!state.admin.markdownImport.rows.length && !state.admin.markdownImport.fileCount)" @click="clearMarkdownImport">
+                      清除导入提示
+                    </button>
+                  </div>
+                  <div v-if="state.admin.markdownImport.rows.length" class="markdown-import-list">
+                    <div v-for="row in state.admin.markdownImport.rows" :key="row.id" class="markdown-import-row" :class="{ blocked: row.errors.length }">
+                      <div>
+                        <strong>{{ row.payload.title || row.fileName }}</strong>
+                        <small>{{ row.sourcePath }}</small>
+                      </div>
+                      <label class="inline-row-field"><span>课题ID</span><input v-model="row.payload.topic_id" type="text" /></label>
+                      <label class="inline-row-field"><span>标题</span><input v-model="row.payload.title" type="text" /></label>
+                      <label class="inline-row-field"><span>主题</span><input v-model="row.payload.theme" type="text" /></label>
+                      <span>{{ row.actionLabel }}</span>
+                      <span class="markdown-import-notes">
+                        <template v-if="row.errors.length">错误：{{ row.errors.join('；') }}</template>
+                        <template v-else-if="row.warnings.length">待补充：{{ row.warnings.join('、') }}</template>
+                        <template v-else>字段完整</template>
+                      </span>
+                      <button class="ghost-button" type="button" @click="refreshMarkdownImportRow(row)">重新检测</button>
                     </div>
-                    <label><span>标题</span><input v-model="state.admin.projectForm.title" type="text" /></label>
-                    <label><span>摘要</span><textarea v-model="state.admin.projectForm.summary"></textarea></label>
-                    <label><span>科学问题</span><textarea v-model="state.admin.projectForm.problem_statement"></textarea></label>
-                    <label><span>研究目标</span><textarea v-model="state.admin.projectForm.research_goal"></textarea></label>
-                    <label><span>技术路线</span><textarea v-model="state.admin.projectForm.technical_route"></textarea></label>
-                    <div class="form-grid">
-                      <label><span>数据需求 JSON</span><textarea class="mini-json-editor" v-model="state.admin.projectForm.data_requirements"></textarea></label>
-                      <label><span>评价指标 JSON</span><textarea class="mini-json-editor" v-model="state.admin.projectForm.evaluation_metrics"></textarea></label>
-                      <label><span>预期成果 JSON</span><textarea class="mini-json-editor" v-model="state.admin.projectForm.expected_outputs"></textarea></label>
-                      <label><span>文件列表 JSON</span><textarea class="mini-json-editor" v-model="state.admin.projectForm.documents"></textarea></label>
-                    </div>
-                    <label><span>合规说明</span><textarea v-model="state.admin.projectForm.compliance_notes"></textarea></label>
-                    <div class="form-grid">
-                      <label><span>标签（逗号分隔）</span><input v-model="state.admin.projectForm.tags" type="text" /></label>
-                      <label><span>需要角色（逗号分隔）</span><input v-model="state.admin.projectForm.needed_roles" type="text" /></label>
-                      <label><span>初始评分</span><input v-model="state.admin.projectForm.llm_score" type="number" step="0.1" /></label>
-                      <label><span>综合评分</span><input v-model="state.admin.projectForm.composite_score" type="number" step="0.1" /></label>
-                    </div>
-                    <label><span>推荐期刊</span><input v-model="state.admin.projectForm.recommended_journal" type="text" /></label>
-                    <div class="form-grid">
-                      <label><span>Markdown 路径</span><input v-model="state.admin.projectForm.source_md_path" type="text" /></label>
-                      <label><span>PDF 路径</span><input v-model="state.admin.projectForm.source_pdf_path" type="text" /></label>
-                      <label><span>公开页路径</span><input v-model="state.admin.projectForm.page_path" type="text" /></label>
-                      <label><span>评分维度 JSON</span><textarea class="mini-json-editor" v-model="state.admin.projectForm.score_dimensions"></textarea></label>
-                    </div>
-                    <label><span>正文 Markdown</span><textarea class="mini-json-editor" v-model="state.admin.projectForm.body_markdown"></textarea></label>
-                    <div class="button-row form-actions">
-                      <label class="inline-check"><input v-model="state.admin.projectForm.has_pdf" type="checkbox" /> 有 PDF</label>
-                      <label class="inline-check"><input v-model="state.admin.projectForm.is_public" type="checkbox" /> 公开展示</label>
-                      <button class="primary-button" type="submit">保存课题</button>
-                    </div>
-                  </form>
+                  </div>
+                  <p v-else>尚未选择 Markdown 文件。模板中的可选章节未解析到时，会按空字段保存并在用户侧显示“待补充”。</p>
                 </article>
+
+                <article class="content-panel schema-helper-panel">
+                  <div class="panel-title-row">
+                    <div>
+                      <h2>字段契约与 Markdown 模板</h2>
+                      <p>系统内表单、Markdown 导入和后端保存都按这些字段对齐。</p>
+                    </div>
+                  </div>
+                  <details>
+                    <summary>查看 Markdown 模板</summary>
+                    <pre class="markdown-template-preview">{{ state.schema.markdown_template }}</pre>
+                  </details>
+                  <div class="schema-table schema-table-wide">
+                    <div v-for="field in state.schema.fields" :key="field.name">
+                      <strong>{{ field.label }}</strong>
+                      <code>{{ field.name }}</code>
+                      <span>{{ field.type }}{{ field.required ? ' · 必填' : '' }}</span>
+                    </div>
+                  </div>
+                </article>
+
+                <div v-if="state.admin.projectFormOpen" class="project-form-modal" @click.self="closeProjectForm">
+                  <section class="project-form-dialog" role="dialog" aria-modal="true" aria-label="课题表单">
+                    <header class="project-form-dialog-header">
+                      <div>
+                        <span class="eyebrow">课题管理</span>
+                        <h2>{{ state.admin.projectForm.id ? '编辑课题' : '新增课题' }}</h2>
+                        <p>默认保存为草稿且不公开。确认内容完整后，再发布到用户课题库。</p>
+                      </div>
+                      <div class="modal-actions">
+                        <button class="ghost-button" type="button" @click="newProject">重置表单</button>
+                        <button class="ghost-button" type="button" @click="closeProjectForm">关闭</button>
+                      </div>
+                    </header>
+                    <form class="stack-form project-edit-form project-form-dialog-body" @submit.prevent="saveProject()">
+                      <div class="form-grid">
+                        <label><span>课题 ID</span><input v-model="state.admin.projectForm.topic_id" type="text" :disabled="Boolean(state.admin.projectForm.id)" /></label>
+                        <label><span>主题</span>
+                          <select v-model="state.admin.projectForm.theme">
+                            <option value="">请选择主题</option>
+                            <option v-for="theme in state.admin.themes" :key="theme.id" :value="theme.slug">{{ theme.name }}</option>
+                          </select>
+                        </label>
+                        <label><span>主题内编号</span><input v-model="state.admin.projectForm.project_no" type="number" min="0" /></label>
+                        <label><span>阶段</span>
+                          <select v-model="state.admin.projectForm.stage">
+                            <option v-for="stage in state.meta.project_stages" :key="stage.value" :value="stage.value">{{ stage.label }}</option>
+                          </select>
+                        </label>
+                      </div>
+                      <label><span>标题</span><input v-model="state.admin.projectForm.title" type="text" /></label>
+                      <label><span>摘要</span><textarea v-model="state.admin.projectForm.summary"></textarea></label>
+                      <label><span>科学问题</span><textarea v-model="state.admin.projectForm.problem_statement"></textarea></label>
+                      <label><span>研究目标</span><textarea v-model="state.admin.projectForm.research_goal"></textarea></label>
+                      <label><span>技术路线</span><textarea v-model="state.admin.projectForm.technical_route"></textarea></label>
+                      <div class="form-grid">
+                        <label><span>数据类型</span><input v-model="state.admin.projectForm.data_type" type="text" /></label>
+                        <label><span>最小样本量</span><input v-model="state.admin.projectForm.minimum_cases" type="number" min="0" /></label>
+                        <label><span>数据来源</span><input v-model="state.admin.projectForm.data_source" type="text" /></label>
+                        <label><span>隐私要求</span><input v-model="state.admin.projectForm.privacy" type="text" /></label>
+                      </div>
+                      <div class="form-grid">
+                        <label><span>评价指标（每行一条）</span><textarea v-model="state.admin.projectForm.evaluation_metrics"></textarea></label>
+                        <label><span>预期成果（每行一条）</span><textarea v-model="state.admin.projectForm.expected_outputs"></textarea></label>
+                        <label><span>文件列表（类型|标题|路径，每行一条）</span><textarea v-model="state.admin.projectForm.documents"></textarea></label>
+                      </div>
+                      <label><span>合规说明</span><textarea v-model="state.admin.projectForm.compliance_notes"></textarea></label>
+                      <div class="form-grid">
+                        <label><span>标签（逗号分隔）</span><input v-model="state.admin.projectForm.tags" type="text" /></label>
+                        <label><span>需要角色（逗号分隔）</span><input v-model="state.admin.projectForm.needed_roles" type="text" /></label>
+                        <label><span>初始评分</span><input v-model="state.admin.projectForm.llm_score" type="number" step="0.1" /></label>
+                        <label><span>综合评分</span><input v-model="state.admin.projectForm.composite_score" type="number" step="0.1" /></label>
+                      </div>
+                      <label><span>推荐期刊</span><input v-model="state.admin.projectForm.recommended_journal" type="text" /></label>
+                      <div class="form-grid">
+                        <label><span>Markdown 路径</span><input v-model="state.admin.projectForm.source_md_path" type="text" /></label>
+                        <label><span>PDF 路径</span><input v-model="state.admin.projectForm.source_pdf_path" type="text" /></label>
+                        <label><span>公开页路径</span><input v-model="state.admin.projectForm.page_path" type="text" /></label>
+                        <label><span>评分维度（维度|分数，每行一条）</span><textarea class="score-dimensions-editor" v-model="state.admin.projectForm.score_dimensions"></textarea></label>
+                      </div>
+                      <label><span>正文 Markdown</span><textarea class="markdown-body-editor" v-model="state.admin.projectForm.body_markdown"></textarea></label>
+                      <div class="button-row form-actions">
+                        <label class="inline-check"><input v-model="state.admin.projectForm.has_pdf" type="checkbox" /> 有 PDF</label>
+                        <label class="inline-check"><input v-model="state.admin.projectForm.is_public" type="checkbox" /> 公开展示</label>
+                        <button class="ghost-button" type="submit">保存草稿</button>
+                        <button class="primary-button" type="button" @click="saveProject({ publish: true })">发布课题</button>
+                      </div>
+                    </form>
+                  </section>
+                </div>
               </section>
 
               <section v-else-if="state.admin.activeTab === 'themes'" class="admin-workbench">
@@ -2745,37 +3420,10 @@ const App = {
                 <p v-if="!state.admin.loadingUsers && !state.admin.users.length">没有找到匹配用户。</p>
               </section>
 
-              <section v-else-if="state.admin.activeTab === 'import'" class="content-panel">
-                <div class="panel-title-row">
-                  <div>
-                    <h2>JSON 导入课题</h2>
-                    <p>按字段契约导入或更新课题，主题会自动匹配或创建。</p>
-                  </div>
-                  <button class="ghost-button" type="button" @click="useExampleJson">填入示例</button>
-                </div>
-                <textarea class="json-editor" v-model="state.admin.importText"></textarea>
-                <button class="primary-button" type="button" @click="importJson">导入或更新</button>
-              </section>
-
-              <section v-else class="content-panel">
-                <div class="panel-title-row">
-                  <div>
-                    <h2>课题字段契约</h2>
-                    <p>前端表单、JSON 导入和后端保存都按这些字段对齐。</p>
-                  </div>
-                </div>
-                <div class="schema-table schema-table-wide">
-                  <div v-for="field in state.schema.fields" :key="field.name">
-                    <strong>{{ field.label }}</strong>
-                    <code>{{ field.name }}</code>
-                    <span>{{ field.type }}{{ field.required ? ' · 必填' : '' }}</span>
-                  </div>
-                </div>
-              </section>
             </template>
             <section v-else class="empty-state">
               <h2>当前身份没有管理权限</h2>
-              <p>管理员可以增删改主题和课题，并导入 JSON。</p>
+              <p>管理员可以维护主题、课题、文件空间和 Markdown 模板导入。</p>
             </section>
           </section>
 
@@ -2999,6 +3647,123 @@ const App = {
           </section>
         </div>
 
+        <div v-if="state.contributionModal.open" class="project-form-modal task-result-modal" @click.self="closeContributionModal">
+          <section class="project-form-dialog task-result-dialog" role="dialog" aria-modal="true" aria-label="提交任务结果">
+            <header class="project-form-dialog-header">
+              <div>
+                <span class="eyebrow">我的任务</span>
+                <h2>提交任务结果</h2>
+                <p>{{ state.contributionModal.project?.title }} · {{ state.contributionModal.project?.stage_label }}</p>
+              </div>
+              <div class="modal-actions">
+                <button class="ghost-button" type="button" @click="closeContributionModal">关闭</button>
+              </div>
+            </header>
+            <form class="stack-form project-form-dialog-body" @submit.prevent="submitContribution">
+              <div class="task-context-box">
+                <strong>{{ state.contributionModal.project?.topic_id }}</strong>
+                <span>{{ state.contributionModal.relation?.relation_type_label || '已获批' }}{{ state.contributionModal.relation?.subtype_label ? ' · ' + state.contributionModal.relation.subtype_label : '' }}</span>
+              </div>
+              <div class="form-grid">
+                <label><span>结果标题</span><input v-model="state.forms.contribution.title" type="text" /></label>
+                <label><span>结果类型</span>
+                  <select v-model="state.forms.contribution.result_type">
+                    <option value="stage">阶段性成果</option>
+                    <option value="final">最终结果</option>
+                  </select>
+                </label>
+              </div>
+              <label><span>说明</span><textarea v-model="state.forms.contribution.description"></textarea></label>
+              <label><span>文件路径或链接</span><input v-model="state.forms.contribution.file_path" type="text" /></label>
+              <div class="button-row form-actions">
+                <button class="ghost-button" type="button" @click="closeContributionModal">取消</button>
+                <button class="primary-button" type="submit" :disabled="state.contributionModal.submitting">
+                  {{ state.contributionModal.submitting ? '正在提交' : '提交任务结果' }}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+
+        <div v-if="state.admin.taskProjectDetail.open" class="project-form-modal task-detail-modal" @click.self="closeTaskProjectDetail">
+          <section class="project-form-dialog task-detail-dialog" role="dialog" aria-modal="true" aria-label="任务管理详情">
+            <header class="project-form-dialog-header">
+              <div>
+                <span class="eyebrow">任务管理</span>
+                <h2>{{ state.admin.taskProjectDetail.project?.title || '任务详情' }}</h2>
+                <p>{{ state.admin.taskProjectDetail.project?.topic_id }} · {{ state.admin.taskProjectDetail.project?.stage_label }}</p>
+              </div>
+              <div class="modal-actions">
+                <button class="ghost-button" type="button" @click="closeTaskProjectDetail">关闭</button>
+              </div>
+            </header>
+            <div class="project-form-dialog-body task-detail-body">
+              <section v-if="state.admin.taskProjectDetail.loading" class="modal-loading">
+                <div class="loader"></div>
+                <p>正在读取任务详情</p>
+              </section>
+              <template v-else-if="state.admin.taskProjectDetail.project">
+                <div class="task-detail-summary">
+                  <div>
+                    <strong>{{ state.admin.taskProjectDetail.project.title }}</strong>
+                    <small>{{ state.admin.taskProjectDetail.project.theme?.name || '未分类' }} · {{ state.admin.taskProjectDetail.project.stage_label }}</small>
+                    <p>{{ shortText(state.admin.taskProjectDetail.project.summary || state.admin.taskProjectDetail.project.problem_statement, 180) }}</p>
+                  </div>
+                  <div class="button-row">
+                    <button v-if="state.admin.taskProjectDetail.project.stage !== 'active' && state.admin.taskProjectDetail.project.stage !== 'archived'" class="ghost-button" type="button" @click="updateTaskProjectStage(state.admin.taskProjectDetail.project, 'active')">进入进行中</button>
+                    <button v-if="state.admin.taskProjectDetail.project.stage !== 'paused' && state.admin.taskProjectDetail.project.stage !== 'archived'" class="ghost-button" type="button" @click="updateTaskProjectStage(state.admin.taskProjectDetail.project, 'paused')">暂停</button>
+                    <button v-if="state.admin.taskProjectDetail.project.stage !== 'archived'" class="ghost-button danger" type="button" @click="updateTaskProjectStage(state.admin.taskProjectDetail.project, 'archived')">结题归档</button>
+                  </div>
+                </div>
+
+                <section class="task-detail-section">
+                  <h3>已获批人员</h3>
+                  <div v-if="state.admin.taskProjectDetail.interactions.length" class="member-status-list task-member-list">
+                    <div v-for="group in approvedInteractionGroupsFor(state.admin.taskProjectDetail.interactions)" :key="group.label">
+                      <strong>{{ group.label }}</strong>
+                      <span v-for="item in group.items" :key="item.type + '-' + item.id">
+                        <strong>{{ item.user.uid }}</strong>
+                        <small>{{ item.subtype_label }} · {{ item.status_label }}</small>
+                      </span>
+                    </div>
+                  </div>
+                  <p v-else>暂无已获批人员。</p>
+                </section>
+
+                <section class="task-detail-section">
+                  <h3>已提交结果</h3>
+                  <div v-if="state.admin.taskProjectDetail.contributions.length" class="admin-table contribution-review-table">
+                    <div class="admin-table-head"><span>结果</span><span>提交 UID</span><span>状态</span><span>评语</span><span>操作</span></div>
+                    <div class="admin-table-row" v-for="item in state.admin.taskProjectDetail.contributions" :key="item.id">
+                      <span><strong>{{ item.title }}</strong><small>{{ contributionStatusText(item) }} · {{ item.file_path || item.description || '无文件路径' }}</small></span>
+                      <span>{{ item.user.uid }}</span>
+                      <span>{{ item.status_label }}</span>
+                      <span><textarea v-model="state.admin.taskProjectDetail.reviewDrafts[item.id].review_comment" placeholder="填写审核评语"></textarea></span>
+                      <span class="button-row">
+                        <button class="ghost-button" type="button" @click="reviewContribution(item, 'approved')">通过</button>
+                        <button v-if="item.result_type === 'final'" class="ghost-button" type="button" @click="reviewContribution(item, 'approved', { closeProject: true })">通过并结题</button>
+                        <button class="ghost-button danger" type="button" @click="reviewContribution(item, 'rejected')">拒绝</button>
+                      </span>
+                    </div>
+                  </div>
+                  <p v-else>暂无任务结果记录。</p>
+                </section>
+              </template>
+            </div>
+          </section>
+        </div>
+
+        <div v-if="state.confirmDialog.open" class="confirm-modal-backdrop" @click.self="resolveConfirmDialog(false)">
+          <section class="confirm-modal" :class="'confirm-modal--' + state.confirmDialog.tone" role="dialog" aria-modal="true" aria-label="确认操作">
+            <h2>{{ state.confirmDialog.title }}</h2>
+            <p>{{ state.confirmDialog.message }}</p>
+            <div class="button-row">
+              <button class="ghost-button" type="button" @click="resolveConfirmDialog(false)">{{ state.confirmDialog.cancelText }}</button>
+              <button class="primary-button" type="button" @click="resolveConfirmDialog(true)">{{ state.confirmDialog.confirmText }}</button>
+            </div>
+          </section>
+        </div>
+
         <div v-if="state.preview.open" class="project-modal-backdrop" @click.self="closeProjectPreview">
           <section class="project-modal" :class="{ maximized: state.preview.maximized }" role="dialog" aria-modal="true">
             <div v-if="state.toast" class="toast modal-toast">{{ state.toast }}</div>
@@ -3034,7 +3799,7 @@ const App = {
                   <div class="score-panel">
                     <strong>{{ displayScore(state.currentProject.composite_score) }}</strong>
                     <span>综合评分</span>
-                    <button class="primary-button follow-button" :class="{ active: isProjectFollowing(state.currentProject) }" type="button" @click="toggleFollow(state.currentProject)">
+                    <button v-if="shouldShowFollowButton(state.currentProject)" class="primary-button follow-button" :class="{ active: isProjectFollowing(state.currentProject) }" type="button" @click="toggleFollow(state.currentProject)">
                       {{ isProjectFollowing(state.currentProject) ? '已收藏' : '收藏课题' }}
                     </button>
                   </div>
@@ -3099,20 +3864,23 @@ const App = {
                   </article>
                   <aside class="side-panel">
                     <h2>参与操作</h2>
-                    <form class="stack-form" @submit.prevent="submitInterest">
-                      <select v-model="state.forms.interest.role">
-                        <option v-for="role in state.meta.participation_roles" :key="role.value" :value="role.value">{{ role.label }}</option>
-                      </select>
-                      <input v-model.number="state.forms.interest.available_hours_per_week" type="number" min="0" placeholder="每周可投入小时" />
-                      <textarea v-model="state.forms.interest.message" placeholder="补充说明"></textarea>
-                      <button class="primary-button" type="submit">申请参与</button>
-                    </form>
+                    <template v-if="canRecruitProject(state.currentProject)">
+                      <form class="stack-form" @submit.prevent="submitInterest">
+                        <select v-model="state.forms.interest.role">
+                          <option v-for="role in state.meta.participation_roles" :key="role.value" :value="role.value">{{ role.label }}</option>
+                        </select>
+                        <input v-model.number="state.forms.interest.available_hours_per_week" type="number" min="0" placeholder="每周可投入小时" />
+                        <textarea v-model="state.forms.interest.message" placeholder="补充说明"></textarea>
+                        <button class="primary-button" type="submit">申请参与</button>
+                      </form>
+                    </template>
+                    <p v-else>当前阶段不接受新的参与、认领或资助意向。</p>
                     <form class="stack-form compact-form" @submit.prevent="submitScore">
                       <input v-model.number="state.forms.score.score" type="number" min="1" max="10" />
                       <input v-model="state.forms.score.comment" type="text" placeholder="评分备注" />
                       <button class="ghost-button" type="submit">提交评分</button>
                     </form>
-                    <div class="button-row">
+                    <div v-if="canRecruitProject(state.currentProject)" class="button-row">
                       <button class="ghost-button" type="button" @click="submitClaim">认领意向</button>
                       <button class="ghost-button" type="button" @click="submitSponsor">资助意向</button>
                     </div>
@@ -3179,6 +3947,7 @@ function emptyContributionForm(task = null, project = null) {
     project_id: project?.id || task?.project?.id || "",
     task_id: task?.id || "",
     title: task ? `${task.title} 交付` : "",
+    result_type: "stage",
     description: "",
     file_path: ""
   };
@@ -3208,29 +3977,33 @@ function emptyProjectForm() {
     problem_statement: "",
     research_goal: "",
     technical_route: "",
-    data_requirements: "{}",
-    evaluation_metrics: "[]",
-    expected_outputs: "[]",
+    data_type: "",
+    minimum_cases: "",
+    data_source: "",
+    privacy: "",
+    evaluation_metrics: "",
+    expected_outputs: "",
     compliance_notes: "",
     body_markdown: "",
-    stage: "open_recruiting",
+    stage: "draft",
     tags: "",
     llm_score: "",
     community_score: "",
     composite_score: "",
     recommended_journal: "",
     needed_roles: "",
-    score_dimensions: "{}",
+    score_dimensions: "",
     source_md_path: "",
     source_pdf_path: "",
     page_path: "",
-    documents: "[]",
+    documents: "",
     has_pdf: false,
-    is_public: true
+    is_public: false
   };
 }
 
 function projectToForm(project) {
+  const requirements = project.data_requirements || {};
   return {
     id: project.id,
     topic_id: project.topic_id || "",
@@ -3241,9 +4014,12 @@ function projectToForm(project) {
     problem_statement: project.problem_statement || "",
     research_goal: project.research_goal || "",
     technical_route: project.technical_route || "",
-    data_requirements: JSON.stringify(project.data_requirements || {}, null, 2),
-    evaluation_metrics: JSON.stringify(project.evaluation_metrics || [], null, 2),
-    expected_outputs: JSON.stringify(project.expected_outputs || [], null, 2),
+    data_type: requirements.data_type || (Array.isArray(requirements.modalities) ? requirements.modalities.join("，") : ""),
+    minimum_cases: requirements.minimum_cases ?? "",
+    data_source: requirements.data_source || requirements.source || "",
+    privacy: requirements.privacy || "",
+    evaluation_metrics: formatMultilineList(project.evaluation_metrics || []),
+    expected_outputs: formatMultilineList(project.expected_outputs || []),
     compliance_notes: project.compliance_notes || "",
     body_markdown: project.body_markdown || "",
     stage: project.stage || "open_recruiting",
@@ -3253,11 +4029,11 @@ function projectToForm(project) {
     composite_score: project.composite_score ?? "",
     recommended_journal: project.recommended_journal || "",
     needed_roles: (project.needed_roles || []).join("，"),
-    score_dimensions: JSON.stringify(project.score_dimensions || {}, null, 2),
+    score_dimensions: formatScoreDimensionLines(project.score_dimensions || {}),
     source_md_path: project.source_md_path || "",
     source_pdf_path: project.source_pdf_path || "",
     page_path: project.page_path || "",
-    documents: JSON.stringify(project.documents || [], null, 2),
+    documents: formatDocumentLines(project.documents || []),
     has_pdf: Boolean(project.has_pdf),
     is_public: Boolean(project.is_public)
   };
@@ -3266,16 +4042,16 @@ function projectToForm(project) {
 function projectFormPayload(form) {
   return {
     topic_id: form.topic_id.trim(),
-    theme: form.theme || "未分类",
+    theme: form.theme,
     project_no: optionalNumber(form.project_no),
     title: form.title.trim(),
     summary: form.summary,
     problem_statement: form.problem_statement,
     research_goal: form.research_goal,
     technical_route: form.technical_route,
-    data_requirements: parseJsonOrFallback(form.data_requirements, {}),
-    evaluation_metrics: parseJsonOrFallback(form.evaluation_metrics, []),
-    expected_outputs: parseJsonOrFallback(form.expected_outputs, []),
+    data_requirements: dataRequirementsPayload(form),
+    evaluation_metrics: parseMultilineList(form.evaluation_metrics),
+    expected_outputs: parseMultilineList(form.expected_outputs),
     compliance_notes: form.compliance_notes,
     body_markdown: form.body_markdown,
     stage: form.stage,
@@ -3285,11 +4061,11 @@ function projectFormPayload(form) {
     composite_score: optionalNumber(form.composite_score),
     recommended_journal: form.recommended_journal,
     needed_roles: parseListInput(form.needed_roles),
-    score_dimensions: parseJsonOrFallback(form.score_dimensions, {}),
+    score_dimensions: scoreDimensionsPayload(form.score_dimensions),
     source_md_path: form.source_md_path,
     source_pdf_path: form.source_pdf_path,
     page_path: form.page_path,
-    documents: parseJsonOrFallback(form.documents, []),
+    documents: parseDocumentLines(form.documents),
     has_pdf: Boolean(form.has_pdf),
     is_public: Boolean(form.is_public)
   };
@@ -3407,6 +4183,147 @@ function parseJsonOrFallback(text, fallback) {
   }
 }
 
+function draftProjectPayload(payload) {
+  return {
+    ...payload,
+    stage: "draft",
+    is_public: false
+  };
+}
+
+function publishProjectPayload(payload) {
+  return {
+    ...payload,
+    stage: payload.stage && payload.stage !== "draft" ? payload.stage : "open_recruiting",
+    is_public: true
+  };
+}
+
+function uniqueSlugHint(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+async function findMarkdownImportDuplicates(payload) {
+  const queries = [];
+  if (payload.topic_id) queries.push({ topic_id: payload.topic_id, page_size: 3 });
+  if (payload.source_md_path) queries.push({ source_md_path: payload.source_md_path, page_size: 3 });
+  if (payload.content_hash) queries.push({ content_hash: payload.content_hash, page_size: 3 });
+  if (payload.title) queries.push({ q: payload.title, page_size: 3 });
+  const byId = new Map();
+  for (const query of queries) {
+    const data = await api.adminProjects(query);
+    for (const project of data.results || []) {
+      byId.set(project.id, project);
+    }
+  }
+  return Array.from(byId.values());
+}
+
+function duplicateWarningsForImport(payload, duplicates) {
+  const warnings = [];
+  const topicMatch = duplicates.find((project) => project.topic_id === payload.topic_id);
+  if (topicMatch) {
+    warnings.push("同一课题ID将更新已有课题");
+    if (topicMatch.is_public || topicMatch.stage !== "draft") {
+      warnings.push("已有课题将更新为草稿并暂不公开");
+    }
+  }
+  if (payload.source_md_path && duplicates.some((project) => project.source_md_path === payload.source_md_path && project.topic_id !== payload.topic_id)) {
+    warnings.push("来源路径可能重复");
+  }
+  if (payload.content_hash && duplicates.some((project) => project.content_hash === payload.content_hash && project.topic_id !== payload.topic_id)) {
+    warnings.push("正文内容可能重复");
+  }
+  if (payload.title && duplicates.some((project) => project.title === payload.title && project.topic_id !== payload.topic_id)) {
+    warnings.push("标题可能重复");
+  }
+  return warnings;
+}
+
+async function sha256Hex(text) {
+  if (!globalThis.crypto?.subtle || typeof TextEncoder === "undefined") return "";
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(text || "")));
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function parseMultilineList(text) {
+  return String(text || "")
+    .split("\n")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function formatMultilineList(items) {
+  if (!Array.isArray(items)) return "";
+  return items
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function scoreDimensionsPayload(text) {
+  const entries = String(text || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [name = "", rawValue = ""] = line.split("|").map((part) => part.trim());
+      if (!name) return null;
+      const number = optionalNumber(rawValue);
+      return [name, number ?? rawValue];
+    })
+    .filter(Boolean);
+  return Object.fromEntries(entries);
+}
+
+function formatScoreDimensionLines(dimensions) {
+  if (!dimensions || typeof dimensions !== "object" || Array.isArray(dimensions)) return "";
+  return Object.entries(dimensions)
+    .map(([name, value]) => `${name}|${value ?? ""}`)
+    .filter((line) => line.replace(/\|/g, "").trim())
+    .join("\n");
+}
+
+function dataRequirementsPayload(form) {
+  const payload = {
+    data_type: String(form.data_type || "").trim(),
+    minimum_cases: optionalNumber(form.minimum_cases),
+    data_source: String(form.data_source || "").trim(),
+    privacy: String(form.privacy || "").trim()
+  };
+  return Object.fromEntries(Object.entries(payload).filter(([, value]) => value !== "" && value !== null));
+}
+
+function parseDocumentLines(text) {
+  return String(text || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [docType = "other", title = "", path = ""] = line.split("|").map((part) => part.trim());
+      return {
+        doc_type: docType || "other",
+        title,
+        path
+      };
+    })
+    .filter((item) => item.title || item.path);
+}
+
+function formatDocumentLines(documents) {
+  if (!Array.isArray(documents)) return "";
+  return documents
+    .map((document) => [document.doc_type || "other", document.title || "", document.path || ""].join("|"))
+    .filter((line) => line.replace(/\|/g, "").trim())
+    .join("\n");
+}
+
 function parseListInput(text) {
   return String(text || "")
     .split(/[,，\n]/)
@@ -3426,7 +4343,7 @@ function roleCardsFor(capabilities) {
   if (capabilities.technical_delivery) cards.push({ title: "技术实现", body: "可参与模型、RAG、Agent、多模态和工程实现。" });
   if (capabilities.statistical_design) cards.push({ title: "统计设计", body: "可参与样本量、终点、统计方案和结果解释。" });
   if (capabilities.funding_support) cards.push({ title: "资源支持", body: "可表达经费、算力、标注预算或专家咨询支持意向。" });
-  if (capabilities.manage_projects) cards.push({ title: "内容管理", body: "可维护主题、课题、文件空间和 JSON 导入。" });
+  if (capabilities.manage_projects) cards.push({ title: "内容管理", body: "可维护主题、课题、文件空间和 Markdown 模板导入。" });
   if (!cards.length) cards.push({ title: "开放协作", body: "可关注、评分、申请参与和认领感兴趣的课题。" });
   return cards;
 }

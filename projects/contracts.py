@@ -28,34 +28,65 @@ PROJECT_FIELD_CONTRACT = [
 ]
 
 
-PROJECT_JSON_EXAMPLE = {
-    "topic_id": "DME-RAG-001",
-    "theme": "糖尿病黄斑水肿",
-    "project_no": 1,
-    "title": "基于病例随访证据的抗 VEGF 治疗决策 RAG",
-    "summary": "围绕 DME 患者随访记录、影像和指南证据，构建可解释的治疗建议检索增强流程。",
-    "problem_statement": "抗 VEGF 治疗方案在真实随访中需要结合影像、视力和既往响应进行动态判断。",
-    "research_goal": "形成一个可复核的医学 AI 课题方案，并验证 RAG 对随访决策一致性的提升。",
-    "technical_route": "指南证据整理 -> 病例要素抽取 -> 向量检索 -> 医生审核 -> 结果评估。",
-    "data_requirements": {
-        "modalities": ["结构化随访表", "OCT 摘要", "指南文本"],
-        "minimum_cases": 50,
-        "privacy": "仅允许脱敏或公开样例数据"
-    },
-    "evaluation_metrics": ["医学一致性", "证据可追溯性", "医生审核通过率"],
-    "expected_outputs": ["课题方案", "实验报告", "论文初稿", "可复现实验脚本"],
-    "compliance_notes": "不得上传可识别患者身份的数据。",
-    "stage": "open_recruiting",
-    "tags": ["RAG", "眼科", "真实世界研究"],
-    "llm_score": 8.6,
-    "recommended_journal": "Journal of Medical Internet Research",
-    "needed_roles": ["医生", "学生", "Leader", "AI工程师"],
-    "documents": [
-        {"doc_type": "markdown", "title": "课题原文", "path": "topics/DME-RAG-001.md"},
-        {"doc_type": "pdf", "title": "参考 PDF", "path": "topics/DME-RAG-001.pdf"}
-    ],
-    "is_public": True
-}
+PROJECT_MARKDOWN_TEMPLATE = """# 课题标题
+
+## 基本信息
+- 模板版本：v1
+- 课题ID：
+- 主题：
+- 主题内编号：
+- 阶段：开放招募
+- 是否公开：否
+- 标签：
+- 需要角色：
+- 推荐期刊：
+- 初始评分：
+- 综合评分：
+
+## 摘要
+
+## 科学问题
+
+## 研究目标
+
+## 技术路线
+
+## 数据需求
+- 数据类型：
+- 最小样本量：
+- 数据来源：
+- 隐私要求：
+
+## 评价指标
+-
+
+## 预期成果
+-
+
+## 合规说明
+
+## 前沿依据
+
+## 分析单位和任务定义
+
+## 金标准或终点设计
+
+## 方法和系统框架
+
+## 基线方法
+
+## 实验设计
+
+## MVP
+
+## Go/No-Go
+
+## 可防守主张和不可主张
+
+## 预期图表
+
+## 质量评分和风险
+"""
 
 
 DEFAULT_THEME_FILE_SPACE = {

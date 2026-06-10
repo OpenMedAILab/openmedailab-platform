@@ -10,12 +10,12 @@ from interactions.forms import ProjectClaimIntentForm, ProjectInterestForm, Proj
 from interactions.models import ProjectClaimIntent, ProjectFollow, ProjectInterest, ProjectScore, SponsorIntent
 from interactions.services import project_stat_annotations, recalculate_project_community_score
 
-from .models import Project, ProjectStage, Tag, Theme
+from .models import FOLLOWABLE_PROJECT_STAGES, PUBLIC_PROJECT_STAGES, RECRUITING_PROJECT_STAGES, Project, ProjectStage, Tag, Theme
 
 
 def home(request):
     stats = {
-        "project_count": Project.objects.filter(is_public=True).count(),
+        "project_count": Project.objects.filter(is_public=True, stage__in=PUBLIC_PROJECT_STAGES).count(),
         "theme_count": Theme.objects.filter(is_active=True).count(),
         "user_count": User.objects.count(),
         "follow_count": ProjectFollow.objects.count(),
@@ -23,12 +23,16 @@ def home(request):
         "score_count": ProjectScore.objects.count(),
     }
     themes = Theme.objects.filter(is_active=True).annotate(project_count=Count("projects")).order_by("sort_order", "name")[:12]
-    hot_projects = project_stat_annotations(Project.objects.filter(is_public=True)).order_by("-follow_count", "-interest_count", "-composite_score")[:8]
+    hot_projects = project_stat_annotations(Project.objects.filter(is_public=True, stage__in=PUBLIC_PROJECT_STAGES)).order_by(
+        "-follow_count", "-interest_count", "-composite_score"
+    )[:8]
     return render(request, "projects/home.html", {"stats": stats, "themes": themes, "hot_projects": hot_projects})
 
 
 def project_list(request):
-    projects = project_stat_annotations(Project.objects.filter(is_public=True).select_related("theme").prefetch_related("tags"))
+    projects = project_stat_annotations(
+        Project.objects.filter(is_public=True, stage__in=PUBLIC_PROJECT_STAGES).select_related("theme").prefetch_related("tags")
+    )
     q = request.GET.get("q", "").strip()
     theme = request.GET.get("theme", "").strip()
     tag = request.GET.get("tag", "").strip()
@@ -73,7 +77,9 @@ def project_list(request):
 
 def project_detail(request, pk):
     project = get_object_or_404(
-        project_stat_annotations(Project.objects.select_related("theme").prefetch_related("tags", "documents")).filter(is_public=True),
+        project_stat_annotations(Project.objects.select_related("theme").prefetch_related("tags", "documents")).filter(
+            is_public=True, stage__in=PUBLIC_PROJECT_STAGES
+        ),
         pk=pk,
     )
     user_state = {}
@@ -118,7 +124,7 @@ def _project_redirect(project):
 
 @login_required
 def follow_project(request, pk):
-    project = get_object_or_404(Project, pk=pk, is_public=True)
+    project = get_object_or_404(Project, pk=pk, is_public=True, stage__in=FOLLOWABLE_PROJECT_STAGES)
     ProjectFollow.objects.get_or_create(user=request.user, project=project)
     messages.success(request, "已关注该课题。")
     return _project_redirect(project)
@@ -126,7 +132,7 @@ def follow_project(request, pk):
 
 @login_required
 def unfollow_project(request, pk):
-    project = get_object_or_404(Project, pk=pk, is_public=True)
+    project = get_object_or_404(Project, pk=pk)
     ProjectFollow.objects.filter(user=request.user, project=project).delete()
     messages.success(request, "已取消关注。")
     return _project_redirect(project)
@@ -134,7 +140,7 @@ def unfollow_project(request, pk):
 
 @login_required
 def score_project(request, pk):
-    project = get_object_or_404(Project, pk=pk, is_public=True)
+    project = get_object_or_404(Project, pk=pk, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
     form = ProjectScoreForm(request.POST)
     if form.is_valid():
         ProjectScore.objects.update_or_create(
@@ -151,7 +157,10 @@ def score_project(request, pk):
 
 @login_required
 def interest_project(request, pk):
-    project = get_object_or_404(Project, pk=pk, is_public=True)
+    project = get_object_or_404(Project, pk=pk, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
+    if project.stage not in RECRUITING_PROJECT_STAGES:
+        messages.error(request, "当前课题不在招募阶段。")
+        return _project_redirect(project)
     form = ProjectInterestForm(request.POST)
     if form.is_valid():
         ProjectInterest.objects.update_or_create(
@@ -173,7 +182,10 @@ def interest_project(request, pk):
 
 @login_required
 def claim_project(request, pk):
-    project = get_object_or_404(Project, pk=pk, is_public=True)
+    project = get_object_or_404(Project, pk=pk, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
+    if project.stage not in RECRUITING_PROJECT_STAGES:
+        messages.error(request, "当前课题不在招募阶段。")
+        return _project_redirect(project)
     form = ProjectClaimIntentForm(request.POST)
     if form.is_valid():
         ProjectClaimIntent.objects.update_or_create(
@@ -190,7 +202,10 @@ def claim_project(request, pk):
 
 @login_required
 def sponsor_project(request, pk):
-    project = get_object_or_404(Project, pk=pk, is_public=True)
+    project = get_object_or_404(Project, pk=pk, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
+    if project.stage not in RECRUITING_PROJECT_STAGES:
+        messages.error(request, "当前课题不在招募阶段。")
+        return _project_redirect(project)
     form = SponsorIntentForm(request.POST)
     if form.is_valid():
         SponsorIntent.objects.update_or_create(

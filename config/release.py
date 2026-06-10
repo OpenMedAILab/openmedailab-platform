@@ -16,10 +16,11 @@ APP_VERSION = read_app_version()
 
 
 def release_payload():
+    app_version = read_app_version()
     versions = parse_changelog()
-    latest = versions[0] if versions else empty_release(APP_VERSION)
+    latest = versions[0] if versions else empty_release(app_version)
     return {
-        "version": APP_VERSION,
+        "version": app_version,
         "latest": latest,
         "history": versions[1:],
     }
