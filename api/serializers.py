@@ -185,10 +185,8 @@ def public_project_detail_payload(project):
     payload = project_summary_payload(project)
     payload.update(
         {
-            "body_markdown": project.body_markdown,
             "score_dimensions": project.score_dimensions,
             "team_status": project.team_status,
-            "documents": [public_document_payload(document) for document in project.documents.all()],
         }
     )
     return payload

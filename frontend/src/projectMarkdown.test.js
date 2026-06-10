@@ -20,7 +20,7 @@ test("parseProjectMarkdown maps v1 template sections to project payload", () => 
 - 综合评分：8.6
 
 ## 摘要
-用于本地浏览器验收的主题文件域记录。
+用于本地浏览器验收的主题文件空间记录。
 
 ## 科学问题
 缺少统一的数据字典。

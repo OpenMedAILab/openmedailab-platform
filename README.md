@@ -219,6 +219,7 @@ ALLOWED_HOSTS=your-domain.com,server-ip
 DATABASE_URL=sqlite:////opt/openmedailab/db.sqlite3
 STATIC_ROOT=/opt/openmedailab/staticfiles
 MEDIA_ROOT=/opt/openmedailab/media
+OPENMEDAILAB_FILE_SPACE_ROOT=/opt/openmedailab/media/theme-file-space
 ```
 
 Deployment command shape:

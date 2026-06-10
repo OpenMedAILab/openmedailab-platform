@@ -19,11 +19,6 @@ PROJECT_FIELD_CONTRACT = [
     {"name": "recommended_journal", "label": "推荐期刊", "type": "string", "required": False, "source": "project.recommended_journal"},
     {"name": "needed_roles", "label": "需要角色", "type": "array", "required": False, "source": "project.needed_roles"},
     {"name": "score_dimensions", "label": "评分维度", "type": "object", "required": False, "source": "project.score_dimensions"},
-    {"name": "source_md_path", "label": "Markdown 路径", "type": "string", "required": False, "source": "project.source_md_path"},
-    {"name": "source_pdf_path", "label": "PDF 路径", "type": "string", "required": False, "source": "project.source_pdf_path"},
-    {"name": "page_path", "label": "公开页路径", "type": "string", "required": False, "source": "project.page_path"},
-    {"name": "documents", "label": "文件", "type": "array", "required": False, "source": "ProjectDocument"},
-    {"name": "has_pdf", "label": "是否有 PDF", "type": "boolean", "required": False, "source": "project.has_pdf"},
     {"name": "is_public", "label": "是否公开", "type": "boolean", "required": False, "source": "project.is_public"},
 ]
 
@@ -91,7 +86,7 @@ PROJECT_MARKDOWN_TEMPLATE = """# 课题标题
 
 DEFAULT_THEME_FILE_SPACE = {
     "access_level": "restricted_metadata",
-    "storage_policy": "主题文件域只登记与该主题相关的数据资产元信息，例如公开数据集链接、数据字典、标注规范、伦理合规材料和模型实验资产；不登记单个课题原文、PDF 或公开页面。",
+    "storage_policy": "主题文件空间只登记与该主题相关的数据资产元信息。",
     "allowed_file_types": ["dataset", "data_dictionary", "annotation_guide", "ethics", "model_artifact", "dataset_meta", "link", "other"],
     "sections": ["数据集文件", "数据字典", "标注规范", "伦理合规材料", "模型与实验资产"],
 }

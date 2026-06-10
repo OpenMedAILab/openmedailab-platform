@@ -63,9 +63,11 @@ test("small-screen tab and chip rows wrap instead of hiding content horizontally
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.theme-chip,\s*\.admin-tabs button\s*\{[\s\S]*?flex:\s*0 1 auto;/);
 });
 
-test("homepage hero title uses the campaign copy with hover and scroll motion guards", () => {
-  assert.match(mainSource, /让医学问题，/);
-  assert.match(mainSource, /等到它的盖世英雄/);
+test("homepage hero title uses minimal copy with hover and scroll motion guards", () => {
+  assert.match(mainSource, /大道无言/);
+  assert.doesNotMatch(mainSource, /让医学问题，/);
+  assert.doesNotMatch(mainSource, /等到它的盖世英雄/);
+  assert.doesNotMatch(mainSource, /真实临床场景，开放协作验证/);
   assert.match(mainSource, /const heroTitleStyle = computed/);
   assert.match(mainSource, /function updateHeroTitleScrollProgress\(\)/);
   assert.match(mainSource, /"--hero-title-opacity": \(1 - progress \* 0\.72\)\.toFixed\(3\)/);
@@ -73,6 +75,22 @@ test("homepage hero title uses the campaign copy with hover and scroll motion gu
   assert.match(stylesSource, /\.library-hero \.hero-title:hover\s*\{[\s\S]*?scale\(1\.022\)/);
   assert.match(stylesSource, /\.library-hero \.hero-title\s*\{[\s\S]*?mask-image:\s*linear-gradient/);
   assert.match(stylesSource, /@media \(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?\.library-hero \.hero-title\s*\{[\s\S]*?transition:\s*none;/);
+});
+
+test("modal overlays lock the page scroll behind dialogs", () => {
+  assert.match(mainSource, /const modalOpen = computed/);
+  assert.match(mainSource, /document\.body\.classList\.toggle\("modal-open", open\)/);
+  assert.match(stylesSource, /body\.modal-open\s*\{[\s\S]*?overflow:\s*hidden;/);
+});
+
+test("admin file space management exposes a file-manager workflow", () => {
+  assert.match(mainSource, /文件空间管理/);
+  assert.match(mainSource, /state\.admin\.fileManager/);
+  assert.match(mainSource, /handleFileSpaceUpload/);
+  assert.match(mainSource, /webkitdirectory directory multiple/);
+  assert.match(stylesSource, /\.file-manager-layout\s*\{/);
+  assert.match(apiSource, /adminFileSpace/);
+  assert.match(apiSource, /adminUploadFileSpaceFiles/);
 });
 
 test("homepage search toolbar is lifted and visually emphasized", () => {
@@ -238,7 +256,9 @@ test("admin project form uses structured project inputs instead of json textarea
   assert.match(mainSource, /最小样本量/);
   assert.match(mainSource, /评价指标（每行一条）/);
   assert.match(mainSource, /预期成果（每行一条）/);
-  assert.match(mainSource, /文件列表（类型\\|标题\\|路径，每行一条）/);
+  assert.doesNotMatch(mainSource, /文件列表（类型\\|标题\\|路径，每行一条）/);
+  assert.doesNotMatch(mainSource, /Markdown 路径/);
+  assert.doesNotMatch(mainSource, /正文 Markdown/);
   assert.match(mainSource, /评分维度（维度\\|分数，每行一条）/);
 });
 

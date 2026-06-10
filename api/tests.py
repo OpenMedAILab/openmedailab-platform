@@ -1,9 +1,12 @@
 import json
 import importlib.util
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.conf import settings
 from django.test import Client, TestCase, override_settings
 
@@ -69,7 +72,8 @@ class ApiTests(TestCase):
         self.assertEqual(detail_response.status_code, 200)
         detail_payload = detail_response.json()
         self.assertEqual(detail_payload["data"]["team_status"]["basic_ready"], False)
-        self.assertEqual(detail_payload["data"]["body_markdown"], "## 背景\n测试正文")
+        self.assertNotIn("body_markdown", detail_payload["data"])
+        self.assertNotIn("documents", detail_payload["data"])
         self.assertEqual(detail_payload["data"]["problem_statement"], "随访证据分散，难以复核。")
         self.assertEqual(detail_payload["data"]["data_requirements"]["modalities"], ["随访表", "OCT 摘要"])
 
@@ -198,6 +202,10 @@ class ApiTests(TestCase):
         self.assertIn("/api/admin/users/{uid}/reset-password/", schema["paths"])
         self.assertNotIn("/api/admin/projects/import-json/", schema["paths"])
         self.assertIn("/api/admin/theme-files/", schema["paths"])
+        self.assertIn("/api/admin/file-space/", schema["paths"])
+        self.assertIn("/api/admin/file-space/file/", schema["paths"])
+        self.assertIn("/api/admin/file-space/upload/", schema["paths"])
+        self.assertIn("/api/admin/themes/{theme_id}/file-space-root/", schema["paths"])
         self.assertIn("/api/admin/projects/{project_id}/", schema["paths"])
         self.assertIn("/api/projects/{project_id}/status-card/", schema["paths"])
         self.assertIn("/api/admin/overview/", schema["paths"])
@@ -217,6 +225,9 @@ class ApiTests(TestCase):
         contract_fields = [field["name"] for field in contract_data["fields"]]
         self.assertIn("problem_statement", contract_fields)
         self.assertIn("data_requirements", contract_fields)
+        self.assertNotIn("documents", contract_fields)
+        self.assertNotIn("source_md_path", contract_fields)
+        self.assertNotIn("source_pdf_path", contract_fields)
         self.assertIn("markdown_template", contract_data)
         self.assertIn("模板版本：v1", contract_data["markdown_template"])
         self.assertNotIn("example", contract_data)
@@ -277,6 +288,61 @@ class ApiTests(TestCase):
         self.assertEqual(payload["sections"][0]["name"], "数据集文件")
         self.assertEqual(payload["sections"][0]["files"][0]["title"], "抗 VEGF 脱敏随访样例索引")
         self.assertNotIn("documents_by_type", payload)
+
+    def test_admin_file_space_manager_is_limited_to_configured_root(self):
+        self.login_platform_admin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            media_root = Path(tmpdir) / "media"
+            file_space_root = media_root / "theme-file-space"
+            with override_settings(MEDIA_ROOT=media_root, MEDIA_URL="/media/", OPENMEDAILAB_FILE_SPACE_ROOT=file_space_root):
+                outside_response = self.patch_json(
+                    f"/api/admin/themes/{self.theme.pk}/file-space-root/",
+                    {"server_directory": str(Path(tmpdir).parent)},
+                )
+                self.assertEqual(outside_response.status_code, 422)
+
+                root_response = self.patch_json(
+                    f"/api/admin/themes/{self.theme.pk}/file-space-root/",
+                    {"server_directory": "antivegf-data"},
+                )
+                self.assertEqual(root_response.status_code, 200)
+                self.assertTrue((file_space_root / "antivegf-data").exists())
+
+                directory_response = self.post_json(
+                    "/api/admin/file-space/directories/",
+                    {"theme_id": self.theme.pk, "path": "", "name": "datasets"},
+                )
+                self.assertEqual(directory_response.status_code, 201)
+
+                file_response = self.post_json(
+                    "/api/admin/file-space/files/",
+                    {"theme_id": self.theme.pk, "path": "datasets", "name": "README.md", "content": "脱敏数据说明"},
+                )
+                self.assertEqual(file_response.status_code, 201)
+                self.assertTrue((file_space_root / "antivegf-data" / "datasets" / "README.md").exists())
+                self.assertTrue(ThemeFile.objects.filter(theme=self.theme, path="/media/theme-file-space/antivegf-data/datasets/README.md").exists())
+
+                read_response = self.client.get(f"/api/admin/file-space/file/?theme_id={self.theme.pk}&path=datasets/README.md")
+                self.assertEqual(read_response.status_code, 200)
+                self.assertEqual(read_response.json()["data"]["content"], "脱敏数据说明")
+
+                upload_response = self.client.post(
+                    "/api/admin/file-space/upload/",
+                    data={
+                        "theme_id": str(self.theme.pk),
+                        "path": "datasets",
+                        "relative_paths": ["batch/sample.csv"],
+                        "files": [SimpleUploadedFile("sample.csv", b"id,value\n1,ok\n", content_type="text/csv")],
+                    },
+                )
+                self.assertEqual(upload_response.status_code, 201)
+                self.assertTrue((file_space_root / "antivegf-data" / "datasets" / "batch" / "sample.csv").exists())
+
+                list_response = self.client.get(f"/api/admin/file-space/?theme_id={self.theme.pk}&path=datasets")
+                self.assertEqual(list_response.status_code, 200)
+                names = {entry["name"] for entry in list_response.json()["data"]["entries"]}
+                self.assertIn("README.md", names)
+                self.assertIn("batch", names)
 
     def test_protected_post_uses_csrf_envelope_when_enforced(self):
         user = User.objects.create_user(username="csrfuser", password="StrongPass12345")
@@ -344,7 +410,7 @@ class ApiTests(TestCase):
                 "file_type": "dataset_meta",
                 "title": "脱敏数据说明",
                 "path": "spaces/retina-imaging/data.json",
-                "description": "主题级文件域记录",
+                "description": "主题级文件空间记录",
             },
         )
         self.assertEqual(file_response.status_code, 201)
@@ -676,7 +742,7 @@ class ApiTests(TestCase):
             {
                 "project_id": self.project.pk,
                 "title": "整理数据字典",
-                "description": "梳理主题文件域的数据字段。",
+                "description": "梳理主题文件空间的数据字段。",
                 "task_type": "data_dictionary",
                 "required_role": "学生",
                 "difficulty": 2,
@@ -726,7 +792,7 @@ class ApiTests(TestCase):
         self.client.force_login(admin)
         review_response = self.patch_json(
             f"/api/admin/contributions/{contribution_id}/review/",
-            {"status": "approved", "review_comment": "可进入主题文件域", "grant_reward": True},
+            {"status": "approved", "review_comment": "可进入主题文件空间", "grant_reward": True},
         )
 
         self.assertEqual(review_response.status_code, 200)

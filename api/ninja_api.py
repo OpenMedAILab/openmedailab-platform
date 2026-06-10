@@ -1,7 +1,11 @@
+import mimetypes
+import shutil
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Optional
 
+from django.conf import settings
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.forms import SetPasswordForm
 from django.contrib.auth.models import User
@@ -217,6 +221,35 @@ class ThemeFileWriteRequest(Schema):
     path: Optional[str] = None
     sort_order: Optional[int] = 0
     is_active: Optional[bool] = True
+
+
+class FileSpaceDirectoryRequest(Schema):
+    theme_id: int
+    path: Optional[str] = ""
+    name: str
+
+
+class FileSpaceFileRequest(Schema):
+    theme_id: int
+    path: Optional[str] = ""
+    name: str
+    content: Optional[str] = ""
+
+
+class FileSpaceUpdateRequest(Schema):
+    theme_id: int
+    path: str
+    new_name: Optional[str] = None
+    content: Optional[str] = None
+
+
+class FileSpaceDeleteRequest(Schema):
+    theme_id: int
+    path: str
+
+
+class FileSpaceRootRequest(Schema):
+    server_directory: str
 
 
 class InteractionStatusRequest(Schema):
@@ -1348,6 +1381,212 @@ def admin_theme_file_delete(request, file_id: int):
     return ok(theme_file_payload(file))
 
 
+@api.get("/admin/file-space/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_file_space_list(request, theme_id: int, path: str = ""):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    theme = get_object_or_404(Theme, pk=theme_id)
+    try:
+        root = theme_file_space_root(theme)
+        directory = safe_file_space_path(theme, path, expect_parent=False)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="invalid_file_space_path")
+    if not directory.exists():
+        directory.mkdir(parents=True, exist_ok=True)
+    if not directory.is_dir():
+        return fail("Path is not a directory.", status=422, code="not_directory")
+    entries = [file_space_entry(item, root) for item in sorted(directory.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))]
+    return ok(
+        {
+            "theme": theme_payload(theme),
+            "base_root": str(file_space_base_root()),
+            "root_path": str(root),
+            "relative_path": relative_file_space_path(directory, root),
+            "breadcrumbs": file_space_breadcrumbs(directory, root),
+            "entries": entries,
+        }
+    )
+
+
+@api.get("/admin/file-space/file/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_file_space_read_file(request, theme_id: int, path: str):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    theme = get_object_or_404(Theme, pk=theme_id)
+    try:
+        root = theme_file_space_root(theme)
+        file_path = safe_file_space_path(theme, path, expect_parent=False)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="invalid_file_space_path")
+    if not file_path.exists() or not file_path.is_file():
+        raise Http404("File not found")
+    if file_path.stat().st_size > 1024 * 1024:
+        return fail("File is too large to edit online.", status=422, code="file_too_large")
+    try:
+        content = file_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return fail("Only UTF-8 text files can be edited online.", status=422, code="binary_file")
+    return ok({"entry": file_space_entry(file_path, root), "content": content})
+
+
+@api.patch("/admin/themes/{theme_id}/file-space-root/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_theme_file_space_root_update(request, theme_id: int, payload: FileSpaceRootRequest):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    theme = get_object_or_404(Theme, pk=theme_id)
+    before = theme_payload(theme)
+    raw_directory = payload.server_directory.strip()
+    try:
+        resolved = resolve_file_space_root(raw_directory, theme)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="invalid_file_space_root")
+    resolved.mkdir(parents=True, exist_ok=True)
+    file_space = dict(theme.file_space or {})
+    file_space["server_directory"] = str(resolved)
+    theme.file_space = {**DEFAULT_THEME_FILE_SPACE, **file_space}
+    theme.save(update_fields=["file_space", "updated_at"])
+    audit(request.user, "theme.file_space_root.update", "Theme", theme.id, before=before, after=theme_payload(theme))
+    return ok({"theme": theme_payload(theme), "root_path": str(resolved), "base_root": str(file_space_base_root())})
+
+
+@api.post("/admin/file-space/directories/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_file_space_create_directory(request, payload: FileSpaceDirectoryRequest):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    theme = get_object_or_404(Theme, pk=payload.theme_id)
+    name = sanitize_file_name(payload.name)
+    if not name:
+        return fail("Directory name is required.", status=422, code="validation_error")
+    try:
+        root = theme_file_space_root(theme)
+        directory = safe_file_space_path(theme, f"{payload.path or ''}/{name}", expect_parent=True)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="invalid_file_space_path")
+    directory.mkdir(parents=True, exist_ok=True)
+    audit(request.user, "file_space.directory.create", "Theme", theme.id, after={"path": relative_file_space_path(directory, root)})
+    return 201, ok({"entry": file_space_entry(directory, root)})
+
+
+@api.post("/admin/file-space/files/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_file_space_create_file(request, payload: FileSpaceFileRequest):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    theme = get_object_or_404(Theme, pk=payload.theme_id)
+    name = sanitize_file_name(payload.name)
+    if not name:
+        return fail("File name is required.", status=422, code="validation_error")
+    try:
+        root = theme_file_space_root(theme)
+        file_path = safe_file_space_path(theme, f"{payload.path or ''}/{name}", expect_parent=True)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="invalid_file_space_path")
+    if file_path.exists():
+        return fail("File already exists.", status=422, code="file_exists")
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(payload.content or "", encoding="utf-8")
+    upsert_theme_file_for_path(theme, file_path, root)
+    audit(request.user, "file_space.file.create", "Theme", theme.id, after={"path": relative_file_space_path(file_path, root)})
+    return 201, ok({"entry": file_space_entry(file_path, root)})
+
+
+@api.patch("/admin/file-space/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_file_space_update(request, payload: FileSpaceUpdateRequest):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    theme = get_object_or_404(Theme, pk=payload.theme_id)
+    try:
+        root = theme_file_space_root(theme)
+        target = safe_file_space_path(theme, payload.path, expect_parent=False)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="invalid_file_space_path")
+    if not target.exists():
+        raise Http404("File space item not found")
+    before = {"path": relative_file_space_path(target, root)}
+    if payload.content is not None:
+        if not target.is_file():
+            return fail("Only files can be edited.", status=422, code="not_file")
+        target.write_text(payload.content, encoding="utf-8")
+    if payload.new_name:
+        new_name = sanitize_file_name(payload.new_name)
+        if not new_name:
+            return fail("New name is invalid.", status=422, code="validation_error")
+        destination = safe_file_space_path(theme, f"{Path(payload.path).parent.as_posix()}/{new_name}", expect_parent=True)
+        if destination.exists() and destination != target:
+            return fail("Destination already exists.", status=422, code="file_exists")
+        target.rename(destination)
+        sync_theme_file_after_rename(theme, target, destination, root)
+        target = destination
+    elif target.is_file():
+        upsert_theme_file_for_path(theme, target, root)
+    after = {"path": relative_file_space_path(target, root)}
+    audit(request.user, "file_space.update", "Theme", theme.id, before=before, after=after)
+    return ok({"entry": file_space_entry(target, root)})
+
+
+@api.delete("/admin/file-space/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_file_space_delete(request, payload: FileSpaceDeleteRequest):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    theme = get_object_or_404(Theme, pk=payload.theme_id)
+    try:
+        root = theme_file_space_root(theme)
+        target = safe_file_space_path(theme, payload.path, expect_parent=False)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="invalid_file_space_path")
+    if not target.exists():
+        raise Http404("File space item not found")
+    before = {"path": relative_file_space_path(target, root), "type": "directory" if target.is_dir() else "file"}
+    if target.is_dir():
+        shutil.rmtree(target)
+    else:
+        target.unlink()
+        deactivate_theme_file_for_path(theme, public_file_space_path(target))
+    audit(request.user, "file_space.delete", "Theme", theme.id, before=before)
+    return ok({"deleted": True, "path": before["path"]})
+
+
+@api.post("/admin/file-space/upload/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_file_space_upload(request):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    theme_id = request.POST.get("theme_id")
+    path = request.POST.get("path", "")
+    if not theme_id:
+        return fail("theme_id is required.", status=422, code="validation_error")
+    theme = get_object_or_404(Theme, pk=theme_id)
+    files = request.FILES.getlist("files")
+    relative_paths = request.POST.getlist("relative_paths")
+    if not files:
+        return fail("No files uploaded.", status=422, code="validation_error")
+    try:
+        root = theme_file_space_root(theme)
+        directory = safe_file_space_path(theme, path, expect_parent=True)
+    except ValueError as exc:
+        return fail(str(exc), status=422, code="invalid_file_space_path")
+    directory.mkdir(parents=True, exist_ok=True)
+    saved = []
+    for index, uploaded in enumerate(files):
+        relative_name = relative_paths[index] if index < len(relative_paths) else uploaded.name
+        relative_name = safe_relative_upload_path(relative_name or uploaded.name)
+        destination = safe_child_path(directory, relative_name, root)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("wb") as output:
+            for chunk in uploaded.chunks():
+                output.write(chunk)
+        upsert_theme_file_for_path(theme, destination, root)
+        saved.append(file_space_entry(destination, root))
+    audit(request.user, "file_space.upload", "Theme", theme.id, after={"count": len(saved), "path": relative_file_space_path(directory, root)})
+    return 201, ok({"saved": saved})
+
+
 @api.get("/admin/projects/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Admin"])
 def admin_project_list(
     request,
@@ -2019,6 +2258,147 @@ def document_payload(document):
         "path": document.path,
         "content_hash": document.content_hash,
     }
+
+
+def file_space_base_root():
+    root = Path(getattr(settings, "OPENMEDAILAB_FILE_SPACE_ROOT", settings.MEDIA_ROOT / "theme-file-space"))
+    return root.expanduser().resolve()
+
+
+def resolve_file_space_root(raw_directory, theme):
+    base = file_space_base_root()
+    value = (raw_directory or "").strip() or theme.slug
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    candidate = candidate.resolve()
+    if candidate != base and base not in candidate.parents:
+        raise ValueError(f"文件空间目录必须位于 {base} 之下。")
+    return candidate
+
+
+def theme_file_space_root(theme):
+    file_space = theme.file_space if isinstance(theme.file_space, dict) else {}
+    return resolve_file_space_root(file_space.get("server_directory") or theme.slug, theme)
+
+
+def safe_file_space_path(theme, relative_path, expect_parent=False):
+    root = theme_file_space_root(theme)
+    root.mkdir(parents=True, exist_ok=True)
+    return safe_child_path(root, relative_path or "", root, expect_parent=expect_parent)
+
+
+def safe_child_path(parent, relative_path, root, expect_parent=False):
+    raw = str(relative_path or "").replace("\\", "/").strip("/")
+    if "\x00" in raw:
+        raise ValueError("文件路径不合法。")
+    candidate = (parent / raw).resolve() if raw else parent.resolve()
+    check = candidate.parent if expect_parent else candidate
+    if check != root and root not in check.parents:
+        raise ValueError("文件路径不能超出文件空间根目录。")
+    return candidate
+
+
+def safe_relative_upload_path(relative_path):
+    parts = [sanitize_file_name(part) for part in str(relative_path or "").replace("\\", "/").split("/") if part not in {"", ".", ".."}]
+    return "/".join(part for part in parts if part)
+
+
+def sanitize_file_name(name):
+    value = str(name or "").replace("\\", "/").split("/")[-1].strip()
+    if value in {"", ".", ".."} or "\x00" in value:
+        return ""
+    return value
+
+
+def relative_file_space_path(path, root):
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return ""
+
+
+def file_space_breadcrumbs(path, root):
+    relative = relative_file_space_path(path, root)
+    breadcrumbs = [{"name": "根目录", "path": ""}]
+    current = []
+    for part in [item for item in relative.split("/") if item]:
+        current.append(part)
+        breadcrumbs.append({"name": part, "path": "/".join(current)})
+    return breadcrumbs
+
+
+def file_space_entry(path, root):
+    stat = path.stat()
+    relative = relative_file_space_path(path, root)
+    is_dir = path.is_dir()
+    return {
+        "name": path.name,
+        "path": relative,
+        "type": "directory" if is_dir else "file",
+        "size": None if is_dir else stat.st_size,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        "mime_type": "" if is_dir else (mimetypes.guess_type(path.name)[0] or "application/octet-stream"),
+        "public_path": "" if is_dir else public_file_space_path(path),
+    }
+
+
+def public_file_space_path(path):
+    media_root = Path(settings.MEDIA_ROOT).expanduser().resolve()
+    try:
+        return f"{settings.MEDIA_URL.rstrip('/')}/{path.resolve().relative_to(media_root).as_posix()}"
+    except ValueError:
+        return str(path)
+
+
+def theme_file_section_for_path(path):
+    parent = path.parent.name
+    return parent if parent and parent != path.name else "数据集文件"
+
+
+def theme_file_type_for_path(path):
+    mime_type = mimetypes.guess_type(path.name)[0] or ""
+    suffix = path.suffix.lower()
+    if mime_type.startswith("text/") or suffix in {".csv", ".tsv", ".xlsx", ".xls", ".json", ".parquet"}:
+        return ThemeFile.FileType.DATASET
+    if suffix in {".md", ".txt", ".pdf", ".doc", ".docx"}:
+        return ThemeFile.FileType.DATASET_META
+    return ThemeFile.FileType.OTHER
+
+
+def upsert_theme_file_for_path(theme, path, root):
+    public_path = public_file_space_path(path)
+    title = path.stem or path.name
+    file, _ = ThemeFile.objects.get_or_create(
+        theme=theme,
+        path=public_path,
+        defaults={
+            "section": theme_file_section_for_path(path),
+            "file_type": theme_file_type_for_path(path),
+            "title": title,
+            "description": "",
+            "is_active": True,
+        },
+    )
+    if not file.is_active or file.title != title:
+        file.title = title
+        file.is_active = True
+        file.section = file.section or theme_file_section_for_path(path)
+        file.file_type = file.file_type or theme_file_type_for_path(path)
+        file.save(update_fields=["title", "section", "file_type", "is_active", "updated_at"])
+    return file
+
+
+def sync_theme_file_after_rename(theme, old_path, new_path, root):
+    old_public_path = public_file_space_path(old_path)
+    new_public_path = public_file_space_path(new_path)
+    ThemeFile.objects.filter(theme=theme, path=old_public_path).update(path=new_public_path, title=new_path.stem or new_path.name, is_active=True)
+    if new_path.is_file():
+        upsert_theme_file_for_path(theme, new_path, root)
+
+
+def deactivate_theme_file_for_path(theme, public_path):
+    ThemeFile.objects.filter(theme=theme, path=public_path).update(is_active=False)
 
 
 def theme_from_payload(data, current=None):

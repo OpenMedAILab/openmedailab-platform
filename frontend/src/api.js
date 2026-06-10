@@ -53,6 +53,34 @@ export async function request(path, options = {}) {
   return payload.data;
 }
 
+export async function requestForm(path, formData, options = {}) {
+  const method = options.method || "POST";
+  const headers = new Headers(options.headers || {});
+  if (!csrfToken) {
+    await initCsrf();
+  }
+  headers.set("X-CSRFToken", csrfToken);
+
+  const response = await fetch(`${API_BASE}${path}`, {
+    method,
+    headers,
+    credentials: "include",
+    body: formData
+  });
+
+  const payload = await response.json().catch(() => null);
+  if (isCsrfFailure(response, payload) && !options.csrfRetry) {
+    csrfToken = "";
+    await initCsrf();
+    return requestForm(path, formData, { ...options, csrfRetry: true });
+  }
+  if (!response.ok || !payload?.ok) {
+    const message = payload?.error?.message || `请求失败：${response.status}`;
+    throw new ApiError(message, response, payload);
+  }
+  return payload.data;
+}
+
 export const api = {
   meta: () => request("/api/meta/"),
   rbac: () => request("/api/rbac/"),
@@ -86,6 +114,14 @@ export const api = {
   adminCreateThemeFile: (payload) => request("/api/admin/theme-files/", { method: "POST", body: payload }),
   adminUpdateThemeFile: (id, payload) => request(`/api/admin/theme-files/${id}/`, { method: "PATCH", body: payload }),
   adminDeleteThemeFile: (id) => request(`/api/admin/theme-files/${id}/`, { method: "DELETE", body: {} }),
+  adminFileSpace: (params = {}) => request(`/api/admin/file-space/?${new URLSearchParams(cleanParams(params))}`),
+  adminReadFileSpaceFile: (params = {}) => request(`/api/admin/file-space/file/?${new URLSearchParams(cleanParams(params))}`),
+  adminUpdateThemeFileSpaceRoot: (id, payload) => request(`/api/admin/themes/${id}/file-space-root/`, { method: "PATCH", body: payload }),
+  adminCreateFileSpaceDirectory: (payload) => request("/api/admin/file-space/directories/", { method: "POST", body: payload }),
+  adminCreateFileSpaceFile: (payload) => request("/api/admin/file-space/files/", { method: "POST", body: payload }),
+  adminUpdateFileSpaceItem: (payload) => request("/api/admin/file-space/", { method: "PATCH", body: payload }),
+  adminDeleteFileSpaceItem: (payload) => request("/api/admin/file-space/", { method: "DELETE", body: payload }),
+  adminUploadFileSpaceFiles: (formData) => requestForm("/api/admin/file-space/upload/", formData),
   adminUsers: (params = {}) => request(`/api/admin/users/?${new URLSearchParams(cleanParams(params))}`),
   adminResetUserPassword: (uid) => request(`/api/admin/users/${encodeURIComponent(uid)}/reset-password/`, { method: "POST", body: {} }),
   adminInteractions: (params = {}) => request(`/api/admin/interactions/?${new URLSearchParams(cleanParams(params))}`),
