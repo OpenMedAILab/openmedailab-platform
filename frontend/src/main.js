@@ -76,7 +76,6 @@ const state = reactive({
     tone: "default"
   },
   expandedReleaseVersions: [],
-  heroTitleScrollProgress: 0,
   schema: null,
   admin: {
     activeTab: "overview",
@@ -235,16 +234,6 @@ const App = {
     ]);
     const releaseLatest = computed(() => latestRelease(state.meta.release));
     const releaseHistoryItems = computed(() => releaseHistory(state.meta.release));
-    const heroTitleStyle = computed(() => {
-      const progress = state.heroTitleScrollProgress;
-      return {
-        "--hero-title-scroll": progress.toFixed(3),
-        "--hero-title-opacity": (1 - progress * 0.72).toFixed(3),
-        "--hero-title-background-x": `${Math.round(progress * 40)}%`,
-        "--hero-title-y": `${Math.round(progress * -10)}px`,
-        "--hero-title-mask-stop": `${Math.round(100 - progress * 58)}%`
-      };
-    });
     const profilePointer = { x: 0, y: 0 };
     let confirmDialogResolver = null;
     const modalOpen = computed(() => Boolean(
@@ -262,7 +251,6 @@ const App = {
       window.addEventListener("scroll", handleScroll, { passive: true });
       window.addEventListener("keydown", handleKeydown);
       window.addEventListener("pointermove", handlePointerMove, { passive: true });
-      updateHeroTitleScrollProgress();
       await boot();
     });
 
@@ -2221,7 +2209,6 @@ const App = {
       state.route = parseRoute();
       if (state.route.name !== previousName) {
         closeRouteScopedOverlays();
-        state.heroTitleScrollProgress = 0;
         window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "auto" }));
       }
     }
@@ -2251,21 +2238,11 @@ const App = {
     }
 
     function handleScroll() {
-      updateHeroTitleScrollProgress();
       if (!["home", "projects"].includes(state.route.name)) return;
       const remaining = document.documentElement.scrollHeight - window.innerHeight - window.scrollY;
       if (remaining < 420) {
         loadMoreProjects();
       }
-    }
-
-    function updateHeroTitleScrollProgress() {
-      if (!["home", "projects"].includes(state.route.name)) {
-        state.heroTitleScrollProgress = 0;
-        return;
-      }
-      const progress = Math.min(1, Math.max(0, window.scrollY / 260));
-      state.heroTitleScrollProgress = Number(progress.toFixed(3));
     }
 
     function handleKeydown(event) {
@@ -2465,7 +2442,6 @@ const App = {
       adminOverviewCards,
       releaseLatest,
       releaseHistoryItems,
-      heroTitleStyle,
       can,
       navigate,
       openProjectPreview,
@@ -2607,7 +2583,7 @@ const App = {
     <div class="app-shell">
       <header class="topbar">
         <button class="brand" @click="navigate('home')" type="button">
-          <img class="brand-mark" src="/openmedailab-logo.png" alt="OpenMedAILab" />
+          <img class="brand-mark" src="/static/brand/openmedailab-logo.png" alt="OpenMedAILab" />
           <span>
             <strong>OpenMedAILab</strong>
           </span>
@@ -2675,19 +2651,6 @@ const App = {
 
         <template v-else>
           <section v-if="activeView === 'home' || activeView === 'projects'" class="library-view">
-            <div class="library-hero">
-              <div>
-                <h1 class="hero-title" :style="heroTitleStyle">
-                  <span>大道无言</span>
-                </h1>
-              </div>
-              <dl class="hero-stats">
-                <div><dt>课题</dt><dd>{{ stats.total }}</dd></div>
-                <div><dt>主题</dt><dd>{{ stats.themes }}</dd></div>
-                <div><dt>收藏</dt><dd>{{ stats.follows }}</dd></div>
-              </dl>
-            </div>
-
             <div class="toolbar">
               <label class="search-box">
                 <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">search</span> 搜索</span>
@@ -2738,7 +2701,14 @@ const App = {
                 <h2>{{ selectedTheme ? selectedTheme.name : '全部课题' }}</h2>
                 <p>{{ selectedTheme?.description || '向下滚动会自动加载更多课题。' }}</p>
               </div>
-              <button v-if="selectedTheme" class="ghost-button" type="button" @click="selectSpace(selectedTheme.slug)">查看主题文件空间</button>
+              <div class="section-head-actions">
+                <dl class="inline-stats" aria-label="课题库统计">
+                  <div><dt>课题</dt><dd>{{ stats.total }}</dd></div>
+                  <div><dt>主题</dt><dd>{{ stats.themes }}</dd></div>
+                  <div><dt>收藏</dt><dd>{{ stats.follows }}</dd></div>
+                </dl>
+                <button v-if="selectedTheme" class="ghost-button" type="button" @click="selectSpace(selectedTheme.slug)">查看主题文件空间</button>
+              </div>
             </div>
 
             <div class="project-grid">

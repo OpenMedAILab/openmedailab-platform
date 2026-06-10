@@ -22,7 +22,7 @@ test("theme space navigation closes an open project preview modal", () => {
 
 test("route changes close workspace and admin modal overlays", () => {
   assert.match(mainSource, /function closeRouteScopedOverlays\(\)/);
-  assert.match(mainSource, /closeRouteScopedOverlays\(\);\s*state\.heroTitleScrollProgress = 0;/);
+  assert.match(mainSource, /closeRouteScopedOverlays\(\);\s*window\.requestAnimationFrame\(\(\) => window\.scrollTo\(\{ top: 0, behavior: "auto" \}\)\);/);
   assert.match(mainSource, /if \(state\.contributionModal\.open\)\s*\{\s*closeContributionModal\(\);/s);
   assert.match(mainSource, /if \(state\.admin\.taskProjectDetail\.open\)\s*\{\s*closeTaskProjectDetail\(\);/s);
   assert.match(mainSource, /if \(state\.admin\.projectFormOpen\)\s*\{\s*closeProjectForm\(\);/s);
@@ -63,18 +63,17 @@ test("small-screen tab and chip rows wrap instead of hiding content horizontally
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.theme-chip,\s*\.admin-tabs button\s*\{[\s\S]*?flex:\s*0 1 auto;/);
 });
 
-test("homepage hero title uses minimal copy with hover and scroll motion guards", () => {
-  assert.match(mainSource, /大道无言/);
+test("homepage removes the hero copy and keeps compact library stats", () => {
+  assert.doesNotMatch(mainSource, /library-hero/);
+  assert.doesNotMatch(mainSource, /hero-title/);
+  assert.doesNotMatch(mainSource, /大道无言/);
   assert.doesNotMatch(mainSource, /让医学问题，/);
   assert.doesNotMatch(mainSource, /等到它的盖世英雄/);
   assert.doesNotMatch(mainSource, /真实临床场景，开放协作验证/);
-  assert.match(mainSource, /const heroTitleStyle = computed/);
-  assert.match(mainSource, /function updateHeroTitleScrollProgress\(\)/);
-  assert.match(mainSource, /"--hero-title-opacity": \(1 - progress \* 0\.72\)\.toFixed\(3\)/);
-  assert.match(stylesSource, /\.library-hero \.hero-title\s*\{[\s\S]*?display:\s*block;/);
-  assert.match(stylesSource, /\.library-hero \.hero-title:hover\s*\{[\s\S]*?scale\(1\.022\)/);
-  assert.match(stylesSource, /\.library-hero \.hero-title\s*\{[\s\S]*?mask-image:\s*linear-gradient/);
-  assert.match(stylesSource, /@media \(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?\.library-hero \.hero-title\s*\{[\s\S]*?transition:\s*none;/);
+  assert.doesNotMatch(mainSource, /const heroTitleStyle = computed/);
+  assert.doesNotMatch(mainSource, /function updateHeroTitleScrollProgress\(\)/);
+  assert.match(mainSource, /class="inline-stats"/);
+  assert.match(stylesSource, /\.inline-stats\s*\{/);
 });
 
 test("modal overlays lock the page scroll behind dialogs", () => {
