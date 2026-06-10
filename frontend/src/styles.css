@@ -1771,6 +1771,40 @@ textarea:focus {
   white-space: pre-wrap;
 }
 
+.json-import-preview-dialog {
+  width: min(80vw, 1280px);
+  max-height: 88vh;
+}
+
+.json-import-preview-body {
+  min-height: 360px;
+  overflow: auto;
+  padding: 18px 22px;
+}
+
+.json-import-preview-list {
+  gap: 10px;
+}
+
+.json-import-preview-row {
+  grid-template-columns: minmax(180px, 1.2fr) repeat(7, minmax(120px, 1fr)) 120px minmax(180px, 1.1fr) auto;
+  align-items: end;
+}
+
+.json-import-preview-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 22px 20px;
+  border-top: 1px solid rgba(15, 23, 42, 0.1);
+}
+
+.english-title {
+  color: var(--muted);
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
 .compact-load-more {
   min-height: 58px;
 }

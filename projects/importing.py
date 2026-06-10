@@ -87,11 +87,6 @@ def sync_themes(themes):
 
 def upsert_project(item, source_label="api-json", allow_create_theme=True):
     normalized = normalize_project_item(item, source_label, allow_create_theme=allow_create_theme)
-    ensure_unique_theme_project_no(
-        normalized["defaults"]["theme"],
-        normalized["defaults"]["project_no"],
-        topic_id=normalized["topic_id"],
-    )
     project, created = Project.objects.update_or_create(topic_id=normalized["topic_id"], defaults=normalized["defaults"])
     sync_project_tags(project, normalized["tags"])
     sync_project_documents(project, normalized["documents"])
@@ -100,11 +95,6 @@ def upsert_project(item, source_label="api-json", allow_create_theme=True):
 
 def create_project(item, source_label="api-admin", allow_create_theme=False):
     normalized = normalize_project_item(item, source_label, allow_create_theme=allow_create_theme)
-    ensure_unique_theme_project_no(
-        normalized["defaults"]["theme"],
-        normalized["defaults"]["project_no"],
-        topic_id=normalized["topic_id"],
-    )
     project = Project.objects.create(topic_id=normalized["topic_id"], **normalized["defaults"])
     sync_project_tags(project, normalized["tags"])
     sync_project_documents(project, normalized["documents"])
@@ -113,11 +103,6 @@ def create_project(item, source_label="api-admin", allow_create_theme=False):
 
 def update_project(project, item, source_label="api-admin", allow_create_theme=False):
     normalized = normalize_project_item(item, source_label, allow_create_theme=allow_create_theme)
-    ensure_unique_theme_project_no(
-        normalized["defaults"]["theme"],
-        normalized["defaults"]["project_no"],
-        topic_id=normalized["topic_id"],
-    )
     for field, value in normalized["defaults"].items():
         setattr(project, field, value)
     project.save(update_fields=[*normalized["defaults"].keys(), "updated_at"])
@@ -127,10 +112,10 @@ def update_project(project, item, source_label="api-admin", allow_create_theme=F
 
 
 def normalize_project_item(item, source_label="api-json", allow_create_theme=True):
-    topic_id = item.get("topic_id") or item.get("id")
+    topic_id = normalize_topic_id(item.get("topic_id") or item.get("id"))
     if not topic_id:
         raise ValueError("missing topic_id")
-    title = item.get("title") or topic_id
+    title = item.get("title") or str(topic_id)
     summary = item.get("summary", "")
     body_markdown = item.get("body_markdown") or item.get("markdown") or item.get("content") or ""
     content_hash = item.get("content_hash") or sha256(body_markdown or json.dumps(item, sort_keys=True, ensure_ascii=False))
@@ -149,8 +134,11 @@ def normalize_project_item(item, source_label="api-json", allow_create_theme=Tru
         "topic_id": topic_id,
         "defaults": {
             "title": title,
+            "title_en": item.get("title_en", item.get("title_en_us", "")),
             "summary": summary,
             "problem_statement": item.get("problem_statement", ""),
+            "clinical_endpoint": item.get("clinical_endpoint", ""),
+            "existing_foundation": item.get("existing_foundation", ""),
             "research_goal": item.get("research_goal", ""),
             "technical_route": item.get("technical_route", ""),
             "data_requirements": item.get("data_requirements") or {},
@@ -159,7 +147,6 @@ def normalize_project_item(item, source_label="api-json", allow_create_theme=Tru
             "compliance_notes": item.get("compliance_notes", ""),
             "body_markdown": body_markdown,
             "theme": theme_from_item(item, allow_create_theme=allow_create_theme),
-            "project_no": item.get("project_no"),
             "stage": normalize_stage(item.get("stage")),
             "source_md_path": md_path,
             "source_pdf_path": pdf_path,
@@ -221,14 +208,6 @@ def theme_from_item(item, allow_create_theme=True):
     return theme
 
 
-def ensure_unique_theme_project_no(theme, project_no, topic_id):
-    if theme is None or project_no in (None, ""):
-        return
-    conflict = Project.objects.filter(theme=theme, project_no=project_no).exclude(topic_id=topic_id).first()
-    if conflict:
-        raise ValueError(f"project_no {project_no} already exists in theme {theme.name}")
-
-
 def tag_names_from_item(item):
     tag_names = []
     for key in ["tags", "display_tags", "method_tags", "task_tags", "evaluation_tags", "data_modality_tags", "clinical_tags", "governance_tags"]:
@@ -271,6 +250,18 @@ def normalize_stage(stage):
     if stage in ProjectStage.values:
         return stage
     return STAGE_MAP.get(stage, ProjectStage.DRAFT)
+
+
+def normalize_topic_id(value):
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not text.isdigit():
+        raise ValueError("topic_id must be a positive integer")
+    number = int(text)
+    if number <= 0:
+        raise ValueError("topic_id must be a positive integer")
+    return number
 
 
 def normalize_document_type(doc_type):

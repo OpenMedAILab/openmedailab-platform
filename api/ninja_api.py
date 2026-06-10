@@ -44,7 +44,7 @@ from interactions.models import (
     SponsorType,
 )
 from interactions.services import project_stat_annotations, recalculate_project_community_score
-from projects.contracts import DEFAULT_THEME_FILE_SPACE, PROJECT_FIELD_CONTRACT, PROJECT_MARKDOWN_TEMPLATE
+from projects.contracts import DEFAULT_THEME_FILE_SPACE, PROJECT_FIELD_CONTRACT, PROJECT_JSONL_TEMPLATE
 from projects.importing import create_project, unique_slug, update_project
 from projects.models import (
     FOLLOWABLE_PROJECT_STAGES,
@@ -181,12 +181,15 @@ class ThemeWriteRequest(Schema):
 
 
 class ProjectWriteRequest(Schema):
-    topic_id: Optional[str] = None
+    id: Optional[int] = None
+    topic_id: Optional[int] = None
     theme: Optional[Any] = None
-    project_no: Optional[int] = None
     title: Optional[str] = None
+    title_en: Optional[str] = ""
     summary: Optional[str] = ""
     problem_statement: Optional[str] = ""
+    clinical_endpoint: Optional[str] = ""
+    existing_foundation: Optional[str] = ""
     research_goal: Optional[str] = ""
     technical_route: Optional[str] = ""
     data_requirements: Optional[Any] = None
@@ -374,7 +377,7 @@ def project_schema(request):
     return ok(
         {
             "fields": PROJECT_FIELD_CONTRACT,
-            "markdown_template": PROJECT_MARKDOWN_TEMPLATE,
+            "jsonl_template": PROJECT_JSONL_TEMPLATE,
             "template_version": "v1",
             "stage_values": choice_payload(ProjectStage.choices),
             "document_types": choice_payload(ProjectDocument.DocumentType.choices),
@@ -527,7 +530,7 @@ def project_list(
     has_pdf = has_pdf.strip()
 
     if q:
-        projects = projects.filter(Q(title__icontains=q) | Q(summary__icontains=q) | Q(topic_id__icontains=q) | Q(tags__name__icontains=q)).distinct()
+        projects = projects.filter(project_search_q(q) | Q(tags__name__icontains=q)).distinct()
     if theme:
         projects = projects.filter(Q(theme__slug=theme) | Q(theme__name=theme))
     if tag:
@@ -545,7 +548,7 @@ def project_list(
         "community_score": ("-community_score", "topic_id"),
         "follows": ("-follow_count", "-interest_count", "topic_id"),
         "updated": ("-updated_at",),
-        "project_no": ("theme__name", "project_no", "topic_id"),
+        "project_id": ("topic_id",),
     }
     projects = projects.order_by(*sort_map.get(sort, sort_map["recommended"]))
 
@@ -785,15 +788,14 @@ def admin_interaction_list(
         if status:
             query = query.filter(status=status)
         if project:
-            query = query.filter(Q(project__topic_id__icontains=project) | Q(project__title__icontains=project))
+            query = query.filter(related_project_search_q(project))
         if theme:
             query = query.filter(Q(project__theme__slug=theme) | Q(project__theme__name=theme))
         if user:
             query = query.filter(Q(user__username__icontains=user) | Q(user__profile__uid__icontains=user) | Q(user__email__icontains=user))
         if q:
             query = query.filter(
-                Q(project__title__icontains=q)
-                | Q(project__topic_id__icontains=q)
+                related_project_search_q(q)
                 | Q(user__username__icontains=q)
                 | Q(user__profile__uid__icontains=q)
             )
@@ -966,13 +968,13 @@ def admin_task_list(request, project: str = "", status: str = "", assignee: str 
         return auth_error
     tasks = ProjectTask.objects.select_related("project", "project__theme", "assignee").prefetch_related("project__tags").order_by("-updated_at")
     if project:
-        tasks = tasks.filter(Q(project__topic_id__icontains=project) | Q(project__title__icontains=project))
+        tasks = tasks.filter(related_project_search_q(project))
     if status:
         tasks = tasks.filter(status=status)
     if assignee:
         tasks = tasks.filter(Q(assignee__profile__uid__icontains=assignee) | Q(assignee__username__icontains=assignee))
     if q:
-        tasks = tasks.filter(Q(title__icontains=q) | Q(description__icontains=q) | Q(project__title__icontains=q) | Q(project__topic_id__icontains=q))
+        tasks = tasks.filter(Q(title__icontains=q) | Q(description__icontains=q) | related_project_search_q(q))
     return ok(paginated_queryset(tasks, page, page_size, task_payload, max_page_size=100))
 
 
@@ -1105,7 +1107,7 @@ def admin_contribution_list(request, status: str = "", project: str = "", task: 
     if status:
         contributions = contributions.filter(status=status)
     if project:
-        contributions = contributions.filter(Q(project__topic_id__icontains=project) | Q(project__title__icontains=project))
+        contributions = contributions.filter(related_project_search_q(project))
     if task:
         task_filter = Q(task__title__icontains=task)
         if str(task).isdigit():
@@ -1178,7 +1180,7 @@ def admin_credit_list(request, uid: str = "", action_type: str = "", project: st
     if action_type:
         entries = entries.filter(action_type=action_type)
     if project:
-        entries = entries.filter(Q(project__topic_id__icontains=project) | Q(project__title__icontains=project))
+        entries = entries.filter(related_project_search_q(project))
     return ok(paginated_queryset(entries, page, page_size, credit_ledger_payload, max_page_size=100))
 
 
@@ -1613,9 +1615,7 @@ def admin_project_list(
     content_hash = content_hash.strip()
     if q:
         projects = projects.filter(
-            Q(title__icontains=q)
-            | Q(summary__icontains=q)
-            | Q(topic_id__icontains=q)
+            project_search_q(q)
             | Q(source_md_path__icontains=q)
         ).distinct()
     if theme:
@@ -1627,7 +1627,8 @@ def admin_project_list(
     elif is_public in {"0", "false", "no"}:
         projects = projects.filter(is_public=False)
     if topic_id:
-        projects = projects.filter(topic_id=topic_id)
+        normalized_topic_id = normalize_project_topic_id(topic_id)
+        projects = projects.filter(topic_id=normalized_topic_id) if normalized_topic_id else projects.none()
     if source_md_path:
         projects = projects.filter(source_md_path=source_md_path)
     if content_hash:
@@ -1666,13 +1667,14 @@ def admin_project_create(request, payload: ProjectWriteRequest):
     if auth_error:
         return auth_error
     data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    normalize_project_identity_alias(data)
     error = validate_admin_project_payload(data, creating=True)
     if error:
         return error
     data["stage"] = ProjectStage.DRAFT
     data["is_public"] = False
-    if Project.objects.filter(topic_id=data["topic_id"].strip()).exists():
-        return fail("topic_id already exists.", status=422, code="validation_error")
+    if Project.objects.filter(topic_id=data["topic_id"]).exists():
+        return fail("id already exists.", status=422, code="validation_error")
     try:
         project = create_project(data, source_label="api-admin", allow_create_theme=False)
     except ValueError as exc:
@@ -1690,6 +1692,7 @@ def admin_project_update(request, project_id: int, payload: ProjectWriteRequest)
     project = get_object_or_404(Project.objects.select_related("theme").prefetch_related("tags", "documents"), pk=project_id)
     before = project_detail_payload(project)
     patch_data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    normalize_project_identity_alias(patch_data)
     if "topic_id" in patch_data and patch_data["topic_id"] != project.topic_id:
         return fail("topic_id cannot be changed.", status=422, code="validation_error")
     data = project_import_payload(project)
@@ -2197,12 +2200,24 @@ def profile_form_initial(profile):
 
 
 def validate_admin_project_payload(data, creating, current_project=None):
-    topic_id = (data.get("topic_id") or "").strip()
+    topic_id = normalize_project_topic_id(data.get("topic_id"))
     title = (data.get("title") or "").strip()
     if not topic_id or not title:
-        return fail("topic_id and title are required.", status=422, code="validation_error")
+        return fail("id and title are required.", status=422, code="validation_error")
     data["topic_id"] = topic_id
     data["title"] = title
+
+    for field, label in [
+        ("problem_statement", "科学问题"),
+        ("clinical_endpoint", "临床终点"),
+        ("existing_foundation", "已有基础"),
+    ]:
+        value = str(data.get(field) or "").strip()
+        if not value:
+            return fail(f"{label} is required.", status=422, code="validation_error")
+        if len(value) > 50:
+            return fail(f"{label} must be within 50 characters.", status=422, code="validation_error")
+        data[field] = value
 
     theme = data.get("theme")
     if isinstance(theme, dict):
@@ -2215,19 +2230,6 @@ def validate_admin_project_payload(data, creating, current_project=None):
     if theme_obj is None:
         return fail("theme does not exist.", status=422, code="validation_error")
 
-    project_no = data.get("project_no")
-    if project_no not in (None, ""):
-        conflict = Project.objects.filter(theme=theme_obj, project_no=project_no)
-        if current_project is not None:
-            conflict = conflict.exclude(pk=current_project.pk)
-        conflict = conflict.first()
-        if conflict:
-            return fail(
-                f"project_no {project_no} already exists in theme {theme_obj.name}.",
-                status=422,
-                code="validation_error",
-            )
-
     stage = data.get("stage")
     stage_labels = {label for _, label in ProjectStage.choices}
     if stage and stage not in ProjectStage.values and stage not in stage_labels:
@@ -2235,14 +2237,58 @@ def validate_admin_project_payload(data, creating, current_project=None):
     return None
 
 
+def normalize_project_identity_alias(data):
+    if "id" in data and "topic_id" not in data:
+        data["topic_id"] = data.pop("id")
+    else:
+        data.pop("id", None)
+
+
+def normalize_project_topic_id(value):
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not text.isdigit():
+        return None
+    number = int(text)
+    return number if number > 0 else None
+
+
+def project_search_q(value):
+    text = str(value or "").strip()
+    query = (
+        Q(title__icontains=text)
+        | Q(title_en__icontains=text)
+        | Q(summary__icontains=text)
+        | Q(problem_statement__icontains=text)
+        | Q(clinical_endpoint__icontains=text)
+        | Q(existing_foundation__icontains=text)
+    )
+    topic_id = normalize_project_topic_id(text)
+    if topic_id:
+        query |= Q(topic_id=topic_id)
+    return query
+
+
+def related_project_search_q(value):
+    text = str(value or "").strip()
+    query = Q(project__title__icontains=text) | Q(project__title_en__icontains=text)
+    topic_id = normalize_project_topic_id(text)
+    if topic_id:
+        query |= Q(project__topic_id=topic_id)
+    return query
+
+
 def project_import_payload(project):
     return {
         "topic_id": project.topic_id,
         "theme": theme_payload(project.theme) if project.theme else "未分类",
-        "project_no": project.project_no,
         "title": project.title,
+        "title_en": project.title_en,
         "summary": project.summary,
         "problem_statement": project.problem_statement,
+        "clinical_endpoint": project.clinical_endpoint,
+        "existing_foundation": project.existing_foundation,
         "research_goal": project.research_goal,
         "technical_route": project.technical_route,
         "data_requirements": project.data_requirements,

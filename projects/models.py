@@ -61,10 +61,13 @@ class Tag(models.Model):
 
 
 class Project(models.Model):
-    topic_id = models.CharField(max_length=80, unique=True)
+    topic_id = models.PositiveIntegerField(unique=True)
     title = models.CharField(max_length=255)
+    title_en = models.CharField(max_length=255, blank=True)
     summary = models.TextField(blank=True)
     problem_statement = models.TextField(blank=True)
+    clinical_endpoint = models.CharField(max_length=50, blank=True)
+    existing_foundation = models.CharField(max_length=50, blank=True)
     research_goal = models.TextField(blank=True)
     technical_route = models.TextField(blank=True)
     data_requirements = models.JSONField(default=dict, blank=True)
@@ -73,7 +76,6 @@ class Project(models.Model):
     compliance_notes = models.TextField(blank=True)
     body_markdown = models.TextField(blank=True)
     theme = models.ForeignKey(Theme, on_delete=models.SET_NULL, null=True, blank=True, related_name="projects")
-    project_no = models.PositiveIntegerField(null=True, blank=True)
     stage = models.CharField(max_length=32, choices=ProjectStage.choices, default=ProjectStage.DRAFT)
     source_md_path = models.CharField(max_length=500, blank=True, db_index=True)
     source_pdf_path = models.CharField(max_length=500, blank=True)
@@ -103,14 +105,6 @@ class Project(models.Model):
             models.Index(fields=["-community_score"]),
             models.Index(fields=["-updated_at"]),
         ]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["theme", "project_no"],
-                condition=models.Q(theme__isnull=False, project_no__isnull=False),
-                name="unique_project_theme_project_no",
-            ),
-        ]
-
     def __str__(self):
         return self.title
 

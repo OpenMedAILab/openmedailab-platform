@@ -1,7 +1,7 @@
 import { createApp, computed, onBeforeUnmount, onMounted, reactive, watch } from "vue";
 import { api, initCsrf } from "./api.js";
 import { isPointInsideProfileHoverZone } from "./profileMenu.js";
-import { parseProjectMarkdown, qualityCheckProjectPayload } from "./projectMarkdown.js";
+import { parseProjectJsonImport, qualityCheckProjectPayload } from "./projectJsonImport.js";
 import { latestRelease, releaseHistory, sectionEntries } from "./release.js";
 
 const PAGE_SIZE = 9;
@@ -151,10 +151,11 @@ const state = reactive({
     auditPagination: {},
     auditFilters: { action: "", target_type: "", page: 1, page_size: 50 },
     loadingAuditLogs: false,
-    markdownImport: {
+    jsonImport: {
       rows: [],
       applying: false,
-      fileCount: 0
+      fileCount: 0,
+      previewOpen: false
     }
   },
   forms: {
@@ -544,7 +545,7 @@ const App = {
         .sort((a, b) => {
           const priorityDiff = (RELATION_STATUS_PRIORITY[b.status] || 0) - (RELATION_STATUS_PRIORITY[a.status] || 0);
           if (priorityDiff) return priorityDiff;
-          return String(a.project.topic_id || "").localeCompare(String(b.project.topic_id || ""));
+          return Number(a.project.topic_id || 0) - Number(b.project.topic_id || 0);
         });
     }
 
@@ -1255,16 +1256,16 @@ const App = {
       if (!can("manage_projects")) return;
       try {
         const formPayload = projectFormPayload(state.admin.projectForm);
-        if (!formPayload.topic_id || !formPayload.title || !formPayload.theme) {
-          showToast("课题 ID、标题和主题不能为空");
+        if (!Number.isInteger(formPayload.topic_id) || formPayload.topic_id <= 0 || !formPayload.title || !formPayload.theme) {
+          showToast("课题 ID 必须是正整数，标题和主题不能为空");
+          return;
+        }
+        const quality = qualityCheckProjectPayload(formPayload);
+        if (quality.errors.length) {
+          showToast(quality.errors.join("；"));
           return;
         }
         if (publish) {
-          const quality = qualityCheckProjectPayload(formPayload);
-          if (quality.errors.length) {
-            showToast(quality.errors.join("；"));
-            return;
-          }
           if (quality.warnings.length) {
             const confirmed = await openConfirmDialog({
               title: "确认发布课题",
@@ -1622,7 +1623,7 @@ const App = {
         for (const project of rows) unique.set(project.id, project);
         state.admin.taskProjects = Array.from(unique.values()).sort((a, b) => {
           const updated = String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
-          return updated || String(a.topic_id || "").localeCompare(String(b.topic_id || ""));
+          return updated || Number(a.topic_id || 0) - Number(b.topic_id || 0);
         });
       } catch (error) {
         showToast(error.message || "任务管理课题读取失败");
@@ -1966,74 +1967,96 @@ const App = {
       await loadActiveAdminTab();
     }
 
-    function clearMarkdownImport() {
-      state.admin.markdownImport.rows = [];
-      state.admin.markdownImport.fileCount = 0;
-      showToast("Markdown 导入提示已清除");
+    function clearJsonImport() {
+      state.admin.jsonImport.rows = [];
+      state.admin.jsonImport.fileCount = 0;
+      state.admin.jsonImport.previewOpen = false;
+      showToast("JSON/JSONL 导入提示已清除");
     }
 
-    async function copyMarkdownTemplate() {
-      const template = state.schema?.markdown_template || "";
+    function downloadJsonlTemplate() {
+      const template = state.schema?.jsonl_template || "";
       if (!template) {
         showToast("模板暂未加载");
         return;
       }
-      try {
-        if (navigator.clipboard?.writeText) {
-          await navigator.clipboard.writeText(template);
-          showToast("Markdown 模板已复制");
-        } else {
-          showToast("当前浏览器不支持自动复制");
-        }
-      } catch (error) {
-        showToast(error.message || "复制失败");
-      }
+      const blob = new Blob([template], { type: "application/x-ndjson;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "openmedailab-project-template.jsonl";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      showToast("JSONL 模板已下载");
     }
 
-    async function handleMarkdownFiles(event) {
-      const files = Array.from(event.target.files || []).filter((file) => file.name.toLowerCase().endsWith(".md"));
-      state.admin.markdownImport.fileCount = files.length;
-      state.admin.markdownImport.rows = [];
+    async function handleJsonFiles(event) {
+      const files = Array.from(event.target.files || []).filter((file) => {
+        const name = file.name.toLowerCase();
+        return name.endsWith(".json") || name.endsWith(".jsonl");
+      });
+      state.admin.jsonImport.fileCount = files.length;
+      state.admin.jsonImport.rows = [];
+      state.admin.jsonImport.previewOpen = false;
       if (!files.length) {
-        showToast("请选择 .md 文件");
+        showToast("请选择 .json 或 .jsonl 文件");
         return;
       }
       const rows = [];
       for (const file of files) {
-        rows.push(await buildMarkdownImportRow(file));
+        rows.push(...(await buildJsonImportRows(file)));
       }
-      state.admin.markdownImport.rows = rows;
+      markDuplicateJsonImportRows(rows);
+      state.admin.jsonImport.rows = rows;
+      state.admin.jsonImport.previewOpen = true;
       event.target.value = "";
     }
 
-    async function buildMarkdownImportRow(file) {
+    async function buildJsonImportRows(file) {
       const sourcePath = file.webkitRelativePath || file.name;
       const text = await file.text();
-      const parsed = parseProjectMarkdown(text, sourcePath);
-      parsed.payload.content_hash = await sha256Hex(text);
-      const row = {
-        id: `${sourcePath}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      let parsedRows = [];
+      try {
+        parsedRows = parseProjectJsonImport(text, sourcePath);
+      } catch (error) {
+        parsedRows = [
+          {
+            templateVersion: "json-v1",
+            payload: { topic_id: "", theme: "", title: "" },
+            errors: [error.message || "JSON 解析失败"],
+            warnings: []
+          }
+        ];
+      }
+      const rows = parsedRows.map((parsed, index) => ({
+        id: `${sourcePath}-${index}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
         fileName: file.name,
-        sourcePath,
+        sourcePath: parsed.sourcePath || `${sourcePath}#${index + 1}`,
         ...parsed,
+        parseErrors: parsed.errors.filter((error) => !qualityCheckProjectPayload(parsed.payload).errors.includes(error)),
+        batchErrors: [],
         existingProjectId: null,
         actionLabel: parsed.errors.length ? "需修复" : "创建草稿"
-      };
-      await refreshMarkdownImportRow(row);
-      return row;
+      }));
+      for (const row of rows) {
+        row.payload.content_hash = await sha256Hex(JSON.stringify(row.payload));
+        await refreshJsonImportRow(row);
+      }
+      return rows;
     }
 
-    async function refreshMarkdownImportRow(row) {
-      row.errors = row.templateVersion !== "v1" ? [`暂不支持模板版本 ${row.templateVersion}`] : [];
-      row.errors = [...row.errors, ...qualityCheckProjectPayload(row.payload).errors];
+    async function refreshJsonImportRow(row) {
+      row.errors = [...(row.parseErrors || []), ...(row.batchErrors || []), ...qualityCheckProjectPayload(row.payload).errors];
       row.payload.stage = "draft";
       row.payload.is_public = false;
       row.existingProjectId = null;
       row.actionLabel = row.errors.length ? "需修复" : "创建草稿";
       if (row.errors.length) return;
       try {
-        const duplicates = await findMarkdownImportDuplicates(row.payload);
-        const existing = duplicates.find((item) => item.topic_id === row.payload.topic_id);
+        const duplicates = await findJsonImportDuplicates(row.payload);
+        const existing = duplicates.find((item) => Number(item.topic_id) === Number(row.payload.topic_id));
         const warnings = duplicateWarningsForImport(row.payload, duplicates);
         row.warnings = [...new Set([...qualityCheckProjectPayload(row.payload).warnings, ...warnings])];
         if (existing) {
@@ -2046,14 +2069,57 @@ const App = {
       }
     }
 
-    async function applyMarkdownImport() {
-      if (!can("manage_projects")) return;
-      const rows = state.admin.markdownImport.rows.filter((row) => !row.errors.length);
-      if (!rows.length) {
-        showToast("没有可提交的 Markdown 课题");
+    function markDuplicateJsonImportRows(rows) {
+      rows.forEach((row) => {
+        row.batchErrors = [];
+      });
+      const seen = new Map();
+      for (const row of rows) {
+        const key = String(row.payload.topic_id || "");
+        if (!key) continue;
+        if (!seen.has(key)) {
+          seen.set(key, row);
+          continue;
+        }
+        row.batchErrors = [...(row.batchErrors || []), `本次导入中 id ${key} 重复`];
+        row.errors = [...(row.errors || []), `本次导入中 id ${key} 重复`];
+        const first = seen.get(key);
+        first.batchErrors = [...(first.batchErrors || []), `本次导入中 id ${key} 重复`];
+        first.errors = [...(first.errors || []), `本次导入中 id ${key} 重复`];
+        row.actionLabel = "需修复";
+        first.actionLabel = "需修复";
+      }
+    }
+
+    async function refreshAllJsonImportRows() {
+      markDuplicateJsonImportRows(state.admin.jsonImport.rows);
+      for (const row of state.admin.jsonImport.rows) {
+        await refreshJsonImportRow(row);
+      }
+    }
+
+    function openJsonImportPreview() {
+      if (!state.admin.jsonImport.rows.length) {
+        showToast("请先选择 JSON/JSONL 文件");
         return;
       }
-      state.admin.markdownImport.applying = true;
+      state.admin.jsonImport.previewOpen = true;
+    }
+
+    function closeJsonImportPreview() {
+      if (state.admin.jsonImport.applying) return;
+      state.admin.jsonImport.previewOpen = false;
+    }
+
+    async function applyJsonImport() {
+      if (!can("manage_projects")) return;
+      await refreshAllJsonImportRows();
+      const rows = state.admin.jsonImport.rows.filter((row) => !row.errors.length);
+      if (!rows.length) {
+        showToast("没有可提交的 JSON 课题");
+        return;
+      }
+      state.admin.jsonImport.applying = true;
       let created = 0;
       let updated = 0;
       let failed = 0;
@@ -2076,14 +2142,15 @@ const App = {
             row.actionLabel = "提交失败";
           }
         }
-        showToast(`Markdown 导入完成：新增 ${created}，更新 ${updated}，失败 ${failed}`);
+        showToast(`JSON/JSONL 导入完成：新增 ${created}，更新 ${updated}，失败 ${failed}`);
+        if (!failed) state.admin.jsonImport.previewOpen = false;
         await loadAdminProjects({ reset: true });
         await loadProjects({ reset: true });
         const [meta, themes] = await Promise.all([api.meta(), api.adminThemes()]);
         state.meta = meta;
         state.admin.themes = themes.results;
       } finally {
-        state.admin.markdownImport.applying = false;
+        state.admin.jsonImport.applying = false;
       }
     }
 
@@ -2101,7 +2168,7 @@ const App = {
       const confirmedName = window.prompt("请确认主题名称", name);
       if (!confirmedName?.trim()) throw new Error("主题名称不能为空");
       const slug = window.prompt("主题 slug（可留空自动生成）", uniqueSlugHint(confirmedName));
-      const description = window.prompt("主题说明", "由 Markdown 导入确认创建") || "";
+      const description = window.prompt("主题说明", "由 JSON/JSONL 导入确认创建") || "";
       const theme = await api.adminCreateTheme({ name: confirmedName.trim(), slug: String(slug || "").trim(), description });
       state.admin.themes = [...state.admin.themes, theme];
       return theme;
@@ -2513,11 +2580,14 @@ const App = {
       auditTargetLabel,
       auditSummary,
       formatAuditTime,
-      clearMarkdownImport,
-      copyMarkdownTemplate,
-      handleMarkdownFiles,
-      refreshMarkdownImportRow,
-      applyMarkdownImport,
+      clearJsonImport,
+      downloadJsonlTemplate,
+      handleJsonFiles,
+      refreshJsonImportRow,
+      refreshAllJsonImportRows,
+      openJsonImportPreview,
+      closeJsonImportPreview,
+      applyJsonImport,
       archiveProject,
       searchAdminProjects,
       loadMoreAdminProjects,
@@ -2648,7 +2718,7 @@ const App = {
                   <option value="community_score">社区评分</option>
                   <option value="follows">关注热度</option>
                   <option value="updated">最近更新</option>
-                  <option value="project_no">课题编号</option>
+                  <option value="project_id">课题 ID</option>
                 </select>
               </label>
               <button class="primary-button" type="button" @click="applyFilters"><span class="material-symbols-rounded">filter_list</span> 筛选</button>
@@ -2694,15 +2764,15 @@ const App = {
                 <div class="project-list-main">
                   <div class="card-topline">
                     <span><span class="material-symbols-rounded" style="font-size: 16px;">category</span> {{ project.theme?.name || '未分类' }}</span>
-                    <span>{{ project.topic_id }}<template v-if="project.project_no"> · #{{ project.project_no }}</template></span>
+                    <span>ID {{ project.topic_id }}</span>
                     <span>{{ project.stage_label }}</span>
                   </div>
                   <h3>{{ project.title }}</h3>
                   <p>{{ shortText(project.summary || project.problem_statement, 160) }}</p>
                   <div class="project-key-fields">
-                    <div><dt>研究目标</dt><dd>{{ shortText(project.research_goal, 80) }}</dd></div>
-                    <div><dt>数据需求</dt><dd>{{ shortText(formatList(project.data_requirements), 80) }}</dd></div>
-                    <div><dt>评价指标</dt><dd>{{ shortText(formatList(project.evaluation_metrics), 80) }}</dd></div>
+                    <div><dt>科学问题</dt><dd>{{ shortText(project.problem_statement, 80) }}</dd></div>
+                    <div><dt>临床终点</dt><dd>{{ shortText(project.clinical_endpoint, 80) }}</dd></div>
+                    <div><dt>已有基础</dt><dd>{{ shortText(project.existing_foundation, 80) }}</dd></div>
                   </div>
                   <div class="tag-row">
                     <span v-for="tag in project.tags.slice(0, 5)" :key="tag.id">{{ tag.name }}</span>
@@ -2779,6 +2849,7 @@ const App = {
               <div>
                 <span class="eyebrow">{{ state.currentProject.theme?.name || '未分类' }} · {{ state.currentProject.stage_label }}</span>
                 <h1>{{ state.currentProject.title }}</h1>
+                <p v-if="state.currentProject.title_en" class="english-title">{{ state.currentProject.title_en }}</p>
                 <p>{{ state.currentProject.summary }}</p>
                 <div class="tag-row">
                   <span v-for="tag in state.currentProject.tags" :key="tag.id">{{ tag.name }}</span>
@@ -2798,6 +2869,8 @@ const App = {
                 <h2>结构化课题信息</h2>
                 <div class="info-list">
                   <section><h3>科学问题</h3><p>{{ state.currentProject.problem_statement || '待补充' }}</p></section>
+                  <section><h3>临床终点</h3><p>{{ state.currentProject.clinical_endpoint || '待补充' }}</p></section>
+                  <section><h3>已有基础</h3><p>{{ state.currentProject.existing_foundation || '待补充' }}</p></section>
                   <section><h3>研究目标</h3><p>{{ state.currentProject.research_goal || '待补充' }}</p></section>
                   <section><h3>技术路线</h3><p>{{ state.currentProject.technical_route || '待补充' }}</p></section>
                   <section><h3>数据需求</h3><p>{{ formatList(state.currentProject.data_requirements) }}</p></section>
@@ -3378,58 +3451,41 @@ const App = {
                 <article class="content-panel markdown-import-panel">
                   <div class="panel-title-row">
                     <div>
-                      <h2>Markdown 导入</h2>
-                      <p>读取单个 Markdown 文件或文件夹下的多个 Markdown 文件，解析后先预览，再写入现有课题 API。</p>
+                      <h2>JSON/JSONL 导入</h2>
+                      <p>只能选择 JSON、JSONL 文件或包含这些文件的目录；解析后先弹窗预览，确认后写入数据库。</p>
                     </div>
-                    <button class="ghost-button" type="button" @click="copyMarkdownTemplate">复制 Markdown 模板</button>
+                    <button class="ghost-button" type="button" @click="downloadJsonlTemplate">下载 JSONL 模板</button>
                   </div>
                   <div class="markdown-import-actions">
                     <label class="file-picker">
-                      <span>选择 Markdown 文件</span>
-                      <input type="file" accept=".md,text/markdown" multiple @change="handleMarkdownFiles" />
+                      <span>选择 JSON/JSONL 文件</span>
+                      <input type="file" accept=".json,.jsonl,application/json,application/x-ndjson" multiple @change="handleJsonFiles" />
                     </label>
                     <label class="file-picker">
-                      <span>选择 Markdown 文件夹</span>
-                      <input type="file" accept=".md,text/markdown" webkitdirectory directory multiple @change="handleMarkdownFiles" />
+                      <span>选择 JSON 目录</span>
+                      <input type="file" accept=".json,.jsonl,application/json,application/x-ndjson" webkitdirectory directory multiple @change="handleJsonFiles" />
                     </label>
-                    <button class="primary-button" type="button" :disabled="state.admin.markdownImport.applying || !state.admin.markdownImport.rows.length" @click="applyMarkdownImport">
-                      {{ state.admin.markdownImport.applying ? '正在提交' : '提交可导入项' }}
+                    <button class="primary-button" type="button" :disabled="state.admin.jsonImport.applying || !state.admin.jsonImport.rows.length" @click="openJsonImportPreview">
+                      预览并确认
                     </button>
-                    <button class="ghost-button" type="button" :disabled="state.admin.markdownImport.applying || (!state.admin.markdownImport.rows.length && !state.admin.markdownImport.fileCount)" @click="clearMarkdownImport">
+                    <button class="ghost-button" type="button" :disabled="state.admin.jsonImport.applying || (!state.admin.jsonImport.rows.length && !state.admin.jsonImport.fileCount)" @click="clearJsonImport">
                       清除导入提示
                     </button>
                   </div>
-                  <div v-if="state.admin.markdownImport.rows.length" class="markdown-import-list">
-                    <div v-for="row in state.admin.markdownImport.rows" :key="row.id" class="markdown-import-row" :class="{ blocked: row.errors.length }">
-                      <div>
-                        <strong>{{ row.payload.title || row.fileName }}</strong>
-                        <small>{{ row.sourcePath }}</small>
-                      </div>
-                      <label class="inline-row-field"><span>课题ID</span><input v-model="row.payload.topic_id" type="text" /></label>
-                      <label class="inline-row-field"><span>标题</span><input v-model="row.payload.title" type="text" /></label>
-                      <label class="inline-row-field"><span>主题</span><input v-model="row.payload.theme" type="text" /></label>
-                      <span>{{ row.actionLabel }}</span>
-                      <span class="markdown-import-notes">
-                        <template v-if="row.errors.length">错误：{{ row.errors.join('；') }}</template>
-                        <template v-else-if="row.warnings.length">待补充：{{ row.warnings.join('、') }}</template>
-                        <template v-else>字段完整</template>
-                      </span>
-                      <button class="ghost-button" type="button" @click="refreshMarkdownImportRow(row)">重新检测</button>
-                    </div>
-                  </div>
-                  <p v-else>尚未选择 Markdown 文件。模板中的可选章节未解析到时，会按空字段保存并在用户侧显示“待补充”。</p>
+                  <p v-if="state.admin.jsonImport.rows.length">已解析 {{ state.admin.jsonImport.rows.length }} 条课题记录，其中 {{ state.admin.jsonImport.rows.filter((row) => !row.errors.length).length }} 条可导入。</p>
+                  <p v-else>尚未选择 JSON/JSONL 文件。JSON 文件可为单个对象、对象数组或包含 projects 数组的对象；JSONL 文件每行一个课题对象。</p>
                 </article>
 
                 <article class="content-panel schema-helper-panel">
                   <div class="panel-title-row">
                     <div>
-                      <h2>字段契约与 Markdown 模板</h2>
-                      <p>系统内表单、Markdown 导入和后端保存都按这些字段对齐。</p>
+                      <h2>字段契约与 JSONL 模板</h2>
+                      <p>系统内表单、JSON/JSONL 导入和后端保存都按这些字段对齐。</p>
                     </div>
                   </div>
                   <details>
-                    <summary>查看 Markdown 模板</summary>
-                    <pre class="markdown-template-preview">{{ state.schema.markdown_template }}</pre>
+                    <summary>查看 JSONL 模板</summary>
+                    <pre class="markdown-template-preview">{{ state.schema.jsonl_template }}</pre>
                   </details>
                   <div class="schema-table schema-table-wide">
                     <div v-for="field in state.schema.fields" :key="field.name">
@@ -3455,23 +3511,27 @@ const App = {
                     </header>
                     <form class="stack-form project-edit-form project-form-dialog-body" @submit.prevent="saveProject()">
                       <div class="form-grid">
-                        <label><span>课题 ID</span><input v-model="state.admin.projectForm.topic_id" type="text" :disabled="Boolean(state.admin.projectForm.id)" /></label>
+                        <label><span>课题 ID</span><input v-model="state.admin.projectForm.topic_id" type="number" min="1" :disabled="Boolean(state.admin.projectForm.id)" /></label>
                         <label><span>主题</span>
                           <select v-model="state.admin.projectForm.theme">
                             <option value="">请选择主题</option>
                             <option v-for="theme in state.admin.themes" :key="theme.id" :value="theme.slug">{{ theme.name }}</option>
                           </select>
                         </label>
-                        <label><span>主题内编号</span><input v-model="state.admin.projectForm.project_no" type="number" min="0" /></label>
                         <label><span>阶段</span>
                           <select v-model="state.admin.projectForm.stage">
                             <option v-for="stage in state.meta.project_stages" :key="stage.value" :value="stage.value">{{ stage.label }}</option>
                           </select>
                         </label>
                       </div>
-                      <label><span>标题</span><input v-model="state.admin.projectForm.title" type="text" /></label>
+                      <label><span>Title（中文）</span><input v-model="state.admin.projectForm.title" type="text" /></label>
+                      <label><span>Title（英文，选填）</span><input v-model="state.admin.projectForm.title_en" type="text" /></label>
                       <label><span>摘要</span><textarea v-model="state.admin.projectForm.summary"></textarea></label>
-                      <label><span>科学问题</span><textarea v-model="state.admin.projectForm.problem_statement"></textarea></label>
+                      <div class="form-grid">
+                        <label><span>科学问题（50字以内）</span><input v-model="state.admin.projectForm.problem_statement" type="text" maxlength="50" /></label>
+                        <label><span>临床终点（50字以内）</span><input v-model="state.admin.projectForm.clinical_endpoint" type="text" maxlength="50" /></label>
+                        <label><span>已有基础（50字以内）</span><input v-model="state.admin.projectForm.existing_foundation" type="text" maxlength="50" /></label>
+                      </div>
                       <label><span>研究目标</span><textarea v-model="state.admin.projectForm.research_goal"></textarea></label>
                       <label><span>技术路线</span><textarea v-model="state.admin.projectForm.technical_route"></textarea></label>
                       <div class="form-grid">
@@ -3742,7 +3802,7 @@ const App = {
             </template>
             <section v-else class="empty-state">
               <h2>当前身份没有管理权限</h2>
-              <p>管理员可以维护主题、课题、文件空间和 Markdown 模板导入。</p>
+              <p>管理员可以维护主题、课题、文件空间和 JSONL 模板导入。</p>
             </section>
           </section>
 
@@ -4072,6 +4132,51 @@ const App = {
           </section>
         </div>
 
+        <div v-if="state.admin.jsonImport.previewOpen" class="project-form-modal json-import-preview-modal" @click.self="closeJsonImportPreview">
+          <section class="project-form-dialog json-import-preview-dialog" role="dialog" aria-modal="true" aria-label="JSON 导入预览">
+            <header class="project-form-dialog-header">
+              <div>
+                <span class="eyebrow">导入确认</span>
+                <h2>待导入课题</h2>
+                <p>共 {{ state.admin.jsonImport.rows.length }} 条，{{ state.admin.jsonImport.rows.filter((row) => !row.errors.length).length }} 条可写入数据库。</p>
+              </div>
+              <div class="modal-actions">
+                <button class="ghost-button" type="button" :disabled="state.admin.jsonImport.applying" @click="closeJsonImportPreview">关闭</button>
+              </div>
+            </header>
+            <div class="json-import-preview-body">
+              <div class="markdown-import-list json-import-preview-list">
+                <div v-for="row in state.admin.jsonImport.rows" :key="row.id" class="markdown-import-row json-import-preview-row" :class="{ blocked: row.errors.length }">
+                  <div>
+                    <strong>{{ row.payload.title || row.fileName }}</strong>
+                    <small>{{ row.sourcePath }}</small>
+                  </div>
+                  <label class="inline-row-field"><span>ID</span><input v-model="row.payload.topic_id" type="number" min="1" /></label>
+                  <label class="inline-row-field"><span>Title（中文）</span><input v-model="row.payload.title" type="text" /></label>
+                  <label class="inline-row-field"><span>Title（英文）</span><input v-model="row.payload.title_en" type="text" /></label>
+                  <label class="inline-row-field"><span>主题</span><input v-model="row.payload.theme" type="text" /></label>
+                  <label class="inline-row-field"><span>科学问题</span><input v-model="row.payload.problem_statement" type="text" maxlength="50" /></label>
+                  <label class="inline-row-field"><span>临床终点</span><input v-model="row.payload.clinical_endpoint" type="text" maxlength="50" /></label>
+                  <label class="inline-row-field"><span>已有基础</span><input v-model="row.payload.existing_foundation" type="text" maxlength="50" /></label>
+                  <span>{{ row.actionLabel }}</span>
+                  <span class="markdown-import-notes">
+                    <template v-if="row.errors.length">错误：{{ row.errors.join('；') }}</template>
+                    <template v-else-if="row.warnings.length">待补充：{{ row.warnings.join('、') }}</template>
+                    <template v-else>字段完整</template>
+                  </span>
+                  <button class="ghost-button" type="button" :disabled="state.admin.jsonImport.applying" @click="refreshAllJsonImportRows">重新检测</button>
+                </div>
+              </div>
+            </div>
+            <div class="json-import-preview-footer">
+              <button class="ghost-button" type="button" :disabled="state.admin.jsonImport.applying" @click="closeJsonImportPreview">取消</button>
+              <button class="primary-button" type="button" :disabled="state.admin.jsonImport.applying || !state.admin.jsonImport.rows.some((row) => !row.errors.length)" @click="applyJsonImport">
+                {{ state.admin.jsonImport.applying ? '正在导入' : '确认导入可写入项' }}
+              </button>
+            </div>
+          </section>
+        </div>
+
         <div v-if="state.confirmDialog.open" class="confirm-modal-backdrop" @click.self="resolveConfirmDialog(false)">
           <section class="confirm-modal" :class="'confirm-modal--' + state.confirmDialog.tone" role="dialog" aria-modal="true" aria-label="确认操作">
             <h2>{{ state.confirmDialog.title }}</h2>
@@ -4110,6 +4215,7 @@ const App = {
                   <div>
                     <span class="eyebrow">{{ state.currentProject.theme?.name || '未分类' }} · {{ state.currentProject.stage_label }}</span>
                     <h1>{{ state.currentProject.title }}</h1>
+                    <p v-if="state.currentProject.title_en" class="english-title">{{ state.currentProject.title_en }}</p>
                     <p>{{ state.currentProject.summary }}</p>
                     <div class="tag-row">
                       <span v-for="tag in state.currentProject.tags" :key="tag.id">{{ tag.name }}</span>
@@ -4129,6 +4235,8 @@ const App = {
                     <h2>结构化课题信息</h2>
                     <div class="info-list">
                       <section><h3>科学问题</h3><p>{{ state.currentProject.problem_statement || '待补充' }}</p></section>
+                      <section><h3>临床终点</h3><p>{{ state.currentProject.clinical_endpoint || '待补充' }}</p></section>
+                      <section><h3>已有基础</h3><p>{{ state.currentProject.existing_foundation || '待补充' }}</p></section>
                       <section><h3>研究目标</h3><p>{{ state.currentProject.research_goal || '待补充' }}</p></section>
                       <section><h3>技术路线</h3><p>{{ state.currentProject.technical_route || '待补充' }}</p></section>
                       <section><h3>数据需求</h3><p>{{ formatList(state.currentProject.data_requirements) }}</p></section>
@@ -4281,10 +4389,12 @@ function emptyProjectForm() {
     id: null,
     topic_id: "",
     theme: "",
-    project_no: "",
     title: "",
+    title_en: "",
     summary: "",
     problem_statement: "",
+    clinical_endpoint: "",
+    existing_foundation: "",
     research_goal: "",
     technical_route: "",
     data_type: "",
@@ -4312,10 +4422,12 @@ function projectToForm(project) {
     id: project.id,
     topic_id: project.topic_id || "",
     theme: project.theme?.slug || project.theme?.name || "",
-    project_no: project.project_no ?? "",
     title: project.title || "",
+    title_en: project.title_en || "",
     summary: project.summary || "",
     problem_statement: project.problem_statement || "",
+    clinical_endpoint: project.clinical_endpoint || "",
+    existing_foundation: project.existing_foundation || "",
     research_goal: project.research_goal || "",
     technical_route: project.technical_route || "",
     data_type: requirements.data_type || (Array.isArray(requirements.modalities) ? requirements.modalities.join("，") : ""),
@@ -4339,12 +4451,14 @@ function projectToForm(project) {
 
 function projectFormPayload(form) {
   return {
-    topic_id: form.topic_id.trim(),
+    topic_id: Number(String(form.topic_id).trim()),
     theme: form.theme,
-    project_no: optionalNumber(form.project_no),
     title: form.title.trim(),
+    title_en: form.title_en.trim(),
     summary: form.summary,
     problem_statement: form.problem_statement,
+    clinical_endpoint: form.clinical_endpoint,
+    existing_foundation: form.existing_foundation,
     research_goal: form.research_goal,
     technical_route: form.technical_route,
     data_requirements: dataRequirementsPayload(form),
@@ -4499,10 +4613,9 @@ function uniqueSlugHint(value) {
     .replace(/^-+|-+$/g, "");
 }
 
-async function findMarkdownImportDuplicates(payload) {
+async function findJsonImportDuplicates(payload) {
   const queries = [];
   if (payload.topic_id) queries.push({ topic_id: payload.topic_id, page_size: 3 });
-  if (payload.source_md_path) queries.push({ source_md_path: payload.source_md_path, page_size: 3 });
   if (payload.content_hash) queries.push({ content_hash: payload.content_hash, page_size: 3 });
   if (payload.title) queries.push({ q: payload.title, page_size: 3 });
   const byId = new Map();
@@ -4517,20 +4630,17 @@ async function findMarkdownImportDuplicates(payload) {
 
 function duplicateWarningsForImport(payload, duplicates) {
   const warnings = [];
-  const topicMatch = duplicates.find((project) => project.topic_id === payload.topic_id);
+  const topicMatch = duplicates.find((project) => Number(project.topic_id) === Number(payload.topic_id));
   if (topicMatch) {
-    warnings.push("同一课题ID将更新已有课题");
+    warnings.push("同一课题 ID 将更新已有课题");
     if (topicMatch.is_public || topicMatch.stage !== "draft") {
       warnings.push("已有课题将更新为草稿并暂不公开");
     }
   }
-  if (payload.source_md_path && duplicates.some((project) => project.source_md_path === payload.source_md_path && project.topic_id !== payload.topic_id)) {
-    warnings.push("来源路径可能重复");
+  if (payload.content_hash && duplicates.some((project) => project.content_hash === payload.content_hash && Number(project.topic_id) !== Number(payload.topic_id))) {
+    warnings.push("JSON 内容可能重复");
   }
-  if (payload.content_hash && duplicates.some((project) => project.content_hash === payload.content_hash && project.topic_id !== payload.topic_id)) {
-    warnings.push("正文内容可能重复");
-  }
-  if (payload.title && duplicates.some((project) => project.title === payload.title && project.topic_id !== payload.topic_id)) {
+  if (payload.title && duplicates.some((project) => project.title === payload.title && Number(project.topic_id) !== Number(payload.topic_id))) {
     warnings.push("标题可能重复");
   }
   return warnings;
@@ -4635,7 +4745,7 @@ function roleCardsFor(capabilities) {
   if (capabilities.technical_delivery) cards.push({ title: "技术实现", body: "可参与模型、RAG、Agent、多模态和工程实现。" });
   if (capabilities.statistical_design) cards.push({ title: "统计设计", body: "可参与样本量、终点、统计方案和结果解释。" });
   if (capabilities.funding_support) cards.push({ title: "资源支持", body: "可表达经费、算力、标注预算或专家咨询支持意向。" });
-  if (capabilities.manage_projects) cards.push({ title: "内容管理", body: "可维护主题、课题、文件空间和 Markdown 模板导入。" });
+  if (capabilities.manage_projects) cards.push({ title: "内容管理", body: "可维护主题、课题、文件空间和 JSONL 模板导入。" });
   if (!cards.length) cards.push({ title: "开放协作", body: "可关注、评分、申请参与和认领感兴趣的课题。" });
   return cards;
 }

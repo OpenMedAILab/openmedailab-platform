@@ -41,7 +41,10 @@ def project_list(request):
     sort = request.GET.get("sort", "recommended")
 
     if q:
-        projects = projects.filter(Q(title__icontains=q) | Q(summary__icontains=q) | Q(topic_id__icontains=q) | Q(tags__name__icontains=q)).distinct()
+        query = Q(title__icontains=q) | Q(title_en__icontains=q) | Q(summary__icontains=q) | Q(tags__name__icontains=q)
+        if q.isdigit():
+            query |= Q(topic_id=int(q))
+        projects = projects.filter(query).distinct()
     if theme:
         projects = projects.filter(Q(theme__slug=theme) | Q(theme__name=theme))
     if tag:
@@ -59,7 +62,7 @@ def project_list(request):
         "community_score": ("-community_score", "topic_id"),
         "follows": ("-follow_count", "-interest_count", "topic_id"),
         "updated": ("-updated_at",),
-        "project_no": ("theme__name", "project_no", "topic_id"),
+        "project_id": ("topic_id",),
     }
     projects = projects.order_by(*sort_map.get(sort, sort_map["recommended"]))
 

@@ -167,9 +167,9 @@ conda run -n openmedailab python manage.py ensure_platform_admin --username plat
 
 The platform administrator has fixed UID `ADM00000001`. The command fails if another staff/superuser account already exists, because the platform currently supports exactly one administrator account.
 
-Projects can only be created or edited by the administrator. The web workflow supports system-form creation/editing and Markdown template import. `GET /api/project-schema/` returns the field contract plus `markdown_template`; the frontend reads `.md` files locally, parses them into the existing `POST /api/admin/projects/` or `PATCH /api/admin/projects/<id>/` payload, and never exposes a public project-creation API. New projects default to `stage=draft` and `is_public=false`; publish by updating the same project to a public recruiting stage.
+Projects can only be created or edited by the administrator. The web workflow supports system-form creation/editing and JSON/JSONL import. `GET /api/project-schema/` returns the field contract plus `jsonl_template`; the frontend reads `.json` and `.jsonl` files locally, shows a confirmation preview, then writes through the existing `POST /api/admin/projects/` or `PATCH /api/admin/projects/<id>/` payload. New projects default to `stage=draft` and `is_public=false`; publish by updating the same project to a public recruiting stage.
 
-The backend stores structured fields such as `problem_statement`, `research_goal`, `technical_route`, `data_requirements`, `evaluation_metrics`, `expected_outputs`, `compliance_notes`, project documents, and administrator-only source metadata. Public project APIs do not expose `source_payload`, `content_hash`, or internal Markdown source paths.
+The business project ID is `topic_id` in the backend and must be a globally unique positive integer. Import templates expose it as `id`. The backend stores core structured fields such as `title`, `title_en`, `problem_statement`, `clinical_endpoint`, `existing_foundation`, plus optional extension fields such as `data_requirements`, `evaluation_metrics`, `expected_outputs`, and `compliance_notes`. Public project APIs do not expose `source_payload`, `content_hash`, or internal source paths.
 
 Project list query parameters:
 
@@ -180,7 +180,7 @@ q, theme, tag, stage, has_pdf, sort, page, page_size
 Allowed `sort` values:
 
 ```text
-recommended, llm_score, community_score, follows, updated, project_no
+recommended, llm_score, community_score, follows, updated, project_id
 ```
 
 Interaction request bodies:

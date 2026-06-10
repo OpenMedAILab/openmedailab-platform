@@ -229,18 +229,19 @@ test("workspace lifecycle people fields render uid-only payloads", () => {
   assert.doesNotMatch(mainSource, /entry\?\.actor\?\.profile\?\.uid/);
 });
 
-test("admin project lifecycle removes json import and exposes markdown template import", () => {
-  assert.doesNotMatch(mainSource, />JSON 导入<\/button>/);
+test("admin project lifecycle exposes json/jsonl import with confirmation preview", () => {
   assert.doesNotMatch(mainSource, /importJson\(/);
   assert.doesNotMatch(mainSource, /useExampleJson/);
   assert.doesNotMatch(mainSource, /state\.admin\.importText/);
-  assert.match(mainSource, /Markdown 导入/);
-  assert.match(mainSource, /copyMarkdownTemplate/);
-  assert.match(mainSource, /handleMarkdownFiles/);
-  assert.match(mainSource, /clearMarkdownImport/);
-  assert.match(mainSource, /state\.schema\.markdown_template/);
-  assert.match(mainSource, /字段契约与 Markdown 模板/);
-  assert.match(mainSource, /refreshMarkdownImportRow/);
+  assert.match(mainSource, /JSON\/JSONL 导入/);
+  assert.match(mainSource, /downloadJsonlTemplate/);
+  assert.match(mainSource, /handleJsonFiles/);
+  assert.match(mainSource, /clearJsonImport/);
+  assert.match(mainSource, /state\.schema\.jsonl_template/);
+  assert.match(mainSource, /字段契约与 JSONL 模板/);
+  assert.match(mainSource, /refreshJsonImportRow/);
+  assert.match(mainSource, /jsonImport\.previewOpen/);
+  assert.match(mainSource, /确认导入可写入项/);
   assert.match(mainSource, /重新检测/);
   assert.match(mainSource, /清除导入提示/);
   assert.match(mainSource, /inline-row-field/);
