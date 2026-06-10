@@ -87,6 +87,11 @@ def sync_themes(themes):
 
 def upsert_project(item, source_label="api-json", allow_create_theme=True):
     normalized = normalize_project_item(item, source_label, allow_create_theme=allow_create_theme)
+    ensure_unique_theme_project_no(
+        normalized["defaults"]["theme"],
+        normalized["defaults"]["project_no"],
+        topic_id=normalized["topic_id"],
+    )
     project, created = Project.objects.update_or_create(topic_id=normalized["topic_id"], defaults=normalized["defaults"])
     sync_project_tags(project, normalized["tags"])
     sync_project_documents(project, normalized["documents"])
@@ -95,6 +100,11 @@ def upsert_project(item, source_label="api-json", allow_create_theme=True):
 
 def create_project(item, source_label="api-admin", allow_create_theme=False):
     normalized = normalize_project_item(item, source_label, allow_create_theme=allow_create_theme)
+    ensure_unique_theme_project_no(
+        normalized["defaults"]["theme"],
+        normalized["defaults"]["project_no"],
+        topic_id=normalized["topic_id"],
+    )
     project = Project.objects.create(topic_id=normalized["topic_id"], **normalized["defaults"])
     sync_project_tags(project, normalized["tags"])
     sync_project_documents(project, normalized["documents"])
@@ -103,6 +113,11 @@ def create_project(item, source_label="api-admin", allow_create_theme=False):
 
 def update_project(project, item, source_label="api-admin", allow_create_theme=False):
     normalized = normalize_project_item(item, source_label, allow_create_theme=allow_create_theme)
+    ensure_unique_theme_project_no(
+        normalized["defaults"]["theme"],
+        normalized["defaults"]["project_no"],
+        topic_id=normalized["topic_id"],
+    )
     for field, value in normalized["defaults"].items():
         setattr(project, field, value)
     project.save(update_fields=[*normalized["defaults"].keys(), "updated_at"])
@@ -204,6 +219,14 @@ def theme_from_item(item, allow_create_theme=True):
     if changed:
         theme.save(update_fields=["slug", "description", "file_space", "updated_at"])
     return theme
+
+
+def ensure_unique_theme_project_no(theme, project_no, topic_id):
+    if theme is None or project_no in (None, ""):
+        return
+    conflict = Project.objects.filter(theme=theme, project_no=project_no).exclude(topic_id=topic_id).first()
+    if conflict:
+        raise ValueError(f"project_no {project_no} already exists in theme {theme.name}")
 
 
 def tag_names_from_item(item):

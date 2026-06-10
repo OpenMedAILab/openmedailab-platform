@@ -1695,7 +1695,7 @@ def admin_project_update(request, project_id: int, payload: ProjectWriteRequest)
     data = project_import_payload(project)
     data.update(patch_data)
     data["topic_id"] = project.topic_id
-    error = validate_admin_project_payload(data, creating=False)
+    error = validate_admin_project_payload(data, creating=False, current_project=project)
     if error:
         return error
     try:
@@ -2196,7 +2196,7 @@ def profile_form_initial(profile):
     }
 
 
-def validate_admin_project_payload(data, creating):
+def validate_admin_project_payload(data, creating, current_project=None):
     topic_id = (data.get("topic_id") or "").strip()
     title = (data.get("title") or "").strip()
     if not topic_id or not title:
@@ -2211,6 +2211,22 @@ def validate_admin_project_payload(data, creating):
         theme_name = str(theme or "").strip()
     if not theme_name:
         return fail("theme is required.", status=422, code="validation_error")
+    theme_obj = theme_from_payload(data, current=current_project.theme if current_project else None)
+    if theme_obj is None:
+        return fail("theme does not exist.", status=422, code="validation_error")
+
+    project_no = data.get("project_no")
+    if project_no not in (None, ""):
+        conflict = Project.objects.filter(theme=theme_obj, project_no=project_no)
+        if current_project is not None:
+            conflict = conflict.exclude(pk=current_project.pk)
+        conflict = conflict.first()
+        if conflict:
+            return fail(
+                f"project_no {project_no} already exists in theme {theme_obj.name}.",
+                status=422,
+                code="validation_error",
+            )
 
     stage = data.get("stage")
     stage_labels = {label for _, label in ProjectStage.choices}

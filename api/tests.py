@@ -460,6 +460,28 @@ class ApiTests(TestCase):
         self.assertEqual(duplicate_response.status_code, 422)
         self.assertEqual(Project.objects.filter(topic_id="NEW-001").count(), 1)
 
+        duplicate_project_no_response = self.post_json(
+            "/api/admin/projects/",
+            {"topic_id": "NEW-004", "theme": self.theme.slug, "project_no": 1, "title": "重复主题内编号"},
+        )
+        self.assertEqual(duplicate_project_no_response.status_code, 422)
+        self.assertFalse(Project.objects.filter(topic_id="NEW-004").exists())
+
+        other_theme = Theme.objects.create(name="视网膜影像", slug="retina-imaging")
+        same_no_other_theme_response = self.post_json(
+            "/api/admin/projects/",
+            {"topic_id": "RETINA-001", "theme": other_theme.slug, "project_no": 1, "title": "另一个主题的一号课题"},
+        )
+        self.assertEqual(same_no_other_theme_response.status_code, 201)
+
+        project_no_change_response = self.patch_json(
+            f"/api/admin/projects/{created.pk}/",
+            {"project_no": 1, "title": "不允许抢占主题内编号"},
+        )
+        self.assertEqual(project_no_change_response.status_code, 422)
+        created.refresh_from_db()
+        self.assertIsNone(created.project_no)
+
         topic_change_response = self.patch_json(
             f"/api/admin/projects/{created.pk}/",
             {"topic_id": "NEW-002", "title": "不允许改编号"},

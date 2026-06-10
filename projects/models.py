@@ -103,6 +103,13 @@ class Project(models.Model):
             models.Index(fields=["-community_score"]),
             models.Index(fields=["-updated_at"]),
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["theme", "project_no"],
+                condition=models.Q(theme__isnull=False, project_no__isnull=False),
+                name="unique_project_theme_project_no",
+            ),
+        ]
 
     def __str__(self):
         return self.title
