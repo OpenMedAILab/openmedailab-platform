@@ -56,7 +56,7 @@
           <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">favorite</span> 关注 {{ project.follow_count }}</span>
           <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">group</span> 参与 {{ project.interest_count }}</span>
         </div>
-        <p class="muted" style="margin-top: auto;">{{ project.summary|truncatechars:180 }}</p>
+        <p class="muted" style="margin-top: auto;">{{ project.problem_statement|truncatechars:180 }}</p>
       </a>
     {% empty %}
       <div class="card muted" style="text-align: center; grid-column: 1 / -1;">导入课题后会显示热门课题。</div>

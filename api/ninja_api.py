@@ -186,31 +186,11 @@ class ProjectWriteRequest(Schema):
     theme: Optional[Any] = None
     title: Optional[str] = None
     title_en: Optional[str] = ""
-    summary: Optional[str] = ""
     problem_statement: Optional[str] = ""
     clinical_endpoint: Optional[str] = ""
     existing_foundation: Optional[str] = ""
-    research_goal: Optional[str] = ""
-    technical_route: Optional[str] = ""
-    data_requirements: Optional[Any] = None
-    evaluation_metrics: Optional[Any] = None
-    expected_outputs: Optional[Any] = None
-    compliance_notes: Optional[str] = ""
-    body_markdown: Optional[str] = ""
     stage: Optional[str] = None
     tags: Optional[list[str]] = None
-    llm_score: Optional[float] = None
-    community_score: Optional[float] = None
-    composite_score: Optional[float] = None
-    recommended_journal: Optional[str] = ""
-    needed_roles: Optional[list[str]] = None
-    score_dimensions: Optional[Any] = None
-    source_md_path: Optional[str] = ""
-    source_pdf_path: Optional[str] = ""
-    page_path: Optional[str] = ""
-    content_hash: Optional[str] = ""
-    documents: Optional[list[dict[str, Any]]] = None
-    has_pdf: Optional[bool] = None
     is_public: Optional[bool] = None
 
 
@@ -395,7 +375,7 @@ def theme_space(request, slug: str):
             Project.objects.filter(theme=theme, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
             .select_related("theme")
             .prefetch_related("tags")
-        ).order_by("-composite_score", "-updated_at")[:80]
+        ).order_by("topic_id", "-updated_at")[:80]
     )
     files = list(ThemeFile.objects.filter(theme=theme, is_active=True).order_by("sort_order", "section", "title")[:300])
     return ok(theme_space_payload(theme, projects, files))
@@ -515,7 +495,6 @@ def project_list(
     theme: str = "",
     tag: str = "",
     stage: str = "",
-    has_pdf: str = "",
     sort: str = "recommended",
     page: int = 1,
     page_size: int = 20,
@@ -527,7 +506,6 @@ def project_list(
     theme = theme.strip()
     tag = tag.strip()
     stage = stage.strip()
-    has_pdf = has_pdf.strip()
 
     if q:
         projects = projects.filter(project_search_q(q) | Q(tags__name__icontains=q)).distinct()
@@ -537,15 +515,8 @@ def project_list(
         projects = projects.filter(Q(tags__slug=tag) | Q(tags__name=tag))
     if stage:
         projects = projects.filter(stage=stage)
-    if has_pdf in {"1", "true", "yes"}:
-        projects = projects.filter(has_pdf=True)
-    elif has_pdf in {"0", "false", "no"}:
-        projects = projects.filter(has_pdf=False)
-
     sort_map = {
-        "recommended": ("-composite_score", "-llm_score", "topic_id"),
-        "llm_score": ("-llm_score", "topic_id"),
-        "community_score": ("-community_score", "topic_id"),
+        "recommended": ("topic_id",),
         "follows": ("-follow_count", "-interest_count", "topic_id"),
         "updated": ("-updated_at",),
         "project_id": ("topic_id",),
@@ -566,7 +537,7 @@ def project_list(
                 "has_next": page_obj.has_next(),
                 "has_previous": page_obj.has_previous(),
             },
-            "filters": {"q": q, "theme": theme, "tag": tag, "stage": stage, "has_pdf": has_pdf, "sort": sort},
+            "filters": {"q": q, "theme": theme, "tag": tag, "stage": stage, "sort": sort},
         }
     )
 
@@ -1597,8 +1568,6 @@ def admin_project_list(
     stage: str = "",
     is_public: str = "",
     topic_id: str = "",
-    source_md_path: str = "",
-    content_hash: str = "",
     page: int = 1,
     page_size: int = 20,
 ):
@@ -1611,13 +1580,8 @@ def admin_project_list(
     stage = stage.strip()
     is_public = is_public.strip().lower()
     topic_id = topic_id.strip()
-    source_md_path = source_md_path.strip()
-    content_hash = content_hash.strip()
     if q:
-        projects = projects.filter(
-            project_search_q(q)
-            | Q(source_md_path__icontains=q)
-        ).distinct()
+        projects = projects.filter(project_search_q(q)).distinct()
     if theme:
         projects = projects.filter(Q(theme__slug=theme) | Q(theme__name=theme))
     if stage:
@@ -1629,10 +1593,6 @@ def admin_project_list(
     if topic_id:
         normalized_topic_id = normalize_project_topic_id(topic_id)
         projects = projects.filter(topic_id=normalized_topic_id) if normalized_topic_id else projects.none()
-    if source_md_path:
-        projects = projects.filter(source_md_path=source_md_path)
-    if content_hash:
-        projects = projects.filter(content_hash=content_hash)
     projects = projects.order_by("-updated_at", "topic_id")
     page_size = max(1, min(page_size, 100))
     paginator = Paginator(projects, page_size)
@@ -2259,7 +2219,6 @@ def project_search_q(value):
     query = (
         Q(title__icontains=text)
         | Q(title_en__icontains=text)
-        | Q(summary__icontains=text)
         | Q(problem_statement__icontains=text)
         | Q(clinical_endpoint__icontains=text)
         | Q(existing_foundation__icontains=text)
@@ -2285,40 +2244,12 @@ def project_import_payload(project):
         "theme": theme_payload(project.theme) if project.theme else "未分类",
         "title": project.title,
         "title_en": project.title_en,
-        "summary": project.summary,
         "problem_statement": project.problem_statement,
         "clinical_endpoint": project.clinical_endpoint,
         "existing_foundation": project.existing_foundation,
-        "research_goal": project.research_goal,
-        "technical_route": project.technical_route,
-        "data_requirements": project.data_requirements,
-        "evaluation_metrics": project.evaluation_metrics,
-        "expected_outputs": project.expected_outputs,
-        "compliance_notes": project.compliance_notes,
-        "body_markdown": project.body_markdown,
         "stage": project.stage,
         "tags": [tag.name for tag in project.tags.all()],
-        "llm_score": float(project.llm_score) if project.llm_score is not None else None,
-        "community_score": float(project.community_score) if project.community_score is not None else None,
-        "composite_score": float(project.composite_score) if project.composite_score is not None else None,
-        "recommended_journal": project.recommended_journal,
-        "needed_roles": project.needed_roles,
-        "score_dimensions": project.score_dimensions,
-        "source_md_path": project.source_md_path,
-        "source_pdf_path": project.source_pdf_path,
-        "page_path": project.page_path,
-        "documents": [document_payload(document) for document in project.documents.all()],
-        "has_pdf": project.has_pdf,
         "is_public": project.is_public,
-    }
-
-
-def document_payload(document):
-    return {
-        "doc_type": document.doc_type,
-        "title": document.title,
-        "path": document.path,
-        "content_hash": document.content_hash,
     }
 
 

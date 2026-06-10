@@ -25,22 +25,11 @@ class ApiTests(TestCase):
             topic_id=1,
             title="纵向病例证据 RAG",
             title_en="Longitudinal evidence RAG",
-            summary="用于抗 VEGF 随访复核。",
             problem_statement="随访证据分散，难以复核。",
             clinical_endpoint="复核一致性",
             existing_foundation="已有随访摘要",
-            research_goal="验证 RAG 对复核效率的帮助。",
-            technical_route="证据切片 -> 检索 -> 医生审核。",
-            data_requirements={"modalities": ["随访表", "OCT 摘要"]},
-            evaluation_metrics=["一致性"],
-            expected_outputs=["实验报告"],
-            compliance_notes="只使用脱敏数据。",
-            body_markdown="## 背景\n测试正文",
             theme=self.theme,
             stage=ProjectStage.OPEN_RECRUITING,
-            llm_score=8.5,
-            composite_score=8.5,
-            needed_roles=["医生", "学生", "Leader"],
             is_public=True,
         )
         self.project.tags.add(self.tag)
@@ -74,10 +63,10 @@ class ApiTests(TestCase):
         self.assertEqual(detail_response.status_code, 200)
         detail_payload = detail_response.json()
         self.assertEqual(detail_payload["data"]["team_status"]["basic_ready"], False)
-        self.assertNotIn("body_markdown", detail_payload["data"])
         self.assertNotIn("documents", detail_payload["data"])
         self.assertEqual(detail_payload["data"]["problem_statement"], "随访证据分散，难以复核。")
-        self.assertEqual(detail_payload["data"]["data_requirements"]["modalities"], ["随访表", "OCT 摘要"])
+        self.assertEqual(detail_payload["data"]["clinical_endpoint"], "复核一致性")
+        self.assertEqual(detail_payload["data"]["existing_foundation"], "已有随访摘要")
 
     def test_lifecycle_stage_contract_and_public_filters(self):
         stage_values = [value for value, _ in ProjectStage.choices]
@@ -230,7 +219,8 @@ class ApiTests(TestCase):
         self.assertIn("problem_statement", contract_fields)
         self.assertIn("clinical_endpoint", contract_fields)
         self.assertIn("existing_foundation", contract_fields)
-        self.assertIn("data_requirements", contract_fields)
+        self.assertNotIn("data_requirements", contract_fields)
+        self.assertNotIn("summary", contract_fields)
         self.assertNotIn("project_no", contract_fields)
         self.assertNotIn("documents", contract_fields)
         self.assertNotIn("source_md_path", contract_fields)
@@ -395,18 +385,15 @@ class ApiTests(TestCase):
                 "theme": "视网膜影像",
                 "title": "OCT 病灶分割评估",
                 "title_en": "OCT lesion segmentation evaluation",
-                "summary": "面向 OCT 病灶分割模型的临床可用性评估。",
                 "problem_statement": "验证分割结果能否复核。",
                 "clinical_endpoint": "医生复核一致性",
                 "existing_foundation": "已有OCT标注",
-                "data_requirements": {"modalities": ["OCT"], "minimum_cases": 30},
-                "expected_outputs": ["标注规范", "评估报告"],
                 "tags": ["OCT", "分割"],
             },
         )
         self.assertEqual(create_response.status_code, 201)
         project = Project.objects.get(topic_id=4)
-        self.assertEqual(project.data_requirements["modalities"], ["OCT"])
+        self.assertEqual(project.problem_statement, "验证分割结果能否复核。")
         self.assertEqual(project.title_en, "OCT lesion segmentation evaluation")
         self.assertEqual(project.stage, ProjectStage.DRAFT)
         self.assertFalse(project.is_public)
@@ -519,24 +506,17 @@ class ApiTests(TestCase):
         self.assertEqual(unknown_theme_response.status_code, 422)
         self.assertFalse(Theme.objects.filter(name="不存在主题").exists())
 
-    def test_admin_project_list_supports_duplicate_detection_fields(self):
+    def test_admin_project_list_supports_id_duplicate_detection(self):
         self.login_platform_admin()
-        self.project.source_md_path = "topics/AntiVEGF-001.md"
-        self.project.content_hash = "hash-for-duplicate-check"
-        self.project.save(update_fields=["source_md_path", "content_hash", "updated_at"])
 
         topic_response = self.client.get("/api/admin/projects/?topic_id=1&page_size=10")
         self.assertEqual(topic_response.status_code, 200)
         topic_rows = topic_response.json()["data"]["results"]
         self.assertEqual(len(topic_rows), 1)
-        self.assertEqual(topic_rows[0]["source_md_path"], "topics/AntiVEGF-001.md")
-        self.assertEqual(topic_rows[0]["content_hash"], "hash-for-duplicate-check")
+        self.assertEqual(topic_rows[0]["topic_id"], 1)
 
-        source_response = self.client.get("/api/admin/projects/?source_md_path=topics/AntiVEGF-001.md&page_size=10")
-        self.assertEqual(source_response.json()["data"]["pagination"]["total_count"], 1)
-
-        hash_response = self.client.get("/api/admin/projects/?content_hash=hash-for-duplicate-check&page_size=10")
-        self.assertEqual(hash_response.json()["data"]["pagination"]["total_count"], 1)
+        title_response = self.client.get("/api/admin/projects/?q=纵向病例&page_size=10")
+        self.assertEqual(title_response.json()["data"]["pagination"]["total_count"], 1)
 
     def test_admin_user_list_orders_platform_admin_first_then_uid(self):
         admin = self.login_platform_admin()
@@ -565,12 +545,8 @@ class ApiTests(TestCase):
         self.assertEqual(search_rows[0]["profile"]["uid"], PLATFORM_ADMIN_UID)
 
     def test_public_project_detail_hides_internal_source_fields(self):
-        self.project.source_md_path = "topics/AntiVEGF-001.md"
-        self.project.source_pdf_path = "/Users/wang/private/AntiVEGF-001.pdf"
-        self.project.page_path = "/internal/pages/AntiVEGF-001.html"
-        self.project.content_hash = "internal-hash"
         self.project.source_payload = {"source": "api-admin", "payload": {"secret": "internal"}}
-        self.project.save(update_fields=["source_md_path", "source_pdf_path", "page_path", "content_hash", "source_payload", "updated_at"])
+        self.project.save(update_fields=["source_payload", "updated_at"])
         ProjectDocument.objects.create(
             project=self.project,
             doc_type=ProjectDocument.DocumentType.MARKDOWN,
@@ -584,10 +560,6 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()["data"]
         self.assertNotIn("source_payload", payload)
-        self.assertNotIn("content_hash", payload)
-        self.assertNotIn("source_md_path", payload)
-        self.assertNotIn("source_pdf_path", payload)
-        self.assertNotIn("page_path", payload)
         self.assertNotIn("imported_at", payload)
         self.assertNotIn("/Users/wang/private", json.dumps(payload, ensure_ascii=False))
         self.assertNotIn("document-internal-hash", json.dumps(payload, ensure_ascii=False))

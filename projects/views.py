@@ -23,9 +23,7 @@ def home(request):
         "score_count": ProjectScore.objects.count(),
     }
     themes = Theme.objects.filter(is_active=True).annotate(project_count=Count("projects")).order_by("sort_order", "name")[:12]
-    hot_projects = project_stat_annotations(Project.objects.filter(is_public=True, stage__in=PUBLIC_PROJECT_STAGES)).order_by(
-        "-follow_count", "-interest_count", "-composite_score"
-    )[:8]
+    hot_projects = project_stat_annotations(Project.objects.filter(is_public=True, stage__in=PUBLIC_PROJECT_STAGES)).order_by("-follow_count", "-interest_count", "topic_id")[:8]
     return render(request, "projects/home.html", {"stats": stats, "themes": themes, "hot_projects": hot_projects})
 
 
@@ -37,11 +35,17 @@ def project_list(request):
     theme = request.GET.get("theme", "").strip()
     tag = request.GET.get("tag", "").strip()
     stage = request.GET.get("stage", "").strip()
-    has_pdf = request.GET.get("has_pdf", "").strip()
     sort = request.GET.get("sort", "recommended")
 
     if q:
-        query = Q(title__icontains=q) | Q(title_en__icontains=q) | Q(summary__icontains=q) | Q(tags__name__icontains=q)
+        query = (
+            Q(title__icontains=q)
+            | Q(title_en__icontains=q)
+            | Q(problem_statement__icontains=q)
+            | Q(clinical_endpoint__icontains=q)
+            | Q(existing_foundation__icontains=q)
+            | Q(tags__name__icontains=q)
+        )
         if q.isdigit():
             query |= Q(topic_id=int(q))
         projects = projects.filter(query).distinct()
@@ -51,15 +55,8 @@ def project_list(request):
         projects = projects.filter(Q(tags__slug=tag) | Q(tags__name=tag))
     if stage:
         projects = projects.filter(stage=stage)
-    if has_pdf in {"1", "true", "yes"}:
-        projects = projects.filter(has_pdf=True)
-    elif has_pdf in {"0", "false", "no"}:
-        projects = projects.filter(has_pdf=False)
-
     sort_map = {
-        "recommended": ("-composite_score", "-llm_score", "topic_id"),
-        "llm_score": ("-llm_score", "topic_id"),
-        "community_score": ("-community_score", "topic_id"),
+        "recommended": ("topic_id",),
         "follows": ("-follow_count", "-interest_count", "topic_id"),
         "updated": ("-updated_at",),
         "project_id": ("topic_id",),
@@ -73,7 +70,7 @@ def project_list(request):
         "themes": Theme.objects.filter(is_active=True).order_by("sort_order", "name"),
         "tags": Tag.objects.order_by("name")[:80],
         "stages": ProjectStage.choices,
-        "filters": {"q": q, "theme": theme, "tag": tag, "stage": stage, "has_pdf": has_pdf, "sort": sort},
+        "filters": {"q": q, "theme": theme, "tag": tag, "stage": stage, "sort": sort},
     }
     return render(request, "projects/project_list.html", context)
 

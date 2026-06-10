@@ -12,9 +12,7 @@ test("parseProjectJsonImport maps jsonl records to strict project payloads", () 
       title_en: "Follow-up strategy for DR",
       problem_statement: "如何减少漏诊",
       clinical_endpoint: "转诊准确率",
-      existing_foundation: "已有随访数据",
-      tags: ["DR"],
-      needed_roles: ["医生"]
+      existing_foundation: "已有随访数据"
     }),
     JSON.stringify({
       id: 2,
@@ -31,7 +29,6 @@ test("parseProjectJsonImport maps jsonl records to strict project payloads", () 
   assert.equal(rows.length, 2);
   assert.equal(rows[0].payload.topic_id, 1);
   assert.equal(rows[0].payload.title_en, "Follow-up strategy for DR");
-  assert.deepEqual(rows[0].payload.tags, ["DR"]);
   assert.equal(rows[0].errors.length, 0);
   assert.equal(rows[1].payload.topic_id, 2);
 });

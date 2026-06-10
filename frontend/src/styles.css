@@ -94,15 +94,13 @@ a {
 }
 
 .brand-mark {
-  display: grid;
   width: 42px;
   height: 42px;
-  place-items: center;
   border: 1px solid rgba(15, 159, 154, 0.35);
   border-radius: 8px;
-  background: linear-gradient(135deg, #e9fbf7, #eef4ff);
-  color: var(--teal);
-  font-weight: 800;
+  background: #ffffff;
+  object-fit: cover;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.72);
 }
 
 .brand strong,

@@ -43,7 +43,6 @@ const state = reactive({
     theme: "",
     tag: "",
     stage: "",
-    has_pdf: "",
     sort: "recommended",
     page: 1,
     page_size: PAGE_SIZE
@@ -2041,7 +2040,6 @@ const App = {
         actionLabel: parsed.errors.length ? "需修复" : "创建草稿"
       }));
       for (const row of rows) {
-        row.payload.content_hash = await sha256Hex(JSON.stringify(row.payload));
         await refreshJsonImportRow(row);
       }
       return rows;
@@ -2594,7 +2592,6 @@ const App = {
       displayScore,
       shortText,
       roleCountEntries,
-      formatList,
       fileTypeLabel,
       stageLabel,
       fieldErrors,
@@ -2610,7 +2607,7 @@ const App = {
     <div class="app-shell">
       <header class="topbar">
         <button class="brand" @click="navigate('home')" type="button">
-          <span class="brand-mark">OM</span>
+          <img class="brand-mark" src="/openmedailab-logo.png" alt="OpenMedAILab" />
           <span>
             <strong>OpenMedAILab</strong>
           </span>
@@ -2714,8 +2711,6 @@ const App = {
                 <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">sort</span> 排序</span>
                 <select v-model="state.filters.sort" @change="applyFilters">
                   <option value="recommended">综合推荐</option>
-                  <option value="llm_score">初始评分</option>
-                  <option value="community_score">社区评分</option>
                   <option value="follows">关注热度</option>
                   <option value="updated">最近更新</option>
                   <option value="project_id">课题 ID</option>
@@ -2768,7 +2763,7 @@ const App = {
                     <span>{{ project.stage_label }}</span>
                   </div>
                   <h3>{{ project.title }}</h3>
-                  <p>{{ shortText(project.summary || project.problem_statement, 160) }}</p>
+                  <p>{{ shortText(project.problem_statement, 160) }}</p>
                   <div class="project-key-fields">
                     <div><dt>科学问题</dt><dd>{{ shortText(project.problem_statement, 80) }}</dd></div>
                     <div><dt>临床终点</dt><dd>{{ shortText(project.clinical_endpoint, 80) }}</dd></div>
@@ -2776,12 +2771,10 @@ const App = {
                   </div>
                   <div class="tag-row">
                     <span v-for="tag in project.tags.slice(0, 5)" :key="tag.id">{{ tag.name }}</span>
-                    <span v-for="role in (project.needed_roles || []).slice(0, 4)" :key="role">{{ role }}</span>
                   </div>
                 </div>
                 <div class="project-list-side">
                   <dl class="card-metrics">
-                    <div><dt>综合评分</dt><dd>{{ displayScore(project.composite_score) }}</dd></div>
                     <div><dt>收藏</dt><dd>{{ project.follow_count || 0 }}</dd></div>
                     <div><dt>参与</dt><dd>{{ project.interest_count || 0 }}</dd></div>
                   </dl>
@@ -2850,14 +2843,14 @@ const App = {
                 <span class="eyebrow">{{ state.currentProject.theme?.name || '未分类' }} · {{ state.currentProject.stage_label }}</span>
                 <h1>{{ state.currentProject.title }}</h1>
                 <p v-if="state.currentProject.title_en" class="english-title">{{ state.currentProject.title_en }}</p>
-                <p>{{ state.currentProject.summary }}</p>
+                <p>{{ state.currentProject.problem_statement }}</p>
                 <div class="tag-row">
                   <span v-for="tag in state.currentProject.tags" :key="tag.id">{{ tag.name }}</span>
                 </div>
               </div>
               <div class="score-panel">
-                <strong>{{ displayScore(state.currentProject.composite_score) }}</strong>
-                <span>综合评分</span>
+                <strong>ID {{ state.currentProject.topic_id }}</strong>
+                <span>课题编号</span>
                 <button v-if="shouldShowFollowButton(state.currentProject)" class="primary-button follow-button" :class="{ active: isProjectFollowing(state.currentProject) }" type="button" @click="toggleFollow(state.currentProject)">
                   {{ isProjectFollowing(state.currentProject) ? '已收藏' : '收藏课题' }}
                 </button>
@@ -2871,12 +2864,6 @@ const App = {
                   <section><h3>科学问题</h3><p>{{ state.currentProject.problem_statement || '待补充' }}</p></section>
                   <section><h3>临床终点</h3><p>{{ state.currentProject.clinical_endpoint || '待补充' }}</p></section>
                   <section><h3>已有基础</h3><p>{{ state.currentProject.existing_foundation || '待补充' }}</p></section>
-                  <section><h3>研究目标</h3><p>{{ state.currentProject.research_goal || '待补充' }}</p></section>
-                  <section><h3>技术路线</h3><p>{{ state.currentProject.technical_route || '待补充' }}</p></section>
-                  <section><h3>数据需求</h3><p>{{ formatList(state.currentProject.data_requirements) }}</p></section>
-                  <section><h3>评价指标</h3><p>{{ formatList(state.currentProject.evaluation_metrics) }}</p></section>
-                  <section><h3>预期成果</h3><p>{{ formatList(state.currentProject.expected_outputs) }}</p></section>
-                  <section><h3>合规说明</h3><p>{{ state.currentProject.compliance_notes || '第一版默认不允许上传可识别患者数据。' }}</p></section>
                 </div>
               </article>
 
@@ -3101,7 +3088,7 @@ const App = {
                         <span class="status-chip strong">{{ myTaskStatusLabel(task) }}</span>
                       </div>
                       <h2>{{ task.project.title }}</h2>
-                      <p>{{ shortText(task.project.summary || task.project.problem_statement, 180) }}</p>
+                      <p>{{ shortText(task.project.problem_statement, 180) }}</p>
                       <small>{{ task.project.topic_id }} · {{ task.project.theme?.name || '未分类' }}</small>
                       <div class="relation-summary">{{ taskRelationSummary(task) }}</div>
                       <div v-if="task.contributions.length" class="task-result-strip">
@@ -3193,14 +3180,13 @@ const App = {
                     <span>{{ project.stage_label }}</span>
                   </div>
                   <h3>{{ project.title }}</h3>
-                  <p>{{ shortText(project.summary || project.problem_statement, 180) }}</p>
+                  <p>{{ shortText(project.problem_statement, 180) }}</p>
                   <div class="tag-row">
                     <span v-for="tag in project.tags.slice(0, 5)" :key="tag.id">{{ tag.name }}</span>
                   </div>
                 </div>
                 <div class="project-list-side">
                   <dl class="card-metrics">
-                    <div><dt>综合评分</dt><dd>{{ displayScore(project.composite_score) }}</dd></div>
                     <div><dt>收藏</dt><dd>{{ project.follow_count || 0 }}</dd></div>
                     <div><dt>参与</dt><dd>{{ project.interest_count || 0 }}</dd></div>
                   </dl>
@@ -3359,7 +3345,7 @@ const App = {
                 <div class="admin-table task-project-table">
                   <div class="admin-table-head"><span>课题名称</span><span>主题</span><span>课题状态</span><span>课题 ID</span><span>操作</span></div>
                   <div class="admin-table-row" v-for="project in state.admin.taskProjects" :key="project.id">
-                    <span><strong>{{ project.title }}</strong><small>{{ shortText(project.summary || project.problem_statement, 80) }}</small></span>
+                    <span><strong>{{ project.title }}</strong><small>{{ shortText(project.problem_statement, 80) }}</small></span>
                     <span>{{ project.theme?.name || '未分类' }}</span>
                     <span>{{ project.stage_label }}</span>
                     <span>{{ project.topic_id }}</span>
@@ -3526,33 +3512,14 @@ const App = {
                       </div>
                       <label><span>Title（中文）</span><input v-model="state.admin.projectForm.title" type="text" /></label>
                       <label><span>Title（英文，选填）</span><input v-model="state.admin.projectForm.title_en" type="text" /></label>
-                      <label><span>摘要</span><textarea v-model="state.admin.projectForm.summary"></textarea></label>
                       <div class="form-grid">
                         <label><span>科学问题（50字以内）</span><input v-model="state.admin.projectForm.problem_statement" type="text" maxlength="50" /></label>
                         <label><span>临床终点（50字以内）</span><input v-model="state.admin.projectForm.clinical_endpoint" type="text" maxlength="50" /></label>
                         <label><span>已有基础（50字以内）</span><input v-model="state.admin.projectForm.existing_foundation" type="text" maxlength="50" /></label>
                       </div>
-                      <label><span>研究目标</span><textarea v-model="state.admin.projectForm.research_goal"></textarea></label>
-                      <label><span>技术路线</span><textarea v-model="state.admin.projectForm.technical_route"></textarea></label>
-                      <div class="form-grid">
-                        <label><span>数据类型</span><input v-model="state.admin.projectForm.data_type" type="text" /></label>
-                        <label><span>最小样本量</span><input v-model="state.admin.projectForm.minimum_cases" type="number" min="0" /></label>
-                        <label><span>数据来源</span><input v-model="state.admin.projectForm.data_source" type="text" /></label>
-                        <label><span>隐私要求</span><input v-model="state.admin.projectForm.privacy" type="text" /></label>
-                      </div>
-                      <div class="form-grid">
-                        <label><span>评价指标（每行一条）</span><textarea v-model="state.admin.projectForm.evaluation_metrics"></textarea></label>
-                        <label><span>预期成果（每行一条）</span><textarea v-model="state.admin.projectForm.expected_outputs"></textarea></label>
-                      </div>
-                      <label><span>合规说明</span><textarea v-model="state.admin.projectForm.compliance_notes"></textarea></label>
                       <div class="form-grid">
                         <label><span>标签（逗号分隔）</span><input v-model="state.admin.projectForm.tags" type="text" /></label>
-                        <label><span>需要角色（逗号分隔）</span><input v-model="state.admin.projectForm.needed_roles" type="text" /></label>
-                        <label><span>初始评分</span><input v-model="state.admin.projectForm.llm_score" type="number" step="0.1" /></label>
-                        <label><span>综合评分</span><input v-model="state.admin.projectForm.composite_score" type="number" step="0.1" /></label>
                       </div>
-                      <label><span>推荐期刊</span><input v-model="state.admin.projectForm.recommended_journal" type="text" /></label>
-                      <label><span>评分维度（维度|分数，每行一条）</span><textarea class="score-dimensions-editor" v-model="state.admin.projectForm.score_dimensions"></textarea></label>
                       <div class="button-row form-actions">
                         <label class="inline-check"><input v-model="state.admin.projectForm.is_public" type="checkbox" /> 公开展示</label>
                         <button class="ghost-button" type="submit">保存草稿</button>
@@ -4086,7 +4053,7 @@ const App = {
                   <div>
                     <strong>{{ state.admin.taskProjectDetail.project.title }}</strong>
                     <small>{{ state.admin.taskProjectDetail.project.theme?.name || '未分类' }} · {{ state.admin.taskProjectDetail.project.stage_label }}</small>
-                    <p>{{ shortText(state.admin.taskProjectDetail.project.summary || state.admin.taskProjectDetail.project.problem_statement, 180) }}</p>
+                    <p>{{ shortText(state.admin.taskProjectDetail.project.problem_statement, 180) }}</p>
                   </div>
                   <div class="button-row">
                     <button v-if="state.admin.taskProjectDetail.project.stage !== 'active' && state.admin.taskProjectDetail.project.stage !== 'archived'" class="ghost-button" type="button" @click="updateTaskProjectStage(state.admin.taskProjectDetail.project, 'active')">进入进行中</button>
@@ -4216,14 +4183,14 @@ const App = {
                     <span class="eyebrow">{{ state.currentProject.theme?.name || '未分类' }} · {{ state.currentProject.stage_label }}</span>
                     <h1>{{ state.currentProject.title }}</h1>
                     <p v-if="state.currentProject.title_en" class="english-title">{{ state.currentProject.title_en }}</p>
-                    <p>{{ state.currentProject.summary }}</p>
+                    <p>{{ state.currentProject.problem_statement }}</p>
                     <div class="tag-row">
                       <span v-for="tag in state.currentProject.tags" :key="tag.id">{{ tag.name }}</span>
                     </div>
                   </div>
                   <div class="score-panel">
-                    <strong>{{ displayScore(state.currentProject.composite_score) }}</strong>
-                    <span>综合评分</span>
+                    <strong>ID {{ state.currentProject.topic_id }}</strong>
+                    <span>课题编号</span>
                     <button v-if="shouldShowFollowButton(state.currentProject)" class="primary-button follow-button" :class="{ active: isProjectFollowing(state.currentProject) }" type="button" @click="toggleFollow(state.currentProject)">
                       {{ isProjectFollowing(state.currentProject) ? '已收藏' : '收藏课题' }}
                     </button>
@@ -4237,12 +4204,6 @@ const App = {
                       <section><h3>科学问题</h3><p>{{ state.currentProject.problem_statement || '待补充' }}</p></section>
                       <section><h3>临床终点</h3><p>{{ state.currentProject.clinical_endpoint || '待补充' }}</p></section>
                       <section><h3>已有基础</h3><p>{{ state.currentProject.existing_foundation || '待补充' }}</p></section>
-                      <section><h3>研究目标</h3><p>{{ state.currentProject.research_goal || '待补充' }}</p></section>
-                      <section><h3>技术路线</h3><p>{{ state.currentProject.technical_route || '待补充' }}</p></section>
-                      <section><h3>数据需求</h3><p>{{ formatList(state.currentProject.data_requirements) }}</p></section>
-                      <section><h3>评价指标</h3><p>{{ formatList(state.currentProject.evaluation_metrics) }}</p></section>
-                      <section><h3>预期成果</h3><p>{{ formatList(state.currentProject.expected_outputs) }}</p></section>
-                      <section><h3>合规说明</h3><p>{{ state.currentProject.compliance_notes || '第一版默认不允许上传可识别患者数据。' }}</p></section>
                     </div>
                   </article>
 
@@ -4391,60 +4352,27 @@ function emptyProjectForm() {
     theme: "",
     title: "",
     title_en: "",
-    summary: "",
     problem_statement: "",
     clinical_endpoint: "",
     existing_foundation: "",
-    research_goal: "",
-    technical_route: "",
-    data_type: "",
-    minimum_cases: "",
-    data_source: "",
-    privacy: "",
-    evaluation_metrics: "",
-    expected_outputs: "",
-    compliance_notes: "",
     stage: "draft",
     tags: "",
-    llm_score: "",
-    community_score: "",
-    composite_score: "",
-    recommended_journal: "",
-    needed_roles: "",
-    score_dimensions: "",
     is_public: false
   };
 }
 
 function projectToForm(project) {
-  const requirements = project.data_requirements || {};
   return {
     id: project.id,
     topic_id: project.topic_id || "",
     theme: project.theme?.slug || project.theme?.name || "",
     title: project.title || "",
     title_en: project.title_en || "",
-    summary: project.summary || "",
     problem_statement: project.problem_statement || "",
     clinical_endpoint: project.clinical_endpoint || "",
     existing_foundation: project.existing_foundation || "",
-    research_goal: project.research_goal || "",
-    technical_route: project.technical_route || "",
-    data_type: requirements.data_type || (Array.isArray(requirements.modalities) ? requirements.modalities.join("，") : ""),
-    minimum_cases: requirements.minimum_cases ?? "",
-    data_source: requirements.data_source || requirements.source || "",
-    privacy: requirements.privacy || "",
-    evaluation_metrics: formatMultilineList(project.evaluation_metrics || []),
-    expected_outputs: formatMultilineList(project.expected_outputs || []),
-    compliance_notes: project.compliance_notes || "",
     stage: project.stage || "open_recruiting",
     tags: (project.tags || []).map((tag) => tag.name).join("，"),
-    llm_score: project.llm_score ?? "",
-    community_score: project.community_score ?? "",
-    composite_score: project.composite_score ?? "",
-    recommended_journal: project.recommended_journal || "",
-    needed_roles: (project.needed_roles || []).join("，"),
-    score_dimensions: formatScoreDimensionLines(project.score_dimensions || {}),
     is_public: Boolean(project.is_public)
   };
 }
@@ -4455,24 +4383,11 @@ function projectFormPayload(form) {
     theme: form.theme,
     title: form.title.trim(),
     title_en: form.title_en.trim(),
-    summary: form.summary,
     problem_statement: form.problem_statement,
     clinical_endpoint: form.clinical_endpoint,
     existing_foundation: form.existing_foundation,
-    research_goal: form.research_goal,
-    technical_route: form.technical_route,
-    data_requirements: dataRequirementsPayload(form),
-    evaluation_metrics: parseMultilineList(form.evaluation_metrics),
-    expected_outputs: parseMultilineList(form.expected_outputs),
-    compliance_notes: form.compliance_notes,
     stage: form.stage,
     tags: parseListInput(form.tags),
-    llm_score: optionalNumber(form.llm_score),
-    community_score: optionalNumber(form.community_score),
-    composite_score: optionalNumber(form.composite_score),
-    recommended_journal: form.recommended_journal,
-    needed_roles: parseListInput(form.needed_roles),
-    score_dimensions: scoreDimensionsPayload(form.score_dimensions),
     is_public: Boolean(form.is_public)
   };
 }
@@ -4550,17 +4465,6 @@ function roleCountEntries(teamStatus) {
   return Object.entries(teamStatus?.roles || {});
 }
 
-function formatList(value) {
-  if (!value) return "待补充";
-  if (Array.isArray(value)) return value.length ? value.join("、") : "待补充";
-  if (typeof value === "object") {
-    return Object.entries(value)
-      .map(([key, item]) => `${key}: ${Array.isArray(item) ? item.join("、") : item}`)
-      .join("；");
-  }
-  return String(value);
-}
-
 function fileTypeLabel(type) {
   return {
     dataset: "数据集文件",
@@ -4616,7 +4520,6 @@ function uniqueSlugHint(value) {
 async function findJsonImportDuplicates(payload) {
   const queries = [];
   if (payload.topic_id) queries.push({ topic_id: payload.topic_id, page_size: 3 });
-  if (payload.content_hash) queries.push({ content_hash: payload.content_hash, page_size: 3 });
   if (payload.title) queries.push({ q: payload.title, page_size: 3 });
   const byId = new Map();
   for (const query of queries) {
@@ -4637,69 +4540,10 @@ function duplicateWarningsForImport(payload, duplicates) {
       warnings.push("已有课题将更新为草稿并暂不公开");
     }
   }
-  if (payload.content_hash && duplicates.some((project) => project.content_hash === payload.content_hash && Number(project.topic_id) !== Number(payload.topic_id))) {
-    warnings.push("JSON 内容可能重复");
-  }
   if (payload.title && duplicates.some((project) => project.title === payload.title && Number(project.topic_id) !== Number(payload.topic_id))) {
     warnings.push("标题可能重复");
   }
   return warnings;
-}
-
-async function sha256Hex(text) {
-  if (!globalThis.crypto?.subtle || typeof TextEncoder === "undefined") return "";
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(text || "")));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function parseMultilineList(text) {
-  return String(text || "")
-    .split("\n")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function formatMultilineList(items) {
-  if (!Array.isArray(items)) return "";
-  return items
-    .map((item) => String(item || "").trim())
-    .filter(Boolean)
-    .join("\n");
-}
-
-function scoreDimensionsPayload(text) {
-  const entries = String(text || "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const [name = "", rawValue = ""] = line.split("|").map((part) => part.trim());
-      if (!name) return null;
-      const number = optionalNumber(rawValue);
-      return [name, number ?? rawValue];
-    })
-    .filter(Boolean);
-  return Object.fromEntries(entries);
-}
-
-function formatScoreDimensionLines(dimensions) {
-  if (!dimensions || typeof dimensions !== "object" || Array.isArray(dimensions)) return "";
-  return Object.entries(dimensions)
-    .map(([name, value]) => `${name}|${value ?? ""}`)
-    .filter((line) => line.replace(/\|/g, "").trim())
-    .join("\n");
-}
-
-function dataRequirementsPayload(form) {
-  const payload = {
-    data_type: String(form.data_type || "").trim(),
-    minimum_cases: optionalNumber(form.minimum_cases),
-    data_source: String(form.data_source || "").trim(),
-    privacy: String(form.privacy || "").trim()
-  };
-  return Object.fromEntries(Object.entries(payload).filter(([, value]) => value !== "" && value !== null));
 }
 
 function parseDocumentLines(text) {
@@ -4731,12 +4575,6 @@ function parseListInput(text) {
     .split(/[,，\n]/)
     .map((item) => item.trim())
     .filter(Boolean);
-}
-
-function optionalNumber(value) {
-  if (value === "" || value === null || value === undefined) return null;
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
 }
 
 function roleCardsFor(capabilities) {

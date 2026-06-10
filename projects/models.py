@@ -64,31 +64,12 @@ class Project(models.Model):
     topic_id = models.PositiveIntegerField(unique=True)
     title = models.CharField(max_length=255)
     title_en = models.CharField(max_length=255, blank=True)
-    summary = models.TextField(blank=True)
     problem_statement = models.TextField(blank=True)
     clinical_endpoint = models.CharField(max_length=50, blank=True)
     existing_foundation = models.CharField(max_length=50, blank=True)
-    research_goal = models.TextField(blank=True)
-    technical_route = models.TextField(blank=True)
-    data_requirements = models.JSONField(default=dict, blank=True)
-    evaluation_metrics = models.JSONField(default=list, blank=True)
-    expected_outputs = models.JSONField(default=list, blank=True)
-    compliance_notes = models.TextField(blank=True)
-    body_markdown = models.TextField(blank=True)
     theme = models.ForeignKey(Theme, on_delete=models.SET_NULL, null=True, blank=True, related_name="projects")
     stage = models.CharField(max_length=32, choices=ProjectStage.choices, default=ProjectStage.DRAFT)
-    source_md_path = models.CharField(max_length=500, blank=True, db_index=True)
-    source_pdf_path = models.CharField(max_length=500, blank=True)
-    page_path = models.CharField(max_length=500, blank=True)
-    content_hash = models.CharField(max_length=64, blank=True, db_index=True)
-    llm_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
-    community_score = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True)
-    composite_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
-    recommended_journal = models.CharField(max_length=160, blank=True)
-    needed_roles = models.JSONField(default=list, blank=True)
-    score_dimensions = models.JSONField(default=dict, blank=True)
     source_payload = models.JSONField(default=dict, blank=True)
-    has_pdf = models.BooleanField(default=False)
     is_public = models.BooleanField(default=False)
     imported_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -96,13 +77,10 @@ class Project(models.Model):
     tags = models.ManyToManyField(Tag, through="ProjectTag", related_name="projects", blank=True)
 
     class Meta:
-        ordering = ["-composite_score", "-llm_score", "topic_id"]
+        ordering = ["topic_id"]
         indexes = [
             models.Index(fields=["stage", "is_public"]),
             models.Index(fields=["theme", "stage"]),
-            models.Index(fields=["has_pdf"]),
-            models.Index(fields=["-composite_score"]),
-            models.Index(fields=["-community_score"]),
             models.Index(fields=["-updated_at"]),
         ]
     def __str__(self):

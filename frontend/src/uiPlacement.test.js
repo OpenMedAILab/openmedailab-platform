@@ -253,14 +253,19 @@ test("admin project form uses structured project inputs instead of json textarea
   assert.doesNotMatch(mainSource, /预期成果 JSON/);
   assert.doesNotMatch(mainSource, /文件列表 JSON/);
   assert.doesNotMatch(mainSource, /评分维度 JSON/);
-  assert.match(mainSource, /数据类型/);
-  assert.match(mainSource, /最小样本量/);
-  assert.match(mainSource, /评价指标（每行一条）/);
-  assert.match(mainSource, /预期成果（每行一条）/);
+  assert.match(mainSource, /Title（中文）/);
+  assert.match(mainSource, /Title（英文，选填）/);
+  assert.match(mainSource, /科学问题（50字以内）/);
+  assert.match(mainSource, /临床终点（50字以内）/);
+  assert.match(mainSource, /已有基础（50字以内）/);
+  assert.doesNotMatch(mainSource, /数据类型/);
+  assert.doesNotMatch(mainSource, /最小样本量/);
+  assert.doesNotMatch(mainSource, /评价指标（每行一条）/);
+  assert.doesNotMatch(mainSource, /预期成果（每行一条）/);
   assert.doesNotMatch(mainSource, /文件列表（类型\\|标题\\|路径，每行一条）/);
   assert.doesNotMatch(mainSource, /Markdown 路径/);
   assert.doesNotMatch(mainSource, /正文 Markdown/);
-  assert.match(mainSource, /评分维度（维度\\|分数，每行一条）/);
+  assert.doesNotMatch(mainSource, /评分维度（维度\\|分数，每行一条）/);
 });
 
 test("admin project form is opened in a modal instead of occupying the normal project list view", () => {
@@ -272,9 +277,9 @@ test("admin project form is opened in a modal instead of occupying the normal pr
   assert.doesNotMatch(mainSource, /id="admin-project-form"/);
 });
 
-test("admin project score dimensions use line based structured input instead of hand written json", () => {
-  assert.match(mainSource, /formatScoreDimensionLines/);
-  assert.match(mainSource, /scoreDimensionsPayload/);
+test("admin project form no longer exposes score dimension fields", () => {
+  assert.doesNotMatch(mainSource, /formatScoreDimensionLines/);
+  assert.doesNotMatch(mainSource, /scoreDimensionsPayload/);
   assert.doesNotMatch(mainSource, /parseJsonStrict\(form\.score_dimensions,\s*"评分维度"/);
   assert.doesNotMatch(mainSource, /score_dimensions:\s*parseJsonOrFallback\(form\.score_dimensions/);
 });
