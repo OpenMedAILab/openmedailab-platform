@@ -10,7 +10,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.conf import settings
 from django.test import Client, TestCase, override_settings
 
-from accounts.models import PLATFORM_ADMIN_UID
+from accounts.models import PLATFORM_ADMIN_UID, RoleType
 from credits.models import Contribution, ContributionStatus, CreditLedger
 from interactions.models import InteractionStatus, ProjectClaimIntent, ProjectFollow, ProjectInterest, ProjectScore, SponsorIntent
 from projects.models import AuditLog, Project, ProjectDocument, ProjectStage, ProjectTask, Tag, Theme, ThemeFile
@@ -25,6 +25,7 @@ class ApiTests(TestCase):
             topic_id=1,
             title="纵向病例证据 RAG",
             title_en="Longitudinal evidence RAG",
+            summary="用纵向病例证据增强可复核的医学AI判断。",
             problem_statement="随访证据分散，难以复核。",
             clinical_endpoint="复核一致性",
             existing_foundation="已有随访摘要",
@@ -52,6 +53,15 @@ class ApiTests(TestCase):
         return admin
 
     def test_project_list_and_detail_api(self):
+        ProjectDocument.objects.create(
+            project=self.project,
+            doc_type=ProjectDocument.DocumentType.MARKDOWN,
+            title="课题介绍",
+            description="课题介绍",
+            path="media/project-documents/T0001/intro.md",
+            content_hash="document-public-hash",
+        )
+
         list_response = self.client.get("/api/projects/?q=RAG&page_size=10")
         self.assertEqual(list_response.status_code, 200)
         list_payload = list_response.json()
@@ -63,7 +73,10 @@ class ApiTests(TestCase):
         self.assertEqual(detail_response.status_code, 200)
         detail_payload = detail_response.json()
         self.assertEqual(detail_payload["data"]["team_status"]["basic_ready"], False)
-        self.assertNotIn("documents", detail_payload["data"])
+        self.assertEqual(detail_payload["data"]["documents"][0]["title"], "课题介绍")
+        self.assertEqual(detail_payload["data"]["documents"][0]["description"], "课题介绍")
+        self.assertEqual(detail_payload["data"]["documents"][0]["path"], "media/project-documents/T0001/intro.md")
+        self.assertNotIn("document-public-hash", json.dumps(detail_payload["data"], ensure_ascii=False))
         self.assertEqual(detail_payload["data"]["problem_statement"], "随访证据分散，难以复核。")
         self.assertEqual(detail_payload["data"]["clinical_endpoint"], "复核一致性")
         self.assertEqual(detail_payload["data"]["existing_foundation"], "已有随访摘要")
@@ -191,7 +204,7 @@ class ApiTests(TestCase):
         self.assertIn("/api/auth/password/change-required/", schema["paths"])
         self.assertIn("/api/admin/users/", schema["paths"])
         self.assertIn("/api/admin/users/{uid}/reset-password/", schema["paths"])
-        self.assertNotIn("/api/admin/projects/import-json/", schema["paths"])
+        self.assertIn("/api/admin/projects/import-json/", schema["paths"])
         self.assertIn("/api/admin/theme-files/", schema["paths"])
         self.assertIn("/api/admin/file-space/", schema["paths"])
         self.assertIn("/api/admin/file-space/file/", schema["paths"])
@@ -219,15 +232,16 @@ class ApiTests(TestCase):
         self.assertIn("problem_statement", contract_fields)
         self.assertIn("clinical_endpoint", contract_fields)
         self.assertIn("existing_foundation", contract_fields)
+        self.assertIn("summary", contract_fields)
         self.assertNotIn("data_requirements", contract_fields)
-        self.assertNotIn("summary", contract_fields)
         self.assertNotIn("project_no", contract_fields)
         self.assertNotIn("documents", contract_fields)
         self.assertNotIn("source_md_path", contract_fields)
         self.assertNotIn("source_pdf_path", contract_fields)
-        self.assertIn("jsonl_template", contract_data)
-        self.assertNotIn('"id":1', contract_data["jsonl_template"])
-        self.assertIn("250字以内", contract_data["jsonl_template"])
+        self.assertIn("json_template", contract_data)
+        self.assertNotIn("jsonl_template", contract_data)
+        self.assertNotIn('"id":1', contract_data["json_template"])
+        self.assertIn("250字以内", contract_data["json_template"])
         self.assertNotIn("markdown_template", contract_data)
         self.assertNotIn("example", contract_data)
         theme_file_types = [item["value"] for item in contract_data["theme_file_types"]]
@@ -386,6 +400,7 @@ class ApiTests(TestCase):
                 "theme": "视网膜影像",
                 "title": "OCT 病灶分割评估",
                 "title_en": "OCT lesion segmentation evaluation",
+                "summary": "评估OCT病灶分割结果能否形成稳定、可复核的临床辅助证据。",
                 "problem_statement": "验证分割结果能否复核。",
                 "clinical_endpoint": "医生复核一致性",
                 "existing_foundation": "已有OCT标注",
@@ -443,6 +458,7 @@ class ApiTests(TestCase):
             {
                 "theme": self.theme.slug,
                 "title": "新建课题",
+                "summary": "新建课题摘要",
                 "problem_statement": "科学问题",
                 "clinical_endpoint": "临床终点",
                 "existing_foundation": "已有基础",
@@ -465,6 +481,7 @@ class ApiTests(TestCase):
                 "id": created.topic_id,
                 "theme": self.theme.slug,
                 "title": "重复课题",
+                "summary": "重复课题摘要",
                 "problem_statement": "科学问题",
                 "clinical_endpoint": "临床终点",
                 "existing_foundation": "已有基础",
@@ -479,6 +496,7 @@ class ApiTests(TestCase):
                 "topic_id": "ROP-1",
                 "theme": self.theme.slug,
                 "title": "旧编号课题",
+                "summary": "旧编号课题摘要",
                 "problem_statement": "科学问题",
                 "clinical_endpoint": "临床终点",
                 "existing_foundation": "已有基础",
@@ -498,6 +516,7 @@ class ApiTests(TestCase):
             {
                 "theme": "不存在主题",
                 "title": "未知主题课题",
+                "summary": "未知主题课题摘要",
                 "problem_statement": "科学问题",
                 "clinical_endpoint": "临床终点",
                 "existing_foundation": "已有基础",
@@ -515,8 +534,175 @@ class ApiTests(TestCase):
         self.assertEqual(len(topic_rows), 1)
         self.assertEqual(topic_rows[0]["topic_id"], 1)
 
+    def test_admin_project_list_orders_by_topic_id_ascending(self):
+        self.login_platform_admin()
+        Project.objects.create(
+            topic_id=3,
+            title="第三个课题",
+            summary="用于测试排序。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        Project.objects.create(
+            topic_id=2,
+            title="第二个课题",
+            summary="用于测试排序。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        later = Project.objects.get(topic_id=1)
+        later.title = "最近更新但编号最小"
+        later.save(update_fields=["title", "updated_at"])
+
+        response = self.client.get("/api/admin/projects/?page_size=10")
+
+        self.assertEqual(response.status_code, 200)
+        rows = response.json()["data"]["results"]
+        self.assertEqual([row["topic_id"] for row in rows[:3]], [1, 2, 3])
+
+    def test_admin_project_bulk_archive_hides_selected_projects(self):
+        self.login_platform_admin()
+        second = Project.objects.create(
+            topic_id=2,
+            title="批量删除课题二",
+            summary="用于测试批量归档。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        third = Project.objects.create(
+            topic_id=3,
+            title="批量删除课题三",
+            summary="用于测试批量归档。",
+            theme=self.theme,
+            stage=ProjectStage.ACTIVE,
+            is_public=True,
+        )
+
+        response = self.post_json("/api/admin/projects/bulk-archive/", {"ids": [second.pk, third.pk, third.pk, 999999]})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["data"]
+        self.assertEqual(payload["archived_count"], 2)
+        self.assertEqual(payload["missing_ids"], [999999])
+        second.refresh_from_db()
+        third.refresh_from_db()
+        self.project.refresh_from_db()
+        self.assertEqual(second.stage, ProjectStage.ARCHIVED)
+        self.assertFalse(second.is_public)
+        self.assertEqual(third.stage, ProjectStage.ARCHIVED)
+        self.assertFalse(third.is_public)
+        self.assertEqual(self.project.stage, ProjectStage.OPEN_RECRUITING)
+        self.assertTrue(self.project.is_public)
+        public_response = self.client.get("/api/projects/?page_size=10")
+        public_topic_ids = {item["topic_id"] for item in public_response.json()["data"]["results"]}
+        self.assertIn(self.project.topic_id, public_topic_ids)
+        self.assertNotIn(second.topic_id, public_topic_ids)
+        self.assertNotIn(third.topic_id, public_topic_ids)
+        self.assertTrue(AuditLog.objects.filter(action="project.bulk_archive", target_id="bulk").exists())
+
+    def test_admin_project_json_import_auto_assigns_incrementing_topic_ids(self):
+        self.login_platform_admin()
+
+        response = self.post_json(
+            "/api/admin/projects/import-json/",
+            {
+                "projects": [
+                    {
+                        "theme": "FFA",
+                        "title": "FFA 图文证据链病例复核基准",
+                        "summary": "围绕 FFA 图文证据链构建可复核开放课题。",
+                        "problem_statement": "证据链难以追踪。",
+                        "clinical_endpoint": "证据忠实度",
+                        "existing_foundation": "已有 FFA 多源数据。",
+                    },
+                    {
+                        "theme": "FFA",
+                        "title": "FFA 时相质量控制",
+                        "summary": "围绕 FFA 时相质量控制形成开放研究课题。",
+                        "problem_statement": "时相质量不稳定。",
+                        "clinical_endpoint": "时相识别一致性",
+                        "existing_foundation": "已有 FFA 图像和报告。",
+                    },
+                ]
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["data"]
+        self.assertEqual(payload["created_count"], 2)
+        self.assertEqual([item["project"]["topic_code"] for item in payload["results"]], ["T0002", "T0003"])
+        self.assertEqual(Project.objects.get(title="FFA 图文证据链病例复核基准").topic_id, 2)
+        self.assertEqual(Project.objects.get(title="FFA 时相质量控制").topic_id, 3)
+        self.assertTrue(Theme.objects.filter(name="FFA").exists())
+
+        explicit_response = self.post_json(
+            "/api/admin/projects/import-json/",
+            {
+                "projects": [
+                    {
+                        "id": "T0010",
+                        "theme": "FFA",
+                        "title": "显式编号课题",
+                        "summary": "显式编号导入。",
+                    },
+                    {
+                        "theme": "FFA",
+                        "title": "自动编号跟随最大值",
+                        "summary": "显式编号后继续自动递增。",
+                    },
+                ]
+            },
+        )
+
+        self.assertEqual(explicit_response.status_code, 200)
+        explicit_payload = explicit_response.json()["data"]
+        self.assertEqual([item["project"]["topic_code"] for item in explicit_payload["results"]], ["T0010", "T0011"])
+
         title_response = self.client.get("/api/admin/projects/?q=纵向病例&page_size=10")
         self.assertEqual(title_response.json()["data"]["pagination"]["total_count"], 1)
+
+    def test_admin_project_json_import_auto_number_ignores_source_ids(self):
+        self.login_platform_admin()
+        Project.objects.create(
+            topic_id=2,
+            title="已有第二个课题",
+            summary="已有课题。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+
+        response = self.post_json(
+            "/api/admin/projects/import-json/",
+            {
+                "auto_number": True,
+                "projects": [
+                    {
+                        "id": "T0001",
+                        "theme": "FFA",
+                        "title": "自动编号导入课题一",
+                        "summary": "虽然 JSON 写了 T0001，但导入时应从现有最大编号继续。",
+                    },
+                    {
+                        "id": "T0002",
+                        "theme": "FFA",
+                        "title": "自动编号导入课题二",
+                        "summary": "虽然 JSON 写了 T0002，但导入时应从现有最大编号继续。",
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["data"]
+        self.assertEqual(payload["created_count"], 2)
+        self.assertEqual(payload["updated_count"], 0)
+        self.assertEqual([item["project"]["topic_code"] for item in payload["results"]], ["T0003", "T0004"])
+        self.assertEqual(Project.objects.get(topic_id=1).title, "纵向病例证据 RAG")
+        self.assertEqual(Project.objects.get(topic_id=2).title, "已有第二个课题")
 
     def test_admin_user_list_orders_platform_admin_first_then_uid(self):
         admin = self.login_platform_admin()
@@ -554,6 +740,13 @@ class ApiTests(TestCase):
             path="/Users/wang/private/topics/AntiVEGF-001.md",
             content_hash="document-internal-hash",
         )
+        ProjectDocument.objects.create(
+            project=self.project,
+            doc_type=ProjectDocument.DocumentType.MARKDOWN,
+            title="穿越路径",
+            path="/media/../private/secret.md",
+            content_hash="document-traversal-hash",
+        )
 
         response = self.client.get(f"/api/projects/{self.project.pk}/")
 
@@ -561,8 +754,173 @@ class ApiTests(TestCase):
         payload = response.json()["data"]
         self.assertNotIn("source_payload", payload)
         self.assertNotIn("imported_at", payload)
+        self.assertEqual(payload["documents"], [])
         self.assertNotIn("/Users/wang/private", json.dumps(payload, ensure_ascii=False))
         self.assertNotIn("document-internal-hash", json.dumps(payload, ensure_ascii=False))
+        self.assertNotIn("document-traversal-hash", json.dumps(payload, ensure_ascii=False))
+
+    def test_admin_project_document_upload_requires_description_and_serves_public_detail(self):
+        self.login_platform_admin()
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir), MEDIA_URL="media/"):
+            missing_description = self.client.post(
+                "/api/admin/project-documents/upload/",
+                {
+                    "project_id": self.project.pk,
+                    "doc_type": "markdown",
+                    "title": "课题介绍",
+                    "files": SimpleUploadedFile("intro.md", b"# Intro", content_type="text/markdown"),
+                },
+            )
+            self.assertEqual(missing_description.status_code, 422)
+
+            response = self.client.post(
+                "/api/admin/project-documents/upload/",
+                {
+                    "project_id": self.project.pk,
+                    "doc_type": "markdown",
+                    "title": "课题介绍",
+                    "description": "课题介绍",
+                    "files": SimpleUploadedFile("intro.md", b"# Intro", content_type="text/markdown"),
+                },
+            )
+
+            self.assertEqual(response.status_code, 201)
+            payload = response.json()["data"]
+            self.assertEqual(payload["saved"][0]["description"], "课题介绍")
+            self.assertTrue(payload["saved"][0]["path"].endswith("media/project-documents/T0001/intro.md"))
+            saved_path = Path(tmpdir) / "project-documents" / "T0001" / "intro.md"
+            self.assertTrue(saved_path.exists())
+
+            public_response = self.client.get(f"/api/projects/{self.project.pk}/")
+            self.assertEqual(public_response.status_code, 200)
+            public_document = public_response.json()["data"]["documents"][0]
+            self.assertEqual(public_document["title"], "课题介绍")
+            self.assertEqual(public_document["description"], "课题介绍")
+            self.assertEqual(public_document["path"], payload["saved"][0]["path"])
+
+            delete_response = self.client.delete(f"/api/admin/project-documents/{payload['saved'][0]['id']}/")
+            self.assertEqual(delete_response.status_code, 200)
+            self.assertFalse(ProjectDocument.objects.filter(pk=payload["saved"][0]["id"]).exists())
+            self.assertFalse(saved_path.exists())
+
+    def test_import_project_bundle_binds_pdf_documents(self):
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir) / "media", MEDIA_URL="media/"):
+            source_dir = Path(tmpdir) / "source"
+            source_dir.mkdir()
+            pdf_path = source_dir / "detail.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n% OpenMedAILab test PDF\n%%EOF\n")
+            project_json = source_dir / "projects.json"
+            document_json = source_dir / "documents.json"
+            project_json.write_text(
+                json.dumps(
+                    {
+                        "projects": [
+                            {
+                                "id": "T0002",
+                                "theme": "FFA",
+                                "title": "FFA 图文证据链病例复核基准",
+                                "summary": "围绕 FFA 图文证据链构建可复核开放课题。",
+                                "tags": ["FFA", "RAG"],
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            document_json.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "T0002",
+                            "pdf_path": str(pdf_path),
+                            "doc_type": "pdf",
+                            "document_title": "项目详细说明",
+                            "description": "完整课题方案 PDF",
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            call_command("import_project_bundle", projects=str(project_json), documents=str(document_json), publish=True)
+
+            project = Project.objects.get(topic_id=2)
+            self.assertTrue(project.is_public)
+            self.assertEqual(project.stage, ProjectStage.OPEN_RECRUITING)
+            document = project.documents.get()
+            self.assertEqual(document.doc_type, ProjectDocument.DocumentType.PDF)
+            self.assertEqual(document.title, "项目详细说明")
+            self.assertEqual(document.description, "完整课题方案 PDF")
+            self.assertTrue(document.path.endswith("media/project-documents/T0002/detail.pdf"))
+            self.assertTrue((Path(tmpdir) / "media" / "project-documents" / "T0002" / "detail.pdf").exists())
+
+            public_response = self.client.get(f"/api/projects/{project.pk}/")
+            self.assertEqual(public_response.status_code, 200)
+            public_document = public_response.json()["data"]["documents"][0]
+            self.assertEqual(public_document["doc_type"], "pdf")
+            self.assertEqual(public_document["path"], document.path)
+
+    def test_import_project_bundle_discovers_json_and_matching_pdf_from_source_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir) / "media", MEDIA_URL="media/"):
+            Project.objects.create(
+                topic_id=2,
+                title="已有第二个课题",
+                summary="用于验证目录导入自动从 T0003 开始。",
+                theme=self.theme,
+                stage=ProjectStage.OPEN_RECRUITING,
+                is_public=True,
+            )
+            source_dir = Path(tmpdir) / "topics"
+            source_dir.mkdir()
+            topic_json = source_dir / "001_topic.json"
+            topic_pdf = source_dir / "001_topic.pdf"
+            orphan_pdf = source_dir / "orphan.pdf"
+            notes_md = source_dir / "notes.md"
+            non_project_json = source_dir / "metadata.json"
+            no_pdf_json = source_dir / "002_no_pdf.json"
+            topic_pdf.write_bytes(b"%PDF-1.4\n% OpenMedAILab source directory PDF\n%%EOF\n")
+            orphan_pdf.write_bytes(b"%PDF-1.4\n% This file must be ignored\n%%EOF\n")
+            notes_md.write_text("# This file must be ignored\n", encoding="utf-8")
+            non_project_json.write_text(json.dumps({"documents": []}), encoding="utf-8")
+            topic_json.write_text(
+                json.dumps(
+                    {
+                        "id": "T0003",
+                        "theme": "FFA",
+                        "title": "目录自动发现课题",
+                        "summary": "从同一目录自动发现 JSON 和 PDF。",
+                        "tags": ["FFA"],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            no_pdf_json.write_text(
+                json.dumps(
+                    {
+                        "id": "T0004",
+                        "theme": "FFA",
+                        "title": "只有 JSON 没有 PDF 的课题",
+                        "summary": "目录导入时没有同名 PDF 也可以导入课题。",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            call_command("import_project_bundle", "--source", str(source_dir), "--publish")
+
+            project = Project.objects.get(topic_id=3)
+            document = project.documents.get()
+            self.assertEqual(document.doc_type, ProjectDocument.DocumentType.PDF)
+            self.assertEqual(document.title, "项目详细说明")
+            self.assertTrue(document.path.endswith("media/project-documents/T0003/001_topic.pdf"))
+            self.assertTrue((Path(tmpdir) / "media" / "project-documents" / "T0003" / "001_topic.pdf").exists())
+            self.assertTrue(Project.objects.filter(topic_id=4).exists())
+            self.assertFalse(Project.objects.get(topic_id=4).documents.exists())
+            self.assertFalse(ProjectDocument.objects.filter(path__contains="orphan.pdf").exists())
 
     def test_regular_user_cannot_manage_content(self):
         user = User.objects.create_user(username="normaluser", password="StrongPass12345")
@@ -719,6 +1077,41 @@ class ApiTests(TestCase):
         self.assertIn(applicant.profile.uid, audit_entry["summary"])
         self.assertIn("已通过", audit_entry["summary"])
         self.assertNotIn('{"id"', audit_entry["summary"])
+
+    def test_project_auto_starts_when_team_and_funding_are_ready(self):
+        doctor = User.objects.create_user(username="readydoctor", email="readydoctor@example.com", password="StrongPass12345")
+        student = User.objects.create_user(username="readystudent", email="readystudent@example.com", password="StrongPass12345")
+        mentor = User.objects.create_user(username="readymentor", email="readymentor@example.com", password="StrongPass12345")
+        leader = User.objects.create_user(username="readyleader", email="readyleader@example.com", password="StrongPass12345")
+        sponsor = User.objects.create_user(username="readyfunder", email="readyfunder@example.com", password="StrongPass12345")
+        mentor.profile.role_type = RoleType.PHD_OR_ABOVE
+        mentor.profile.save(update_fields=["role_type"])
+        ProjectInterest.objects.create(user=doctor, project=self.project, role="医生", status=InteractionStatus.APPROVED)
+        ProjectInterest.objects.create(user=student, project=self.project, role="学生", status=InteractionStatus.APPROVED)
+        ProjectInterest.objects.create(user=mentor, project=self.project, role="AI工程师", status=InteractionStatus.APPROVED)
+        ProjectClaimIntent.objects.create(user=leader, project=self.project, claim_type="leader", status=InteractionStatus.APPROVED)
+        pending_sponsor = SponsorIntent.objects.create(user=sponsor, project=self.project, sponsor_type="funding", status=InteractionStatus.PENDING)
+
+        self.project.stage = ProjectStage.TEAM_BUILDING
+        self.project.save(update_fields=["stage", "updated_at"])
+        admin = self.login_platform_admin()
+        response = self.patch_json(
+            f"/api/admin/interactions/sponsor/{pending_sponsor.pk}/status/",
+            {"status": "approved", "review_note": "启动资助已确认"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.project.refresh_from_db()
+        self.assertEqual(self.project.stage, ProjectStage.ACTIVE)
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="project.stage_auto_active",
+                target_type="Project",
+                target_id=str(self.project.pk),
+                after__stage=ProjectStage.ACTIVE,
+            ).exists()
+        )
 
     def test_user_can_withdraw_own_interaction_but_not_others(self):
         owner = User.objects.create_user(username="owner", email="owner@example.com", password="StrongPass12345")
@@ -951,13 +1344,13 @@ class ApiTests(TestCase):
                 "password2": "StrongPass12345",
                 "email": "apiuser@example.com",
                 "display_name": "API User",
-                "role_type": "student",
+                "role_type": "undergrad_or_below",
             },
         )
         self.assertEqual(register_response.status_code, 201)
         register_payload = register_response.json()["data"]
         self.assertEqual(register_payload["profile"]["credit_balance"], 100)
-        self.assertEqual(register_payload["profile"]["uid"], f"S{register_payload['id']:08d}")
+        self.assertEqual(register_payload["profile"]["uid"], f"U{register_payload['id']:08d}")
         self.assertNotIn("email_verified", register_payload["profile"])
         self.assertNotIn("email_verified_at", register_payload["profile"])
 
@@ -968,6 +1361,13 @@ class ApiTests(TestCase):
         score_response = self.post_json(f"/api/projects/{self.project.pk}/score/", {"score": 9, "comment": "值得做"})
         self.assertEqual(score_response.status_code, 200)
         self.assertEqual(ProjectScore.objects.get().score, 9)
+
+        unscore_response = self.post_json(f"/api/projects/{self.project.pk}/unscore/", {})
+        self.assertEqual(unscore_response.status_code, 200)
+        self.assertFalse(ProjectScore.objects.filter(project=self.project).exists())
+
+        score_response = self.post_json(f"/api/projects/{self.project.pk}/score/", {"score": 10, "comment": "点赞"})
+        self.assertEqual(score_response.status_code, 200)
 
         interest_response = self.post_json(
             f"/api/projects/{self.project.pk}/interest/",
@@ -992,7 +1392,7 @@ class ApiTests(TestCase):
                 "username": "existing",
                 "email": "fresh@example.com",
                 "display_name": "Duplicate",
-                "role_type": "student",
+                "role_type": "undergrad_or_below",
                 "password1": "StrongPass12345",
                 "password2": "StrongPass12345",
             },
@@ -1006,7 +1406,7 @@ class ApiTests(TestCase):
                 "username": "freshuser",
                 "email": "TAKEN@example.com",
                 "display_name": "Duplicate Email",
-                "role_type": "student",
+                "role_type": "undergrad_or_below",
                 "password1": "StrongPass12345",
                 "password2": "StrongPass12345",
             },
@@ -1019,7 +1419,7 @@ class ApiTests(TestCase):
             {
                 "username": "missingemail",
                 "display_name": "Missing Email",
-                "role_type": "student",
+                "role_type": "undergrad_or_below",
                 "password1": "StrongPass12345",
                 "password2": "StrongPass12345",
             },
@@ -1033,7 +1433,7 @@ class ApiTests(TestCase):
                 "username": "bademail",
                 "email": "not-an-email",
                 "display_name": "Bad Email",
-                "role_type": "student",
+                "role_type": "undergrad_or_below",
                 "password1": "StrongPass12345",
                 "password2": "StrongPass12345",
             },
@@ -1047,7 +1447,7 @@ class ApiTests(TestCase):
                 "username": "weakpass",
                 "email": "weak@example.com",
                 "display_name": "Weak",
-                "role_type": "student",
+                "role_type": "undergrad_or_below",
                 "password1": "123",
                 "password2": "123",
             },
@@ -1061,7 +1461,7 @@ class ApiTests(TestCase):
                 "username": "mismatch",
                 "email": "mismatch@example.com",
                 "display_name": "Mismatch",
-                "role_type": "student",
+                "role_type": "undergrad_or_below",
                 "password1": "StrongPass12345",
                 "password2": "OtherPass12345",
             },
@@ -1108,13 +1508,12 @@ class ApiTests(TestCase):
 
     def test_register_uid_prefixes_and_uid_is_immutable(self):
         role_prefixes = {
-            "student": "S",
             "doctor": "D",
-            "teacher": "T",
-            "ai_engineer": "E",
-            "statistician": "M",
-            "sponsor": "F",
-            "other": "U",
+            "undergrad_or_below": "U",
+            "master_student": "M",
+            "phd_student": "P",
+            "phd_or_above": "R",
+            "engineer": "E",
         }
         for role, prefix in role_prefixes.items():
             response = self.post_json(
@@ -1132,7 +1531,13 @@ class ApiTests(TestCase):
             profile = response.json()["data"]["profile"]
             self.assertTrue(profile["uid"].startswith(prefix))
 
-        user = User.objects.get(username="studentuser")
+        meta_response = self.client.get("/api/meta/")
+        self.assertEqual(
+            [item["value"] for item in meta_response.json()["data"]["profile_roles"]],
+            ["doctor", "undergrad_or_below", "master_student", "phd_student", "phd_or_above", "engineer"],
+        )
+
+        user = User.objects.get(username="undergrad_or_belowuser")
         self.client.force_login(user)
         original_uid = user.profile.uid
         profile_response = self.patch_json("/api/me/profile/", {"role_type": "doctor"})
@@ -1274,7 +1679,7 @@ class ApiTests(TestCase):
                         "username": "rollbackuser",
                         "email": "rollback@example.com",
                         "display_name": "Rollback User",
-                        "role_type": "student",
+                        "role_type": "undergrad_or_below",
                         "password1": "StrongPass12345",
                         "password2": "StrongPass12345",
                     },
@@ -1290,7 +1695,7 @@ class ApiTests(TestCase):
                         "username": "uidrollback",
                         "email": "uidrollback@example.com",
                         "display_name": "UID Rollback",
-                        "role_type": "student",
+                        "role_type": "undergrad_or_below",
                         "password1": "StrongPass12345",
                         "password2": "StrongPass12345",
                     },
@@ -1302,7 +1707,7 @@ class ApiTests(TestCase):
             "username": "singleledger",
             "email": "singleledger@example.com",
             "display_name": "Single Ledger",
-            "role_type": "student",
+            "role_type": "undergrad_or_below",
             "password1": "StrongPass12345",
             "password2": "StrongPass12345",
         }

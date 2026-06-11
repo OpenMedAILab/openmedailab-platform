@@ -1,3 +1,5 @@
+import re
+
 from django.db import transaction
 from django.db.models import Max, Q
 from django.utils import timezone
@@ -90,6 +92,17 @@ def upsert_project(item, source_label="api-json", allow_create_theme=True):
     return created
 
 
+def upsert_project_with_instance(item, source_label="api-json", allow_create_theme=True):
+    normalized = normalize_project_item(item, source_label, allow_create_theme=allow_create_theme)
+    if normalized["topic_id"]:
+        project, created = Project.objects.update_or_create(topic_id=normalized["topic_id"], defaults=normalized["defaults"])
+    else:
+        project = Project.objects.create(topic_id=next_topic_id(), **normalized["defaults"])
+        created = True
+    sync_project_tags(project, normalized["tags"])
+    return project, created
+
+
 def create_project(item, source_label="api-admin", allow_create_theme=False):
     normalized = normalize_project_item(item, source_label, allow_create_theme=allow_create_theme)
     project = Project.objects.create(topic_id=normalized["topic_id"] or next_topic_id(), **normalized["defaults"])
@@ -116,9 +129,13 @@ def normalize_project_item(item, source_label="api-json", allow_create_theme=Tru
         "defaults": {
             "title": title,
             "title_en": item.get("title_en", item.get("title_en_us", "")),
+            "summary": item.get("summary", ""),
             "problem_statement": item.get("problem_statement", ""),
             "clinical_endpoint": item.get("clinical_endpoint", ""),
             "existing_foundation": item.get("existing_foundation", ""),
+            "team_requirements": item.get("team_requirements", ""),
+            "project_progress": item.get("project_progress", ""),
+            "target_venue": item.get("target_venue", ""),
             "theme": theme_from_item(item, allow_create_theme=allow_create_theme),
             "stage": normalize_stage(item.get("stage")),
             "source_payload": {"source": source_label, "payload": item},
@@ -199,16 +216,22 @@ def normalize_topic_id(value):
     if value in (None, ""):
         return None
     text = str(value).strip()
+    code_match = re.fullmatch(r"[Tt](\d{4})", text)
+    if code_match:
+        text = code_match.group(1)
     if not text.isdigit():
-        raise ValueError("topic_id must be a positive integer")
+        raise ValueError("topic_id must be between 1 and 9999 or use T0001 format")
     number = int(text)
-    if number <= 0:
-        raise ValueError("topic_id must be a positive integer")
+    if number <= 0 or number > 9999:
+        raise ValueError("topic_id must be between 1 and 9999 or use T0001 format")
     return number
 
 
 def next_topic_id():
-    return (Project.objects.aggregate(max_topic_id=Max("topic_id"))["max_topic_id"] or 0) + 1
+    number = (Project.objects.aggregate(max_topic_id=Max("topic_id"))["max_topic_id"] or 0) + 1
+    if number > 9999:
+        raise ValueError("topic_id exceeds T9999")
+    return number
 
 
 def unique_slug(model, text):

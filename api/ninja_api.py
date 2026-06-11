@@ -1,4 +1,6 @@
+import hashlib
 import mimetypes
+import re
 import shutil
 from datetime import date, datetime
 from decimal import Decimal
@@ -23,7 +25,7 @@ from ninja.security import SessionAuth
 
 from config.release import APP_VERSION, release_payload
 from accounts.forms import RegisterForm, UserProfileForm
-from accounts.models import PLATFORM_ADMIN_UID, RoleType, UserProfile
+from accounts.models import PLATFORM_ADMIN_UID, PUBLIC_ROLE_CHOICES, RoleType, UserProfile
 from accounts.services import (
     DefaultPasswordConfigError,
     create_registered_user,
@@ -44,8 +46,8 @@ from interactions.models import (
     SponsorType,
 )
 from interactions.services import project_stat_annotations, recalculate_project_community_score
-from projects.contracts import DEFAULT_THEME_FILE_SPACE, PROJECT_FIELD_CONTRACT, PROJECT_JSONL_TEMPLATE
-from projects.importing import create_project, unique_slug, update_project
+from projects.contracts import DEFAULT_THEME_FILE_SPACE, PROJECT_FIELD_CONTRACT, PROJECT_JSON_TEMPLATE
+from projects.importing import create_project, unique_slug, update_project, upsert_project_with_instance
 from projects.models import (
     FOLLOWABLE_PROJECT_STAGES,
     PUBLIC_PROJECT_STAGES,
@@ -69,6 +71,7 @@ from .serializers import (
     contribution_payload,
     credit_ledger_payload,
     dashboard_payload,
+    document_payload,
     admin_project_summary_payload,
     interest_payload,
     project_detail_payload,
@@ -119,7 +122,7 @@ class RegisterRequest(Schema):
     username: str
     email: Optional[str] = ""
     display_name: Optional[str] = ""
-    role_type: str = "student"
+    role_type: str = "undergrad_or_below"
     password1: str
     password2: str
 
@@ -181,17 +184,38 @@ class ThemeWriteRequest(Schema):
 
 
 class ProjectWriteRequest(Schema):
-    id: Optional[int] = None
-    topic_id: Optional[int] = None
+    id: Optional[Any] = None
+    topic_id: Optional[Any] = None
     theme: Optional[Any] = None
     title: Optional[str] = None
     title_en: Optional[str] = ""
+    summary: Optional[str] = ""
     problem_statement: Optional[str] = ""
     clinical_endpoint: Optional[str] = ""
     existing_foundation: Optional[str] = ""
+    team_requirements: Optional[str] = ""
+    project_progress: Optional[str] = ""
+    target_venue: Optional[str] = ""
     stage: Optional[str] = None
     tags: Optional[list[str]] = None
     is_public: Optional[bool] = None
+
+
+class ProjectBulkImportRequest(Schema):
+    projects: list[ProjectWriteRequest]
+    publish: Optional[bool] = False
+    auto_number: Optional[bool] = False
+
+
+class ProjectBulkArchiveRequest(Schema):
+    ids: list[int]
+
+
+class ProjectDocumentWriteRequest(Schema):
+    doc_type: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    path: Optional[str] = None
 
 
 class ThemeFileWriteRequest(Schema):
@@ -338,7 +362,7 @@ def meta(request):
             "themes": [theme_payload(theme) for theme in Theme.objects.filter(is_active=True).order_by("sort_order", "name")],
             "tags": [tag_payload(tag) for tag in Tag.objects.order_by("name")[:200]],
             "project_stages": choice_payload(ProjectStage.choices),
-            "profile_roles": choice_payload(RoleType.choices),
+            "profile_roles": choice_payload(PUBLIC_ROLE_CHOICES),
             "participation_roles": choice_payload(ParticipationRole.choices),
             "claim_types": choice_payload(ClaimType.choices),
             "sponsor_types": choice_payload(SponsorType.choices),
@@ -357,7 +381,7 @@ def project_schema(request):
     return ok(
         {
             "fields": PROJECT_FIELD_CONTRACT,
-            "jsonl_template": PROJECT_JSONL_TEMPLATE,
+            "json_template": PROJECT_JSON_TEMPLATE,
             "template_version": "v1",
             "stage_values": choice_payload(ProjectStage.choices),
             "document_types": choice_payload(ProjectDocument.DocumentType.choices),
@@ -495,7 +519,7 @@ def project_list(
     theme: str = "",
     tag: str = "",
     stage: str = "",
-    sort: str = "recommended",
+    sort: str = "follows",
     page: int = 1,
     page_size: int = 20,
 ):
@@ -796,19 +820,8 @@ def admin_interaction_update_status(request, type: str, interaction_id: int, pay
         previous_project_stage = project.stage
         item.status = payload.status
         item.save(update_fields=["status", "updated_at"])
-        if payload.status == InteractionStatus.APPROVED and project.stage == ProjectStage.OPEN_RECRUITING:
-            before_project = project_detail_payload(project)
-            project.stage = ProjectStage.TEAM_BUILDING
-            project.save(update_fields=["stage", "updated_at"])
-            project.refresh_from_db()
-            audit(
-                request.user,
-                "project.stage_auto_team_building",
-                "Project",
-                project.pk,
-                before=before_project,
-                after=project_detail_payload(project),
-            )
+        if payload.status == InteractionStatus.APPROVED:
+            maybe_advance_project_stage_after_interaction(project, request.user)
         item.project.refresh_from_db()
         after = interaction_payload(type, item)
         audit(
@@ -1593,7 +1606,7 @@ def admin_project_list(
     if topic_id:
         normalized_topic_id = normalize_project_topic_id(topic_id)
         projects = projects.filter(topic_id=normalized_topic_id) if normalized_topic_id else projects.none()
-    projects = projects.order_by("-updated_at", "topic_id")
+    projects = projects.order_by("topic_id")
     page_size = max(1, min(page_size, 100))
     paginator = Paginator(projects, page_size)
     page_obj = paginator.get_page(page)
@@ -1610,6 +1623,100 @@ def admin_project_list(
             },
         }
     )
+
+
+@api.post("/admin/projects/import-json/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_project_import_json(request, payload: ProjectBulkImportRequest):
+    auth_error = require_capability(request, "manage_projects")
+    if auth_error:
+        return auth_error
+
+    raw_projects = [project.model_dump(exclude_unset=True, exclude_none=True) for project in payload.projects]
+    if not raw_projects:
+        return fail("projects cannot be empty.", status=422, code="validation_error")
+
+    seen_topic_ids: dict[int, int] = {}
+    validated_projects = []
+    errors = []
+    for index, data in enumerate(raw_projects, start=1):
+        if payload.auto_number:
+            data.pop("id", None)
+            data.pop("topic_id", None)
+        normalize_project_identity_alias(data)
+        if payload.publish:
+            data.setdefault("stage", ProjectStage.OPEN_RECRUITING)
+            data.setdefault("is_public", True)
+        else:
+            data.setdefault("stage", ProjectStage.DRAFT)
+            data.setdefault("is_public", False)
+        error = validate_admin_project_payload(data, creating=True, allow_create_theme=True)
+        if error:
+            errors.append({"row": index, "message": error[1]["error"]["message"], "code": error[1]["error"]["code"]})
+            continue
+        topic_id = data.get("topic_id")
+        if topic_id and not payload.auto_number:
+            if topic_id in seen_topic_ids:
+                errors.append({"row": index, "message": f"id T{topic_id:04d} duplicates row {seen_topic_ids[topic_id]}.", "code": "duplicate_topic_id"})
+                continue
+            seen_topic_ids[topic_id] = index
+        validated_projects.append((index, data))
+
+    if errors:
+        return fail("Project import validation failed.", status=422, code="validation_error", errors=errors)
+
+    results = []
+    created_count = 0
+    updated_count = 0
+    with transaction.atomic():
+        for index, data in validated_projects:
+            project, created = upsert_project_with_instance(data, source_label="api-admin-json-import", allow_create_theme=True)
+            project = Project.objects.select_related("theme").prefetch_related("tags", "documents").get(pk=project.pk)
+            if created:
+                created_count += 1
+            else:
+                updated_count += 1
+            results.append({"row": index, "action": "created" if created else "updated", "project": project_detail_payload(project)})
+        audit(
+            request.user,
+            "project.import_json",
+            "Project",
+            "bulk",
+            after={"created_count": created_count, "updated_count": updated_count, "total_count": len(results)},
+        )
+
+    return ok(
+        {
+            "total_count": len(results),
+            "created_count": created_count,
+            "updated_count": updated_count,
+            "results": results,
+        }
+    )
+
+
+@api.post("/admin/projects/bulk-archive/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_project_bulk_archive(request, payload: ProjectBulkArchiveRequest):
+    auth_error = require_capability(request, "manage_projects")
+    if auth_error:
+        return auth_error
+    ids = sorted({int(value) for value in payload.ids if int(value) > 0})
+    if not ids:
+        return fail("ids cannot be empty.", status=422, code="validation_error")
+    with transaction.atomic():
+        projects = list(Project.objects.filter(id__in=ids).order_by("topic_id"))
+        found_ids = {project.id for project in projects}
+        missing_ids = [value for value in ids if value not in found_ids]
+        before = [{"id": project.id, "topic_id": project.topic_id, "stage": project.stage, "is_public": project.is_public} for project in projects]
+        Project.objects.filter(id__in=found_ids).update(stage=ProjectStage.ARCHIVED, is_public=False, updated_at=timezone.now())
+        audit(
+            request.user,
+            "project.bulk_archive",
+            "Project",
+            "bulk",
+            before={"projects": before},
+            after={"archived_count": len(projects), "ids": ids, "missing_ids": missing_ids},
+        )
+    return ok({"archived_count": len(projects), "ids": ids, "missing_ids": missing_ids})
 
 
 @api.get("/admin/projects/{project_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope}, tags=["Admin"])
@@ -1684,6 +1791,109 @@ def admin_project_delete(request, project_id: int):
     return ok(project_detail_payload(project))
 
 
+@api.get("/admin/project-documents/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Admin"])
+def admin_project_document_list(request, project_id: int):
+    auth_error = require_capability(request, "manage_projects")
+    if auth_error:
+        return auth_error
+    project = get_object_or_404(Project, pk=project_id)
+    documents = project_documents_for(project)
+    return ok({"project_id": project.id, "documents": [document_payload(document) for document in documents]})
+
+
+@api.post(
+    "/admin/project-documents/upload/",
+    response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope},
+    tags=["Admin"],
+)
+def admin_project_document_upload(request):
+    auth_error = require_capability(request, "manage_projects")
+    if auth_error:
+        return auth_error
+    project_id = request.POST.get("project_id")
+    project = get_object_or_404(Project, pk=project_id)
+    description = (request.POST.get("description") or "").strip()
+    if not description:
+        return fail("description is required.", status=422, code="validation_error")
+    files = request.FILES.getlist("files")
+    if not files:
+        return fail("No files uploaded.", status=422, code="validation_error")
+
+    requested_doc_type = request.POST.get("doc_type")
+    doc_type = requested_doc_type if requested_doc_type in ProjectDocument.DocumentType.values else ""
+    title = (request.POST.get("title") or "").strip()
+    root = project_document_root()
+    directory = safe_child_path(root, project.topic_code, root, expect_parent=False)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    saved = []
+    for uploaded in files:
+        file_name = sanitize_file_name(uploaded.name)
+        if not file_name:
+            return fail("file name is invalid.", status=422, code="validation_error")
+        destination = unique_project_document_destination(directory, file_name)
+        content_hash = write_uploaded_file_with_hash(uploaded, destination)
+        document_type = doc_type or project_document_type_for_name(file_name)
+        document = ProjectDocument.objects.create(
+            project=project,
+            doc_type=document_type,
+            title=title or Path(file_name).stem,
+            description=description,
+            path=public_file_space_path(destination),
+            content_hash=content_hash,
+        )
+        saved.append(document_payload(document))
+    audit(request.user, "project_document.upload", "Project", project.id, after={"count": len(saved), "documents": saved})
+    return 201, ok({"project_id": project.id, "saved": saved, "documents": [document_payload(document) for document in project_documents_for(project)]})
+
+
+@api.patch(
+    "/admin/project-documents/{document_id}/",
+    response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope},
+    tags=["Admin"],
+)
+def admin_project_document_update(request, document_id: int, payload: ProjectDocumentWriteRequest):
+    auth_error = require_capability(request, "manage_projects")
+    if auth_error:
+        return auth_error
+    document = get_object_or_404(ProjectDocument.objects.select_related("project"), pk=document_id)
+    before = document_payload(document)
+    data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    if "doc_type" in data:
+        document.doc_type = normalize_project_document_type(data.get("doc_type"))
+    if "title" in data:
+        document.title = str(data.get("title") or "").strip()[:255]
+    if "description" in data:
+        document.description = str(data.get("description") or "").strip()
+    if "path" in data:
+        path = public_document_path_for_admin(data.get("path"))
+        if not path:
+            return fail("path is invalid.", status=422, code="validation_error")
+        document.path = path
+    document.save(update_fields=["doc_type", "title", "description", "path"])
+    after = document_payload(document)
+    audit(request.user, "project_document.update", "ProjectDocument", document.id, before=before, after=after)
+    return ok({"document": after, "documents": [document_payload(item) for item in project_documents_for(document.project)]})
+
+
+@api.delete(
+    "/admin/project-documents/{document_id}/",
+    response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope},
+    tags=["Admin"],
+)
+def admin_project_document_delete(request, document_id: int):
+    auth_error = require_capability(request, "manage_projects")
+    if auth_error:
+        return auth_error
+    document = get_object_or_404(ProjectDocument.objects.select_related("project"), pk=document_id)
+    project = document.project
+    before = document_payload(document)
+    maybe_delete_managed_project_document_file(document.path)
+    document.delete()
+    audit(request.user, "project_document.delete", "ProjectDocument", document_id, before=before)
+    return ok({"project_id": project.id, "documents": [document_payload(item) for item in project_documents_for(project)]})
+
+
 @api.post("/projects/{project_id}/follow/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Interactions"])
 def follow_project(request, project_id: int):
     auth_error = require_login(request)
@@ -1731,6 +1941,28 @@ def score_project(request, project_id: int, payload: ScoreRequest):
     )
     recalculate_project_community_score(project)
     return ok(score_payload(score))
+
+
+@api.post(
+    "/projects/{project_id}/unscore/",
+    response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope},
+    tags=["Interactions"],
+    operation_id="api_ninja_api_unscore_project_post",
+)
+@api.delete(
+    "/projects/{project_id}/unscore/",
+    response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope},
+    tags=["Interactions"],
+    operation_id="api_ninja_api_unscore_project_delete",
+)
+def unscore_project(request, project_id: int):
+    auth_error = require_login(request)
+    if auth_error:
+        return auth_error
+    project = get_object_or_404(Project, pk=project_id)
+    ProjectScore.objects.filter(user=request.user, project=project).delete()
+    recalculate_project_community_score(project)
+    return ok({"is_liked": False, "score": None})
 
 
 @api.post("/projects/{project_id}/interest/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Interactions"])
@@ -1993,6 +2225,33 @@ def pending_interaction_count():
     )
 
 
+def maybe_advance_project_stage_after_interaction(project, actor):
+    if project.stage not in {ProjectStage.OPEN_RECRUITING, ProjectStage.TEAM_BUILDING}:
+        return
+    before_project = project_detail_payload(project)
+    status = project.team_status
+    next_stage = None
+    if status.get("basic_ready") and status.get("sponsor_count", 0) >= 1:
+        next_stage = ProjectStage.ACTIVE
+        action = "project.stage_auto_active"
+    elif project.stage == ProjectStage.OPEN_RECRUITING:
+        next_stage = ProjectStage.TEAM_BUILDING
+        action = "project.stage_auto_team_building"
+    if not next_stage or next_stage == project.stage:
+        return
+    project.stage = next_stage
+    project.save(update_fields=["stage", "updated_at"])
+    project.refresh_from_db()
+    audit(
+        actor,
+        action,
+        "Project",
+        project.pk,
+        before=before_project,
+        after=project_detail_payload(project),
+    )
+
+
 def user_has_approved_project_relation(user, project):
     filters = {"user": user, "project": project, "status": InteractionStatus.APPROVED}
     return (
@@ -2159,16 +2418,21 @@ def profile_form_initial(profile):
     }
 
 
-def validate_admin_project_payload(data, creating, current_project=None):
+def validate_admin_project_payload(data, creating, current_project=None, allow_create_theme=False):
     topic_id = normalize_project_topic_id(data.get("topic_id"))
     title = (data.get("title") or "").strip()
     if not title:
         return fail("title is required.", status=422, code="validation_error")
     if data.get("topic_id") not in (None, ""):
         if not topic_id:
-            return fail("id must be a positive integer.", status=422, code="validation_error")
+            return fail("id must be between 1 and 9999 or use T0001 format.", status=422, code="validation_error")
         data["topic_id"] = topic_id
     data["title"] = title
+
+    summary = str(data.get("summary") or "").strip()
+    if not summary:
+        return fail("summary is required.", status=422, code="validation_error")
+    data["summary"] = summary
 
     for field, label in [
         ("problem_statement", "科学问题"),
@@ -2176,11 +2440,20 @@ def validate_admin_project_payload(data, creating, current_project=None):
         ("existing_foundation", "已有基础"),
     ]:
         value = str(data.get(field) or "").strip()
-        if not value:
-            return fail(f"{label} is required.", status=422, code="validation_error")
         if len(value) > 250:
             return fail(f"{label} must be within 250 characters.", status=422, code="validation_error")
         data[field] = value
+
+    data["team_requirements"] = str(data.get("team_requirements") or "").strip()
+
+    for field, limit, label in [
+        ("target_venue", 255, "目标期刊/会议"),
+    ]:
+        value = str(data.get(field) or "").strip()
+        if len(value) > limit:
+            return fail(f"{label} must be within {limit} characters.", status=422, code="validation_error")
+        data[field] = value
+    data["project_progress"] = str(data.get("project_progress") or "").strip()
 
     theme = data.get("theme")
     if isinstance(theme, dict):
@@ -2190,7 +2463,7 @@ def validate_admin_project_payload(data, creating, current_project=None):
     if not theme_name:
         return fail("theme is required.", status=422, code="validation_error")
     theme_obj = theme_from_payload(data, current=current_project.theme if current_project else None)
-    if theme_obj is None:
+    if theme_obj is None and not allow_create_theme:
         return fail("theme does not exist.", status=422, code="validation_error")
 
     stage = data.get("stage")
@@ -2211,10 +2484,13 @@ def normalize_project_topic_id(value):
     if value in (None, ""):
         return None
     text = str(value).strip()
+    code_match = re.fullmatch(r"[Tt](\d{4})", text)
+    if code_match:
+        text = code_match.group(1)
     if not text.isdigit():
         return None
     number = int(text)
-    return number if number > 0 else None
+    return number if 0 < number <= 9999 else None
 
 
 def project_search_q(value):
@@ -2222,9 +2498,13 @@ def project_search_q(value):
     query = (
         Q(title__icontains=text)
         | Q(title_en__icontains=text)
+        | Q(summary__icontains=text)
         | Q(problem_statement__icontains=text)
         | Q(clinical_endpoint__icontains=text)
         | Q(existing_foundation__icontains=text)
+        | Q(team_requirements__icontains=text)
+        | Q(project_progress__icontains=text)
+        | Q(target_venue__icontains=text)
     )
     topic_id = normalize_project_topic_id(text)
     if topic_id:
@@ -2247,13 +2527,102 @@ def project_import_payload(project):
         "theme": theme_payload(project.theme) if project.theme else "未分类",
         "title": project.title,
         "title_en": project.title_en,
+        "summary": project.summary,
         "problem_statement": project.problem_statement,
         "clinical_endpoint": project.clinical_endpoint,
         "existing_foundation": project.existing_foundation,
+        "team_requirements": project.team_requirements,
+        "project_progress": project.project_progress,
+        "target_venue": project.target_venue,
         "stage": project.stage,
         "tags": [tag.name for tag in project.tags.all()],
         "is_public": project.is_public,
     }
+
+
+def project_documents_for(project):
+    return project.documents.all().order_by("created_at", "id")
+
+
+def normalize_project_document_type(doc_type):
+    if doc_type in ProjectDocument.DocumentType.values:
+        return doc_type
+    return ProjectDocument.DocumentType.OTHER
+
+
+def project_document_type_for_name(name):
+    suffix = Path(name or "").suffix.lower()
+    if suffix in {".md", ".markdown"}:
+        return ProjectDocument.DocumentType.MARKDOWN
+    if suffix == ".pdf":
+        return ProjectDocument.DocumentType.PDF
+    if suffix in {".html", ".htm"}:
+        return ProjectDocument.DocumentType.HTML
+    return ProjectDocument.DocumentType.OTHER
+
+
+def project_document_root():
+    return (Path(settings.MEDIA_ROOT) / "project-documents").expanduser().resolve()
+
+
+def unique_project_document_destination(directory, file_name):
+    suffix = Path(file_name).suffix
+    stem = Path(file_name).stem or "document"
+    candidate = (directory / file_name).resolve()
+    index = 2
+    while candidate.exists():
+        candidate = (directory / f"{stem}-{index}{suffix}").resolve()
+        index += 1
+    root = project_document_root()
+    if candidate.parent != root and root not in candidate.parent.parents:
+        raise ValueError("文件路径不能超出课题文档目录。")
+    return candidate
+
+
+def write_uploaded_file_with_hash(uploaded, destination):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    hasher = hashlib.sha256()
+    with destination.open("wb") as output:
+        for chunk in uploaded.chunks():
+            hasher.update(chunk)
+            output.write(chunk)
+    return hasher.hexdigest()
+
+
+def public_document_path_for_admin(path):
+    value = str(path or "").strip()
+    if value.startswith("/media/"):
+        value = value.lstrip("/")
+    if not value:
+        return ""
+    if value.startswith(("http://", "https://")):
+        return value
+    if value.startswith("/") or value.startswith("\\") or ".." in value.replace("\\", "/").split("/"):
+        return ""
+    if ":" in value:
+        return ""
+    return value
+
+
+def project_document_file_for_public_path(path):
+    value = str(path or "").strip().lstrip("/")
+    media_url = settings.MEDIA_URL.strip("/")
+    if not media_url or not value.startswith(f"{media_url}/"):
+        return None
+    relative = value[len(media_url) + 1 :]
+    candidate = (Path(settings.MEDIA_ROOT) / relative).expanduser().resolve()
+    root = project_document_root()
+    if candidate != root and root in candidate.parents:
+        return candidate
+    return None
+
+
+def maybe_delete_managed_project_document_file(path):
+    if ProjectDocument.objects.filter(path=path).count() > 1:
+        return
+    target = project_document_file_for_public_path(path)
+    if target and target.is_file():
+        target.unlink()
 
 
 def file_space_base_root():

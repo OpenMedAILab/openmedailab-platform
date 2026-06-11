@@ -34,10 +34,14 @@ test("profile menu action clicks blur the focused button after closing", () => {
   assert.equal(blurCalls.length, 4);
 });
 
-test("topbar wraps into centered rows before it overflows", () => {
-  assert.match(stylesSource, /\.topbar\s*\{[\s\S]*?width:\s*min\(1440px,\s*calc\(100% - 32px\)\);/);
-  assert.match(stylesSource, /@media \(max-width:\s*1040px\)\s*\{[\s\S]*?\.topbar\s*\{[\s\S]*?grid-template-columns:\s*1fr;[\s\S]*?justify-items:\s*center;/);
-  assert.match(stylesSource, /@media \(max-width:\s*1040px\)\s*\{[\s\S]*?\.main-nav,\s*\.account-area\s*\{[\s\S]*?justify-content:\s*center;[\s\S]*?flex-wrap:\s*wrap;/);
+test("desktop layout uses a left sidebar and mobile restores the top navigation", () => {
+  assert.match(stylesSource, /\.app-shell\s*\{[\s\S]*?grid-template-columns:\s*240px minmax\(0,\s*1fr\);/);
+  assert.match(stylesSource, /\.topbar\s*\{[\s\S]*?flex-direction:\s*column;[\s\S]*?height:\s*calc\(100vh - 32px\);/);
+  assert.match(stylesSource, /\.main-nav\s*\{[\s\S]*?flex-direction:\s*column;/);
+  assert.match(stylesSource, /\.page\s*\{[\s\S]*?width:\s*min\(1180px,\s*100%\);/);
+  assert.match(stylesSource, /@media \(max-width:\s*1040px\)\s*\{[\s\S]*?\.app-shell\s*\{[\s\S]*?display:\s*block;/);
+  assert.match(stylesSource, /@media \(max-width:\s*1040px\)\s*\{[\s\S]*?\.topbar\s*\{[\s\S]*?display:\s*grid;[\s\S]*?grid-template-columns:\s*1fr;/);
+  assert.match(stylesSource, /@media \(max-width:\s*1040px\)\s*\{[\s\S]*?\.main-nav,\s*\.account-area\s*\{[\s\S]*?flex-direction:\s*row;[\s\S]*?justify-content:\s*center;/);
   assert.doesNotMatch(stylesSource, /@media \(max-width:\s*1480px\)/);
   assert.doesNotMatch(stylesSource, /@media \(max-width:\s*980px\)\s*\{[\s\S]*?\.main-nav,\s*\.account-area\s*\{[\s\S]*?overflow-x:\s*auto;/);
 });
@@ -98,7 +102,25 @@ test("homepage search toolbar is lifted and visually emphasized", () => {
   assert.match(stylesSource, /\.toolbar \.primary-button\s*\{[\s\S]*?min-height:\s*58px;[\s\S]*?border-radius:\s*10px;/);
 });
 
-test("workspace lifecycle UI exposes user/admin spaces and project status hover card", () => {
+test("homepage theme selector uses image-backed topic cards", () => {
+  assert.doesNotMatch(mainSource, />全部主题</);
+  assert.match(mainSource, /不限主题/);
+  assert.match(mainSource, /class="theme-strip topic-theme-strip"/);
+  assert.match(mainSource, /class="theme-chip topic-theme-card"/);
+  assert.match(mainSource, /homeThemeCards/);
+  assert.match(mainSource, /topicThemeCardStyle\(theme\)/);
+  assert.match(mainSource, /全部课题/);
+  assert.match(mainSource, /AntiVEGF/);
+  assert.match(mainSource, /阴道镜/);
+  assert.match(mainSource, /MedicalAIPlatform\.png/);
+  assert.match(mainSource, /AntiVEGF_img\.png/);
+  assert.match(mainSource, /ROP\.png/);
+  assert.match(mainSource, /Yindaojing\.png/);
+  assert.match(stylesSource, /\.topic-theme-strip\s*\{[\s\S]*?grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(168px,\s*1fr\)\);/);
+  assert.match(stylesSource, /\.topic-theme-card\s*\{[\s\S]*?display:\s*flex;[\s\S]*?background-size:\s*cover;/);
+});
+
+test("workspace lifecycle UI exposes user/admin spaces and compact expandable project cards", () => {
   assert.match(mainSource, /label:\s*"我的空间"/);
   assert.match(mainSource, /workspace-tabs/);
   assert.match(mainSource, />我的任务<\/button>/);
@@ -112,40 +134,67 @@ test("workspace lifecycle UI exposes user/admin spaces and project status hover 
   assert.match(mainSource, /state\.admin\.activeTab === 'audit'/);
   assert.doesNotMatch(mainSource, /state\.admin\.activeTab === 'tasks'/);
   assert.doesNotMatch(mainSource, /state\.admin\.activeTab === 'credits'/);
-  assert.match(mainSource, /project-status-popover/);
-  assert.match(mainSource, /openProjectStatusCard\(project\)/);
-  assert.match(stylesSource, /\.project-status-popover\s*\{/);
+  assert.match(mainSource, /toggleProjectExpansion\(project\)/);
+  assert.match(mainSource, /projectSummaryText\(project\)/);
+  assert.match(mainSource, /展开摘要和详情/);
+  assert.doesNotMatch(mainSource, /project-status-popover/);
+  assert.doesNotMatch(mainSource, /openProjectStatusCard\(project\)/);
   assert.match(stylesSource, /\.workspace-tabs\s*\{/);
 });
 
-test("project status hover card separates personal labels from highlighted status uids", () => {
-  assert.match(mainSource, /我的状态/);
-  assert.match(mainSource, /viewerStatusLabelsFor\(project\)/);
-  assert.match(mainSource, /projectStageLabelFor\(project\)/);
-  assert.match(mainSource, /statusUidGroupsFor\(project\)/);
-  assert.match(mainSource, /visibleGroupUids\(group\)/);
-  assert.match(mainSource, /hiddenGroupUidCount\(group\)/);
-  assert.match(mainSource, /statusHighlightUidFor\(project\)/);
-  assert.doesNotMatch(mainSource, /<strong>\{\{ viewerUidFor\(project\)/);
-  assert.doesNotMatch(mainSource, /已收藏' : '未收藏'/);
-  assert.doesNotMatch(mainSource, /课题状态 · 参与者/);
-  assert.doesNotMatch(mainSource, /相关 UID/);
-  assert.doesNotMatch(mainSource, /UID \{\{ statusUidCountFor\(project\) \}\} 个/);
-  assert.match(stylesSource, /\.viewer-status-block\s*\{/);
-  assert.match(stylesSource, /\.status-uid-group--follow\s*\{/);
-  assert.match(stylesSource, /\.status-uid-group--interest,/);
-  assert.match(stylesSource, /\.uid-strip span\.uid-more\s*\{/);
-  assert.match(stylesSource, /\.uid-strip span\.highlighted\s*\{/);
-  assert.doesNotMatch(stylesSource, /\.status-uid-group--task\s*\{/);
-  assert.doesNotMatch(stylesSource, /\.status-uid-group--contribution\s*\{/);
+test("project cards keep compact summary UI without hover status styles", () => {
+  assert.match(stylesSource, /\.project-card\s*\{[\s\S]*?overflow:\s*hidden;/);
+  assert.match(stylesSource, /\.project-list-card\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);/);
+  assert.match(mainSource, /class="project-card-top"/);
+  assert.match(mainSource, /class="project-card-meta"/);
+  assert.match(mainSource, /class="project-card-counts"/);
+  assert.match(mainSource, /class="project-card-bottom project-status-strip"/);
+  assert.match(mainSource, /class="project-status-row"/);
+  assert.match(mainSource, /project-role-chip-row/);
+  assert.match(mainSource, /projectFundingLabel\(project\)/);
+  assert.match(mainSource, /projectStartupText\(project\)/);
+  assert.match(mainSource, /interactionButtonActive\('like', project\)/);
+  assert.match(mainSource, /interactionButtonActive\('participation', project\)/);
+  assert.match(mainSource, /interactionButtonActive\('sponsor', project\)/);
+  assert.match(mainSource, /@click\.stop="submitLike\(project\)"[\s\S]*?@click\.stop="toggleFollow\(project\)"[\s\S]*?@click\.stop="handleParticipationAction\(project\)"[\s\S]*?@click\.stop="submitLeadClaim\(project\)"[\s\S]*?@click\.stop="submitSponsor\(project\)"/);
+  assert.match(mainSource, /followButtonLabel\(project\)/);
+  assert.match(mainSource, /sponsorButtonLabel\(project\)/);
+  assert.match(mainSource, /资助情况/);
+  assert.match(mainSource, /启动情况/);
+  assert.match(mainSource, /projectRecruitmentText\(project\)/);
+  assert.match(mainSource, /AI博士及以上/);
+  assert.match(mainSource, /role\.count }}\/{{ role\.required/);
+  assert.match(stylesSource, /\.project-card-top\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;/);
+  assert.match(stylesSource, /\.project-card-counts\s*\{/);
+  assert.match(stylesSource, /\.project-card-bottom\s*\{/);
+  assert.match(stylesSource, /\.project-status-row\s*\{[\s\S]*?grid-template-columns:\s*38px minmax\(0,\s*1fr\);/);
+  assert.match(stylesSource, /\.project-role-chip-row\s*\{[\s\S]*?display:\s*flex;/);
+  assert.match(stylesSource, /\.project-interaction-actions\s*\{[\s\S]*?display:\s*flex;[\s\S]*?justify-content:\s*flex-start;/);
+  assert.match(stylesSource, /\.project-interaction-actions button\s*\{[\s\S]*?flex:\s*0 0 86px;/);
+  assert.match(stylesSource, /\.interaction-button\.interaction-active\s*\{/);
+  assert.match(stylesSource, /\.project-card-meta span\.ready\s*\{/);
+  assert.match(stylesSource, /\.project-startup-status\.ready > span\s*\{/);
+  assert.match(stylesSource, /\.project-role-groups span\.ready\s*\{/);
+  assert.match(stylesSource, /\.project-expanded-detail\s*\{/);
+  assert.match(stylesSource, /\.project-meta-row\s*\{/);
+  assert.doesNotMatch(stylesSource, /\.project-status-popover\s*\{/);
+  assert.doesNotMatch(stylesSource, /\.viewer-status-block\s*\{/);
+  assert.doesNotMatch(stylesSource, /\.status-uid-group/);
 });
 
-test("project status hover card stays inside the project card instead of being clipped", () => {
-  assert.match(stylesSource, /\.project-card\s*\{[\s\S]*?overflow:\s*hidden;/);
-  assert.doesNotMatch(stylesSource, /\.project-status-popover\s*\{[\s\S]*?top:\s*calc\(100% - 8px\);/);
-  assert.match(stylesSource, /\.project-status-popover\s*\{[\s\S]*?top:\s*18px;/);
-  assert.match(stylesSource, /\.project-status-popover\s*\{[\s\S]*?max-height:\s*min\(320px,\s*calc\(100% - 36px\)\);/);
-  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-status-popover\s*\{[\s\S]*?top:\s*128px;/);
+test("project detail uses a top action bar instead of right side panels", () => {
+  assert.match(mainSource, /class="project-action-bar"/);
+  assert.match(mainSource, /class="detail-stack"/);
+  assert.match(mainSource, /class="content-panel project-team-panel"/);
+  assert.match(mainSource, /目标期刊\/会议/);
+  assert.match(mainSource, /projectStartupLabel\(state\.currentProject\)/);
+  assert.match(mainSource, /projectFundingLabel\(state\.currentProject\)/);
+  assert.doesNotMatch(mainSource, /<div class="score-panel">/);
+  assert.doesNotMatch(mainSource, /<aside class="side-panel">\s*<h2>组队情况<\/h2>/);
+  assert.doesNotMatch(mainSource, /<aside class="side-panel">\s*<h2>课题互动<\/h2>/);
+  assert.match(stylesSource, /\.project-action-bar\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;/);
+  assert.match(stylesSource, /\.detail-stack\s*\{/);
+  assert.match(stylesSource, /\.project-team-panel \.role-list\s*\{/);
 });
 
 test("audit log table uses readable summaries instead of raw json", () => {
@@ -161,6 +210,21 @@ test("admin overview cards are navigable and have hover affordance", () => {
   assert.match(mainSource, /v-for="card in adminOverviewCards"/);
   assert.match(mainSource, /setAdminTab\(card\.tab\)/);
   assert.match(stylesSource, /\.admin-overview-card:hover\s*\{[\s\S]*?scale\(1\.02\)/);
+});
+
+test("admin project management supports bulk archive selection", () => {
+  assert.match(mainSource, /selectedProjectIds:\s*\[\]/);
+  assert.match(mainSource, /bulkArchivingProjects:\s*false/);
+  assert.match(mainSource, /function toggleVisibleAdminProjectsSelection\(event\)/);
+  assert.match(mainSource, /function bulkArchiveSelectedProjects\(\)/);
+  assert.match(mainSource, /api\.adminBulkArchiveProjects\(\{\s*ids\s*\}\)/);
+  assert.match(mainSource, /批量删除\(/);
+  assert.match(mainSource, /class="admin-table project-admin-table"/);
+  assert.match(mainSource, /aria-label="选择当前页全部课题"/);
+  assert.match(apiSource, /adminBulkArchiveProjects/);
+  assert.match(apiSource, /\/api\/admin\/projects\/bulk-archive\//);
+  assert.match(stylesSource, /\.project-admin-table \.admin-table-head,\s*\.project-admin-table \.admin-table-row\s*\{/);
+  assert.match(stylesSource, /\.admin-select-cell\s*\{/);
 });
 
 test("admin task approval keeps only interaction review in the approval panel", () => {
@@ -182,7 +246,20 @@ test("project lifecycle actions are gated by project stage and review status", (
   assert.match(mainSource, /v-if="shouldShowFollowButton\(project\)"/);
   assert.match(mainSource, /v-if="shouldShowFollowButton\(state\.currentProject\)"/);
   assert.match(mainSource, /v-if="canRecruitProject\(state\.currentProject\)"/);
-  assert.match(mainSource, /当前阶段不接受新的参与、认领或资助意向/);
+  assert.match(mainSource, /当前阶段暂不接受新的参与申请/);
+  assert.match(mainSource, /handleParticipationAction\(project\)/);
+  assert.match(mainSource, /handleParticipationAction\(state\.currentProject\)/);
+  assert.match(mainSource, /取消点赞/);
+  assert.match(mainSource, /取消关注/);
+  assert.match(mainSource, /async function submitSponsor\(project = state\.currentProject\)/);
+  assert.match(mainSource, /api\.withdrawInteraction\("sponsor",\s*request\.id/);
+  assert.match(mainSource, /撤回资助/);
+  assert.match(mainSource, /function withdrawParticipationRequest\(project\)/);
+  assert.match(mainSource, /api\.withdrawInteraction\("interest",\s*request\.id/);
+  assert.match(mainSource, /撤回申请/);
+  assert.doesNotMatch(mainSource, /重新申请/);
+  assert.doesNotMatch(mainSource, /重新资助/);
+  assert.doesNotMatch(mainSource, /重新点赞/);
   assert.match(mainSource, /v-if="canReviewInteraction\(item\)"/);
   assert.match(mainSource, /Only pending interactions can be reviewed|只有待处理申请可以审核/);
 });
@@ -198,13 +275,12 @@ test("task management reuses existing project patch flows for stage changes", ()
   assert.doesNotMatch(apiSource, /\b(publishProject|startProject|pauseProject|archiveProject)\b/);
 });
 
-test("project status card refreshes on hover and invalidates after lifecycle writes", () => {
-  assert.match(mainSource, /const hasCachedCard = Boolean\(state\.projectStatusCards\[project\.id\]\)/);
-  assert.doesNotMatch(mainSource, /if \(state\.projectStatusCards\[project\.id\]\) return;/);
-  assert.match(mainSource, /state\.projectStatusCards\[project\.id\] = await api\.projectStatusCard\(project\.id\)/);
-  assert.match(mainSource, /showToast\(error\.message \|\| "课题状态读取失败"\)/);
+test("project cards no longer fetch hover status cards after lifecycle writes", () => {
+  assert.doesNotMatch(mainSource, /state\.projectStatusCards/);
+  assert.doesNotMatch(mainSource, /api\.projectStatusCard\(project\.id\)/);
+  assert.doesNotMatch(mainSource, /课题状态读取失败/);
   assert.doesNotMatch(mainSource, /uid_groups:\s*\{\s*uids_visible:\s*false,\s*groups:\s*\[\]\s*\}/);
-  assert.match(mainSource, /function invalidateProjectStatusCard\(projectOrId = null\)/);
+  assert.match(mainSource, /function invalidateProjectStatusCard\(\)\s*\{\s*return null;/);
   assert.match(mainSource, /invalidateProjectStatusCard\(projectId\)/);
   assert.match(mainSource, /invalidateProjectStatusCard\(item\.project\?\.id\)/);
   assert.match(mainSource, /invalidateProjectStatusCard\(project\.id\)/);
@@ -228,16 +304,18 @@ test("workspace lifecycle people fields render uid-only payloads", () => {
   assert.doesNotMatch(mainSource, /entry\?\.actor\?\.profile\?\.uid/);
 });
 
-test("admin project lifecycle exposes json/jsonl import with confirmation preview", () => {
+test("admin project lifecycle exposes json import with confirmation preview", () => {
   assert.doesNotMatch(mainSource, /importJson\(/);
   assert.doesNotMatch(mainSource, /useExampleJson/);
   assert.doesNotMatch(mainSource, /state\.admin\.importText/);
-  assert.match(mainSource, /JSON\/JSONL 导入/);
-  assert.match(mainSource, /downloadJsonlTemplate/);
+  assert.match(mainSource, /JSON 导入/);
+  assert.match(mainSource, /downloadJsonTemplate/);
   assert.match(mainSource, /handleJsonFiles/);
   assert.match(mainSource, /clearJsonImport/);
-  assert.match(mainSource, /state\.schema\.jsonl_template/);
-  assert.match(mainSource, /字段契约与 JSONL 模板/);
+  assert.match(mainSource, /state\.schema\.json_template/);
+  assert.match(mainSource, /字段契约与 JSON 模板/);
+  assert.doesNotMatch(mainSource, /JSON\/JSONL/);
+  assert.doesNotMatch(mainSource, /\.jsonl/);
   assert.match(mainSource, /refreshJsonImportRow/);
   assert.match(mainSource, /jsonImport\.previewOpen/);
   assert.match(mainSource, /确认导入可写入项/);
@@ -254,9 +332,10 @@ test("admin project form uses structured project inputs instead of json textarea
   assert.doesNotMatch(mainSource, /评分维度 JSON/);
   assert.match(mainSource, /Title（中文）/);
   assert.match(mainSource, /Title（英文，选填）/);
-  assert.match(mainSource, /科学问题（250字以内）/);
-  assert.match(mainSource, /临床终点（250字以内）/);
-  assert.match(mainSource, /已有基础（250字以内）/);
+  assert.match(mainSource, /<label><span>摘要<\/span><textarea v-model="state\.admin\.projectForm\.summary"/);
+  assert.match(mainSource, /科学问题（选填，250字以内）/);
+  assert.match(mainSource, /临床终点（选填，250字以内）/);
+  assert.match(mainSource, /已有基础（选填，250字以内）/);
   assert.doesNotMatch(mainSource, /<label><span>课题 ID<\/span><input v-model="state\.admin\.projectForm\.topic_id"/);
   assert.doesNotMatch(mainSource, /数据类型/);
   assert.doesNotMatch(mainSource, /最小样本量/);

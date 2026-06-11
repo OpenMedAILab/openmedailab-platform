@@ -3,13 +3,13 @@ from django.contrib.auth.forms import UserCreationForm
 from django.contrib.auth.models import User
 from django.db import transaction
 
-from .models import RoleType, UserProfile, normalize_email, uid_for_user
+from .models import PUBLIC_ROLE_CHOICES, RoleType, UserProfile, normalize_email, uid_for_user
 
 
 class RegisterForm(UserCreationForm):
     email = forms.EmailField(required=True)
     display_name = forms.CharField(max_length=80, required=False, label="昵称")
-    role_type = forms.ChoiceField(choices=RoleType.choices, label="主要身份")
+    role_type = forms.ChoiceField(choices=PUBLIC_ROLE_CHOICES, label="主要身份")
 
     class Meta(UserCreationForm.Meta):
         model = User
@@ -46,6 +46,8 @@ class RegisterForm(UserCreationForm):
 
 
 class UserProfileForm(forms.ModelForm):
+    role_type = forms.ChoiceField(choices=[*PUBLIC_ROLE_CHOICES, (RoleType.OTHER, RoleType.OTHER.label)], label="主要身份")
+
     class Meta:
         model = UserProfile
         fields = (

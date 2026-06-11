@@ -64,14 +64,22 @@ class ProjectAdmin(admin.ModelAdmin):
         "updated_at",
     )
     list_filter = ("theme", "stage", "is_public", "imported_at")
-    search_fields = ("=topic_id", "title", "title_en", "problem_statement", "clinical_endpoint", "existing_foundation")
+    search_fields = (
+        "=topic_id",
+        "title",
+        "title_en",
+        "summary",
+        "problem_statement",
+        "clinical_endpoint",
+        "existing_foundation",
+    )
     readonly_fields = ("created_at", "updated_at", "imported_at")
     autocomplete_fields = ("theme",)
     inlines = (ProjectTagInline, ProjectDocumentInline)
     actions = ("mark_open_recruiting", "mark_team_building", "mark_active", "mark_archived")
     fieldsets = (
         ("基础信息", {"fields": ("topic_id", "title", "title_en", "theme", "stage", "is_public")}),
-        ("核心课题字段", {"fields": ("problem_statement", "clinical_endpoint", "existing_foundation")}),
+        ("核心课题字段", {"fields": ("summary", "problem_statement", "clinical_endpoint", "existing_foundation")}),
         ("导入原始 JSON", {"fields": ("source_payload",), "classes": ("collapse",)}),
         ("时间", {"fields": ("created_at", "updated_at", "imported_at")}),
     )
@@ -104,9 +112,9 @@ class ProjectAdmin(admin.ModelAdmin):
 
 @admin.register(ProjectDocument)
 class ProjectDocumentAdmin(admin.ModelAdmin):
-    list_display = ("project", "doc_type", "title", "path", "created_at")
+    list_display = ("project", "doc_type", "title", "description", "path", "created_at")
     list_filter = ("doc_type",)
-    search_fields = ("project__title", "path", "title")
+    search_fields = ("project__title", "path", "title", "description")
     autocomplete_fields = ("project",)
     readonly_fields = ("created_at",)
 

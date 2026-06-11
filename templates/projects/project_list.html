@@ -43,7 +43,7 @@
       <option value="recommended" {% if filters.sort == "recommended" %}selected{% endif %}>综合推荐</option>
       <option value="follows" {% if filters.sort == "follows" %}selected{% endif %}>关注数</option>
       <option value="updated" {% if filters.sort == "updated" %}selected{% endif %}>最近更新</option>
-      <option value="project_id" {% if filters.sort == "project_id" %}selected{% endif %}>课题 ID</option>
+      <option value="project_id" {% if filters.sort == "project_id" %}selected{% endif %}>课题编号</option>
     </select>
   </div>
   <div style="display: flex; align-items: flex-end; min-width: 100px;">
@@ -57,7 +57,7 @@
       <p class="project-title"><a href="{% url 'project_detail' project.pk %}">{{ project.title }}</a></p>
       <div style="margin-bottom: 12px; flex-wrap: wrap; display: flex;">
         <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">category</span> {{ project.theme }}</span>
-        <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">tag</span> {{ project.topic_id }}</span>
+        <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">tag</span> {{ project.topic_code }}</span>
         <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">moving</span> {{ project.get_stage_display }}</span>
         <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">favorite</span> 关注 {{ project.follow_count }}</span>
         <span class="pill"><span class="material-symbols-rounded" style="font-size: 14px;">group</span> 参与 {{ project.interest_count }}</span>

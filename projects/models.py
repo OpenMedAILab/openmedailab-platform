@@ -64,9 +64,13 @@ class Project(models.Model):
     topic_id = models.PositiveIntegerField(unique=True)
     title = models.CharField(max_length=255)
     title_en = models.CharField(max_length=255, blank=True)
+    summary = models.TextField(blank=True)
     problem_statement = models.TextField(blank=True)
     clinical_endpoint = models.CharField(max_length=250, blank=True)
     existing_foundation = models.CharField(max_length=250, blank=True)
+    team_requirements = models.TextField(blank=True)
+    project_progress = models.TextField(blank=True)
+    target_venue = models.CharField(max_length=255, blank=True)
     theme = models.ForeignKey(Theme, on_delete=models.SET_NULL, null=True, blank=True, related_name="projects")
     stage = models.CharField(max_length=32, choices=ProjectStage.choices, default=ProjectStage.DRAFT)
     source_payload = models.JSONField(default=dict, blank=True)
@@ -87,15 +91,58 @@ class Project(models.Model):
         return self.title
 
     @property
+    def topic_code(self):
+        return f"T{self.topic_id:04d}"
+
+    @property
     def team_status(self):
-        role_counts = {role: 0 for role in ["医生", "学生", "Leader", "AI工程师", "医学统计"]}
+        from accounts.models import PUBLIC_ROLE_CHOICES, RoleType, normalize_public_role
+
+        role_counts = {role: 0 for role in ["医生", "学生", "Leader", "大学老师", "AI工程师", "工程师", "医学统计"]}
         for item in self.interests.filter(status="approved").values("role").annotate(count=models.Count("id")):
             role_counts[item["role"]] = item["count"]
+        profile_group_counts = {value: 0 for value, _ in PUBLIC_ROLE_CHOICES}
+        approved_interests = self.interests.filter(status="approved").select_related("user__profile")
+        for interest in approved_interests:
+            profile = getattr(interest.user, "profile", None)
+            role_type = normalize_public_role(getattr(profile, "role_type", ""))
+            if not role_type:
+                role_type = {
+                    "医生": RoleType.DOCTOR,
+                    "学生": RoleType.UNDERGRAD_OR_BELOW,
+                    "大学老师": RoleType.PHD_OR_ABOVE,
+                    "AI工程师": RoleType.ENGINEER,
+                    "工程师": RoleType.ENGINEER,
+                }.get(interest.role, "")
+            if role_type in profile_group_counts:
+                profile_group_counts[role_type] += 1
+        role_group_counts = [
+            {"role_type": value, "label": label, "count": profile_group_counts[value]}
+            for value, label in PUBLIC_ROLE_CHOICES
+        ]
         sponsor_count = self.sponsor_intents.filter(status="approved").count()
+        leader_count = self.claim_intents.filter(status="approved", claim_type="leader").count() + role_counts.get("Leader", 0)
+        student_profile_count = (
+            profile_group_counts.get(RoleType.UNDERGRAD_OR_BELOW, 0)
+            + profile_group_counts.get(RoleType.MASTER_STUDENT, 0)
+            + profile_group_counts.get(RoleType.PHD_STUDENT, 0)
+        )
+        student_count = max(student_profile_count, role_counts.get("学生", 0))
+        doctor_count = max(profile_group_counts.get(RoleType.DOCTOR, 0), role_counts.get("医生", 0))
+        mentor_count = max(profile_group_counts.get(RoleType.PHD_OR_ABOVE, 0), role_counts.get("大学老师", 0))
         return {
             "roles": role_counts,
+            "role_groups": role_group_counts,
+            "visible_role_groups": [item for item in role_group_counts if item["count"] > 0],
+            "required_roles": [
+                {"key": "doctor", "label": "医生（医学指导）", "count": doctor_count, "ready": doctor_count >= 1},
+                {"key": "student", "label": "学生（实验）", "count": student_count, "ready": student_count >= 1},
+                {"key": "mentor", "label": "博士毕业及以上（指导）", "count": mentor_count, "ready": mentor_count >= 1},
+                {"key": "leader", "label": "Leader（项目负责人）", "count": leader_count, "ready": leader_count >= 1},
+            ],
+            "leader_count": leader_count,
             "sponsor_count": sponsor_count,
-            "basic_ready": role_counts["医生"] >= 1 and role_counts["学生"] >= 1 and role_counts["Leader"] >= 1,
+            "basic_ready": doctor_count >= 1 and student_count >= 1 and mentor_count >= 1 and leader_count >= 1,
         }
 
 
@@ -122,6 +169,7 @@ class ProjectDocument(models.Model):
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="documents")
     doc_type = models.CharField(max_length=20, choices=DocumentType.choices)
     title = models.CharField(max_length=255, blank=True)
+    description = models.TextField(blank=True)
     path = models.CharField(max_length=500)
     content_hash = models.CharField(max_length=64, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

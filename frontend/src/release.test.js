@@ -10,7 +10,7 @@ test("release helpers expose latest release and filter empty sections", () => {
       sections: {
         Added: ["新增版本弹窗"],
         Changed: [],
-        Fixed: ["修复收藏反馈"]
+        Fixed: ["修复关注反馈"]
       }
     },
     history: [{ version: "0.1.0" }]
@@ -20,6 +20,6 @@ test("release helpers expose latest release and filter empty sections", () => {
   assert.deepEqual(releaseHistory(release), [{ version: "0.1.0" }]);
   assert.deepEqual(sectionEntries(release.latest.sections), [
     ["Added", ["新增版本弹窗"]],
-    ["Fixed", ["修复收藏反馈"]]
+    ["Fixed", ["修复关注反馈"]]
   ]);
 });

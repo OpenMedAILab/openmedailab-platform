@@ -80,6 +80,7 @@ def document_payload(document):
         "doc_type": document.doc_type,
         "doc_type_label": document.get_doc_type_display(),
         "title": document.title,
+        "description": document.description,
         "path": document.path,
         "content_hash": document.content_hash,
         "created_at": document.created_at,
@@ -92,6 +93,7 @@ def public_document_payload(document):
         "doc_type": document.doc_type,
         "doc_type_label": document.get_doc_type_display(),
         "title": document.title,
+        "description": document.description,
         "path": public_document_path(document.path),
         "created_at": document.created_at,
     }
@@ -118,16 +120,22 @@ def project_summary_payload(project):
     return {
         "id": project.id,
         "topic_id": project.topic_id,
+        "topic_code": project.topic_code,
         "title": project.title,
         "title_en": project.title_en,
+        "summary": project.summary,
         "problem_statement": project.problem_statement,
         "clinical_endpoint": project.clinical_endpoint,
         "existing_foundation": project.existing_foundation,
+        "team_requirements": project.team_requirements,
+        "project_progress": project.project_progress,
+        "target_venue": project.target_venue,
         "theme": theme_payload(project.theme),
         "stage": project.stage,
         "stage_label": project.get_stage_display(),
         "tags": [tag_payload(tag) for tag in project.tags.all()],
         "is_public": project.is_public,
+        "team_status": project.team_status,
         "follow_count": getattr(project, "follow_count", None),
         "score_count": getattr(project, "score_count", None),
         "interest_count": getattr(project, "interest_count", None),
@@ -148,6 +156,7 @@ def project_detail_payload(project):
     payload.update(
         {
             "team_status": project.team_status,
+            "documents": [document_payload(document) for document in project.documents.all()],
             "source_payload": project.source_payload,
             "imported_at": project.imported_at,
         }
@@ -157,9 +166,15 @@ def project_detail_payload(project):
 
 def public_project_detail_payload(project):
     payload = project_summary_payload(project)
+    documents = [
+        public_document_payload(document)
+        for document in project.documents.all()
+        if public_document_path(document.path)
+    ]
     payload.update(
         {
             "team_status": project.team_status,
+            "documents": documents,
         }
     )
     return payload
@@ -169,7 +184,12 @@ def public_document_path(path):
     value = str(path or "").strip()
     if not value:
         return ""
-    if value.startswith("/") or value.startswith("\\") or ".." in value.replace("\\", "/").split("/"):
+    parts = value.replace("\\", "/").split("/")
+    if value.startswith("/media/"):
+        if ".." in parts:
+            return ""
+        return value
+    if value.startswith("/") or value.startswith("\\") or ".." in parts:
         return ""
     if ":" in value and not value.startswith(("http://", "https://")):
         return ""

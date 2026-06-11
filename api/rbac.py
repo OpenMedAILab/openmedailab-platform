@@ -4,11 +4,16 @@ from accounts.models import is_platform_admin_user
 ROLE_LABELS = {
     "guest": "访客",
     "doctor": "医生",
-    "student": "学生",
-    "teacher": "老师",
-    "ai_engineer": "AI 工程师",
-    "statistician": "医学统计",
-    "sponsor": "资助者",
+    "undergrad_or_below": "在读本科及以下",
+    "master_student": "在读硕士",
+    "phd_student": "在读博士",
+    "phd_or_above": "博士毕业及以上",
+    "engineer": "工程师",
+    "student": "在读本科及以下",
+    "teacher": "博士毕业及以上",
+    "ai_engineer": "工程师",
+    "statistician": "工程师",
+    "sponsor": "注册用户",
     "other": "注册用户",
     "admin": "管理员",
 }
@@ -43,10 +48,11 @@ BASE_CAPABILITIES = {
 
 ROLE_CAPABILITY_PATCHES = {
     "doctor": {"medical_review": True},
+    "phd_or_above": {"medical_review": True},
+    "engineer": {"technical_delivery": True},
     "teacher": {"medical_review": True},
     "ai_engineer": {"technical_delivery": True},
-    "statistician": {"statistical_design": True},
-    "sponsor": {"funding_support": True},
+    "statistician": {"technical_delivery": True},
 }
 
 

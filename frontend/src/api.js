@@ -1,5 +1,6 @@
 const configuredBase = window.OPENMEDAILAB_API_BASE || "";
-export const API_BASE = configuredBase || (location.port === "5173" ? "http://127.0.0.1:8000" : "");
+const devApiHost = location.hostname || "127.0.0.1";
+export const API_BASE = configuredBase || (location.port === "5173" ? `${location.protocol || "http:"}//${devApiHost}:8000` : "");
 
 let csrfToken = "";
 
@@ -99,6 +100,7 @@ export const api = {
   follow: (id) => request(`/api/projects/${id}/follow/`, { method: "POST", body: {} }),
   unfollow: (id) => request(`/api/projects/${id}/unfollow/`, { method: "POST", body: {} }),
   score: (id, payload) => request(`/api/projects/${id}/score/`, { method: "POST", body: payload }),
+  unscore: (id) => request(`/api/projects/${id}/unscore/`, { method: "POST", body: {} }),
   interest: (id, payload) => request(`/api/projects/${id}/interest/`, { method: "POST", body: payload }),
   claim: (id, payload) => request(`/api/projects/${id}/claim/`, { method: "POST", body: payload }),
   sponsor: (id, payload) => request(`/api/projects/${id}/sponsor/`, { method: "POST", body: payload }),
@@ -136,9 +138,15 @@ export const api = {
   adminAuditLogs: (params = {}) => request(`/api/admin/audit-logs/?${new URLSearchParams(cleanParams(params))}`),
   adminProjects: (params = {}) => request(`/api/admin/projects/?${new URLSearchParams(cleanParams(params))}`),
   adminProject: (id) => request(`/api/admin/projects/${id}/`),
+  adminImportProjects: (payload) => request("/api/admin/projects/import-json/", { method: "POST", body: payload }),
   adminCreateProject: (payload) => request("/api/admin/projects/", { method: "POST", body: payload }),
   adminUpdateProject: (id, payload) => request(`/api/admin/projects/${id}/`, { method: "PATCH", body: payload }),
-  adminDeleteProject: (id) => request(`/api/admin/projects/${id}/`, { method: "DELETE", body: {} })
+  adminDeleteProject: (id) => request(`/api/admin/projects/${id}/`, { method: "DELETE", body: {} }),
+  adminBulkArchiveProjects: (payload) => request("/api/admin/projects/bulk-archive/", { method: "POST", body: payload }),
+  adminProjectDocuments: (params = {}) => request(`/api/admin/project-documents/?${new URLSearchParams(cleanParams(params))}`),
+  adminUploadProjectDocuments: (formData) => requestForm("/api/admin/project-documents/upload/", formData),
+  adminUpdateProjectDocument: (id, payload) => request(`/api/admin/project-documents/${id}/`, { method: "PATCH", body: payload }),
+  adminDeleteProjectDocument: (id) => request(`/api/admin/project-documents/${id}/`, { method: "DELETE", body: {} })
 };
 
 function cleanParams(params) {
