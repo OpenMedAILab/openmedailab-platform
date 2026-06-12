@@ -111,12 +111,14 @@ test("homepage theme selector uses image-backed topic cards", () => {
   assert.match(mainSource, /topicThemeCardStyle\(theme\)/);
   assert.match(mainSource, /全部课题/);
   assert.match(mainSource, /AntiVEGF/);
+  assert.match(mainSource, /AMD/);
   assert.match(mainSource, /阴道镜/);
   assert.match(mainSource, /MedicalAIPlatform\.png/);
   assert.match(mainSource, /AntiVEGF_img\.png/);
   assert.match(mainSource, /ROP\.png/);
   assert.match(mainSource, /Yindaojing\.png/);
-  assert.match(stylesSource, /\.topic-theme-strip\s*\{[\s\S]*?grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(168px,\s*1fr\)\);/);
+  assert.match(stylesSource, /\.topic-theme-strip\s*\{[\s\S]*?grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(136px,\s*1fr\)\);/);
+  assert.match(stylesSource, /\.topic-theme-card\s*\{[\s\S]*?min-height:\s*82px;/);
   assert.match(stylesSource, /\.topic-theme-card\s*\{[\s\S]*?display:\s*flex;[\s\S]*?background-size:\s*cover;/);
 });
 
@@ -363,8 +365,14 @@ test("admin project form no longer exposes score dimension fields", () => {
   assert.doesNotMatch(mainSource, /score_dimensions:\s*parseJsonOrFallback\(form\.score_dimensions/);
 });
 
-test("admin project list loads projects in batches of 25", () => {
-  assert.match(mainSource, /projectFilters:\s*\{ q:\s*"", theme:\s*"", page:\s*1, page_size:\s*25 \}/);
+test("admin project list loads every matching project page at once", () => {
+  assert.match(mainSource, /const ADMIN_PROJECT_PAGE_SIZE = 100/);
+  assert.match(mainSource, /projectFilters:\s*\{ q:\s*"", theme:\s*"", page:\s*1, page_size:\s*ADMIN_PROJECT_PAGE_SIZE \}/);
+  assert.match(mainSource, /async function fetchAllAdminProjectPages\(params = \{\}\)/);
+  assert.match(mainSource, /const data = await fetchAllAdminProjectPages\(state\.admin\.projectFilters\)/);
+  assert.match(mainSource, /has_next:\s*false/);
+  assert.match(mainSource, /已显示全部筛选结果/);
+  assert.doesNotMatch(mainSource, /loadMoreAdminProjects/);
 });
 
 test("admin project list changes stages through the existing project patch api", () => {

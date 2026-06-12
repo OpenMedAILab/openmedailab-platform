@@ -5,6 +5,7 @@ import { parseProjectJsonImport, projectImportFileKey, qualityCheckProjectPayloa
 import { latestRelease, releaseHistory, sectionEntries } from "./release.js";
 
 const PAGE_SIZE = 9;
+const ADMIN_PROJECT_PAGE_SIZE = 100;
 const WORKSPACE_TABS = new Set(["overview", "favorites", "interactions", "profile"]);
 const ADMIN_TABS = new Set(["overview", "interactions", "contributions", "projects", "themes", "users", "audit"]);
 const FOLLOWABLE_STAGE_VALUES = new Set(["open_recruiting", "team_building", "active"]);
@@ -92,8 +93,7 @@ const state = reactive({
     themes: [],
     projects: [],
     projectPagination: {},
-    projectFilters: { q: "", theme: "", page: 1, page_size: 25 },
-    hasMoreProjects: false,
+    projectFilters: { q: "", theme: "", page: 1, page_size: ADMIN_PROJECT_PAGE_SIZE },
     loadingProjects: false,
     updatingProjectStageId: null,
     selectedProjectIds: [],
@@ -803,14 +803,12 @@ const App = {
       }
       state.admin.loadingProjects = true;
       try {
-        const data = await api.adminProjects(state.admin.projectFilters);
-        const existing = new Set(state.admin.projects.map((item) => item.id));
-        const fresh = data.results.filter((item) => !existing.has(item.id));
-        state.admin.projects = reset ? data.results : [...state.admin.projects, ...fresh];
+        const data = await fetchAllAdminProjectPages(state.admin.projectFilters);
+        state.admin.projects = data.results;
         const loadedIds = new Set(state.admin.projects.map((item) => item.id));
         state.admin.selectedProjectIds = state.admin.selectedProjectIds.filter((id) => loadedIds.has(id));
         state.admin.projectPagination = data.pagination;
-        state.admin.hasMoreProjects = Boolean(data.pagination?.has_next);
+        state.admin.projectFilters.page = 1;
       } catch (error) {
         showToast(error.message);
       } finally {
@@ -820,12 +818,6 @@ const App = {
 
     async function searchAdminProjects() {
       await loadAdminProjects({ reset: true });
-    }
-
-    async function loadMoreAdminProjects() {
-      if (!state.admin.hasMoreProjects || state.admin.loadingProjects) return;
-      state.admin.projectFilters.page += 1;
-      await loadAdminProjects();
     }
 
     async function loadAdminUsers({ reset = false } = {}) {
@@ -2253,17 +2245,39 @@ const App = {
       }
     }
 
-    async function fetchAllAdminProjects(params = {}) {
+    async function fetchAllAdminProjectPages(params = {}) {
       const rows = [];
       let page = 1;
       let hasNext = true;
+      let pagination = null;
+      const requestParams = {
+        ...params,
+        page_size: params.page_size || ADMIN_PROJECT_PAGE_SIZE
+      };
       while (hasNext) {
-        const data = await api.adminProjects({ ...params, page });
+        const data = await api.adminProjects({ ...requestParams, page });
         rows.push(...(data.results || []));
-        hasNext = Boolean(data.pagination?.has_next);
+        pagination = data.pagination || pagination;
+        hasNext = Boolean(pagination?.has_next);
         page += 1;
       }
-      return rows;
+      return {
+        results: rows,
+        pagination: {
+          ...(pagination || {}),
+          page: 1,
+          page_size: rows.length || requestParams.page_size,
+          total_pages: 1,
+          total_count: pagination?.total_count ?? rows.length,
+          has_next: false,
+          has_previous: false
+        }
+      };
+    }
+
+    async function fetchAllAdminProjects(params = {}) {
+      const data = await fetchAllAdminProjectPages(params);
+      return data.results;
     }
 
     async function openTaskProjectDetail(project) {
@@ -3275,7 +3289,6 @@ const App = {
       applyJsonImport,
       archiveProject,
       searchAdminProjects,
-      loadMoreAdminProjects,
       displayScore,
       topicCode,
       shortText,
@@ -4175,10 +4188,7 @@ const App = {
                     </div>
                   </div>
                   <div class="load-more compact-load-more">
-                    <button v-if="state.admin.hasMoreProjects" class="ghost-button" type="button" :disabled="state.admin.loadingProjects" @click="loadMoreAdminProjects">
-                      {{ state.admin.loadingProjects ? '正在加载...' : '加载更多课题' }}
-                    </button>
-                    <span v-else>已显示当前筛选结果</span>
+                    <span>{{ state.admin.loadingProjects ? '正在加载全部课题...' : '已显示全部筛选结果' }}</span>
                   </div>
                 </article>
 
@@ -5290,7 +5300,8 @@ const DEFAULT_TOPIC_LOGO = "/topic_logos/MedicalAIPlatform.png";
 const FEATURED_TOPIC_THEMES = [
   { slug: "anti-vegf", name: "AntiVEGF", keywords: ["vegf", "anti-vegf", "antivegf", "抗vegf"] },
   { slug: "rop", name: "ROP", keywords: ["rop", "早产儿视网膜病变"] },
-  { slug: "yindaojing", name: "阴道镜", keywords: ["yindaojing", "阴道镜", "colposcopy"] }
+  { slug: "yindaojing", name: "阴道镜", keywords: ["yindaojing", "阴道镜", "colposcopy"] },
+  { slug: "amd", name: "AMD", keywords: ["amd", "年龄相关性黄斑变性", "age-related macular degeneration"] }
 ];
 const TOPIC_LOGO_RULES = [
   { file: "AntiVEGF_img.png", keywords: ["vegf", "anti-vegf", "antivegf", "抗vegf"] },

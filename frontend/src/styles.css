@@ -527,10 +527,10 @@ textarea:focus {
 
 .topic-theme-strip {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(136px, 1fr));
+  gap: 10px;
   overflow: visible;
-  padding: 0 0 18px;
+  padding: 0 0 16px;
 }
 
 .topic-theme-card {
@@ -538,8 +538,8 @@ textarea:focus {
   display: flex;
   align-items: flex-end;
   justify-content: flex-start;
-  min-height: 96px;
-  padding: 14px;
+  min-height: 82px;
+  padding: 12px;
   border-color: rgba(255, 255, 255, 0.32);
   border-radius: 8px;
   background-color: #0d3f45;
@@ -556,7 +556,7 @@ textarea:focus {
   position: relative;
   z-index: 1;
   max-width: 100%;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 900;
   line-height: 1.25;
   overflow-wrap: anywhere;
