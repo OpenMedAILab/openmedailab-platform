@@ -109,6 +109,10 @@ test("workspace lifecycle api wrappers are exposed", async () => {
 
   [
     "projectStatusCard",
+    "meProjects",
+    "createProject",
+    "updateProject",
+    "deleteProject",
     "unscore",
     "updateMeTaskStatus",
     "createMeContribution",

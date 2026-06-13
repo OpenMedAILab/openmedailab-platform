@@ -131,6 +131,7 @@ def project_summary_payload(project):
         "project_progress": project.project_progress,
         "target_venue": project.target_venue,
         "theme": theme_payload(project.theme),
+        "created_by": uid_only_user_payload(project.created_by) if getattr(project, "created_by_id", None) else None,
         "stage": project.stage,
         "stage_label": project.get_stage_display(),
         "tags": [tag_payload(tag) for tag in project.tags.all()],
@@ -368,6 +369,11 @@ def audit_log_payload(entry):
         "action_label": audit_action_label(entry.action),
         "target_type": entry.target_type,
         "target_id": entry.target_id,
+        "request_id": entry.request_id,
+        "source": entry.source,
+        "status": entry.status,
+        "error_code": entry.error_code,
+        "error_message": entry.error_message,
         "summary": audit_log_summary(entry),
         "before": entry.before,
         "after": entry.after,
@@ -376,9 +382,23 @@ def audit_log_payload(entry):
 
 
 AUDIT_ACTION_LABELS = {
-    "interaction.review": "审核协作意向",
+    "auth.register": "注册",
+    "auth.login": "登录",
+    "auth.logout": "退出登录",
+    "auth.password_change_required": "强制修改密码",
+    "profile.update": "更新个人资料",
+    "interaction.review": "审核资助意向",
     "interaction.withdraw": "撤回协作意向",
     "project.stage_auto_team_building": "自动进入组队中",
+    "project.follow": "收藏课题",
+    "project.unfollow": "取消收藏",
+    "project.score": "点赞课题",
+    "project.unscore": "取消点赞",
+    "project.user_create": "用户上传课题",
+    "project.user_update": "用户更新课题",
+    "project.user_archive": "用户归档课题",
+    "interaction.auto_approve": "自动通过参与/认领",
+    "interaction.submit_sponsor": "提交资助意向",
     "task.create": "创建任务",
     "task.update": "更新任务",
     "task.cancel": "取消任务",
@@ -411,6 +431,22 @@ def audit_log_summary(entry):
     data = entry.after or entry.before or {}
     if not isinstance(data, dict):
         return audit_action_label(entry.action)
+
+    if entry.action.startswith("auth.") or entry.action.startswith("profile."):
+        if entry.status == "failed":
+            return compact_join(
+                [
+                    data.get("uid"),
+                    data.get("username"),
+                    entry.error_message,
+                ]
+            ) or audit_action_label(entry.action)
+        return compact_join(
+            [
+                data.get("uid"),
+                data.get("role_label"),
+            ]
+        ) or audit_action_label(entry.action)
 
     note = first_present(data, "review_note", "reason", "note")
     if entry.action.startswith("interaction."):

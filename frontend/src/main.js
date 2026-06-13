@@ -6,7 +6,7 @@ import { latestRelease, releaseHistory, sectionEntries } from "./release.js";
 
 const PAGE_SIZE = 9;
 const ADMIN_PROJECT_PAGE_SIZE = 100;
-const WORKSPACE_TABS = new Set(["overview", "favorites", "interactions", "profile"]);
+const WORKSPACE_TABS = new Set(["overview", "favorites", "interactions", "uploads", "profile"]);
 const ADMIN_TABS = new Set(["overview", "interactions", "contributions", "projects", "themes", "users", "audit"]);
 const FOLLOWABLE_STAGE_VALUES = new Set(["open_recruiting", "team_building", "active"]);
 const RECRUITING_STAGE_VALUES = new Set(["open_recruiting", "team_building"]);
@@ -63,6 +63,14 @@ const state = reactive({
   themeSpace: null,
   dashboard: null,
   workspaceTab: "overview",
+  myProjects: [],
+  myProjectPagination: {},
+  myProjectQuota: { daily_limit: 10, used_today: 0, remaining: 10, unlimited: false },
+  loadingMyProjects: false,
+  myProjectFormOpen: false,
+  myProjectForm: emptyProjectForm(),
+  savingMyProject: false,
+  deletingMyProjectId: null,
   favoriteProjectIds: [],
   likedProjectIds: [],
   unlikedProjectIds: [],
@@ -240,7 +248,8 @@ const App = {
         { title: "关注课题", value: `${(dashboard.follows || []).length} 个`, tab: "favorites" },
         { title: "我的任务", value: `${myProjectTasks.value.length} 个`, tab: "interactions" },
         { title: "任务结果", value: `${(dashboard.contributions || []).length} 条`, tab: "interactions" },
-        { title: "已通过协作", value: `${approvedCount} 条`, tab: "interactions" }
+        { title: "已通过协作", value: `${approvedCount} 条`, tab: "interactions" },
+        { title: "我上传的课题", value: `${state.myProjectPagination.total_count || state.myProjects.length} 个`, tab: "uploads" }
       ];
     });
     const adminOverviewCards = computed(() => [
@@ -260,6 +269,7 @@ const App = {
       state.releaseModalOpen ||
       state.confirmDialog.open ||
       state.admin.projectFormOpen ||
+      state.myProjectFormOpen ||
       state.admin.taskProjectDetail.open ||
       state.contributionModal.open ||
       state.admin.fileManager.editorOpen
@@ -502,7 +512,12 @@ const App = {
       }
       state.loading = true;
       try {
-        syncDashboard(await api.dashboard());
+        const [dashboardData, myProjectData] = await Promise.all([
+          api.dashboard(),
+          api.meProjects({ page_size: 100 })
+        ]);
+        syncDashboard(dashboardData);
+        syncMyProjects(myProjectData);
         syncProfileForm();
       } catch (error) {
         showToast(error.message);
@@ -534,6 +549,34 @@ const App = {
         .filter((item) => isActiveParticipationRequest(item))
         .map((item) => item.project.id);
       state.favoritesLoaded = true;
+    }
+
+    function syncMyProjects(data) {
+      state.myProjects = data?.results || [];
+      state.myProjectPagination = data?.pagination || {};
+      state.myProjectQuota = {
+        daily_limit: data?.quota?.daily_limit ?? 10,
+        used_today: data?.quota?.used_today ?? 0,
+        remaining: data?.quota?.remaining ?? 10,
+        unlimited: Boolean(data?.quota?.unlimited)
+      };
+    }
+
+    async function loadMyProjects({ reset = false } = {}) {
+      if (!state.user) {
+        navigate("login");
+        return;
+      }
+      state.loadingMyProjects = true;
+      try {
+        const page = reset ? 1 : state.myProjectPagination.page || 1;
+        const data = await api.meProjects({ page, page_size: 100 });
+        syncMyProjects(data);
+      } catch (error) {
+        showToast(error.message || "我的上传课题读取失败");
+      } finally {
+        state.loadingMyProjects = false;
+      }
     }
 
     function participationRequestsByProject(interests = []) {
@@ -639,7 +682,7 @@ const App = {
     }
 
     function approvedTaskRelations(task) {
-      return (task?.relations || []).filter((relation) => relation.status === "approved");
+      return (task?.relations || []).filter((relation) => relation.status === "approved" && relation.relation_type !== "sponsor");
     }
 
     function canSubmitProjectTask(task) {
@@ -649,7 +692,8 @@ const App = {
     function taskSubmitHint(task) {
       if (canSubmitProjectTask(task)) return "";
       if (!approvedTaskRelations(task).length) {
-        if (task?.status === "pending") return "申请审核中，获批后可提交";
+        if (task?.relations?.some((relation) => relation.relation_type === "sponsor")) return "资助意向不产生任务结果提交权限";
+        if (task?.status === "pending") return "申请状态待确认，获批后可提交";
         if (task?.status === "rejected") return "申请未通过，不能提交";
         if (task?.status === "withdrawn") return "申请已撤回，不能提交";
         return "获批后可提交";
@@ -682,6 +726,126 @@ const App = {
       state.workspaceTab = tab;
       if (tab === "favorites") {
         loadFavorites({ force: true });
+      }
+      if (tab === "uploads") {
+        loadMyProjects({ reset: true });
+      }
+    }
+
+    function myProjectQuotaText() {
+      const quota = state.myProjectQuota || {};
+      if (quota.unlimited) return "管理员账号不受每日上传数量限制。";
+      return `今日已上传 ${quota.used_today || 0}/${quota.daily_limit || 10} 个，剩余 ${quota.remaining ?? 0} 个。`;
+    }
+
+    function canCreateMyProject() {
+      const quota = state.myProjectQuota || {};
+      return quota.unlimited || Number(quota.remaining ?? 0) > 0;
+    }
+
+    function canEditMyProject(project) {
+      return ["draft", "open_recruiting"].includes(project?.stage);
+    }
+
+    function canDeleteMyProject(project) {
+      return project?.stage !== "archived";
+    }
+
+    function newMyProject() {
+      closeMutuallyExclusiveModals("myProjectForm");
+      state.myProjectForm = emptyProjectForm();
+      state.myProjectFormOpen = true;
+    }
+
+    async function editMyProject(project) {
+      if (!project?.id) return;
+      try {
+        closeMutuallyExclusiveModals("myProjectForm");
+        const detail = await api.project(project.id).catch(() => null);
+        state.myProjectForm = projectToForm(detail || project);
+        state.myProjectFormOpen = true;
+      } catch (error) {
+        showToast(error.message || "课题读取失败");
+      }
+    }
+
+    function closeMyProjectForm() {
+      state.myProjectFormOpen = false;
+      state.myProjectForm = emptyProjectForm();
+    }
+
+    async function saveMyProject({ publish = false } = {}) {
+      if (!state.user || state.savingMyProject) return;
+      try {
+        const formPayload = projectFormPayload(state.myProjectForm);
+        if (!formPayload.title || !formPayload.theme) {
+          showToast("标题和主题不能为空");
+          return;
+        }
+        const quality = qualityCheckProjectPayload(formPayload);
+        if (quality.errors.length) {
+          showToast(quality.errors.join("；"));
+          return;
+        }
+        if (publish && quality.warnings.length) {
+          const confirmed = await openConfirmDialog({
+            title: "确认发布课题",
+            message: `这些建议字段仍待补充：${quality.warnings.join("、")}。确认发布吗？`,
+            confirmText: "继续发布"
+          });
+          if (!confirmed) return;
+        }
+        const payload = publish ? publishProjectPayload(formPayload) : draftProjectPayload(formPayload);
+        state.savingMyProject = true;
+        if (state.myProjectForm.id) {
+          await api.updateProject(state.myProjectForm.id, payload);
+          showToast(publish ? "课题已发布" : "课题已保存");
+        } else {
+          if (!canCreateMyProject()) {
+            showToast("今日上传课题数量已达上限");
+            return;
+          }
+          const createdProject = await api.createProject(draftProjectPayload(formPayload));
+          if (publish) {
+            await api.updateProject(createdProject.id, publishProjectPayload(formPayload));
+          }
+          showToast(publish ? "课题已创建并发布" : "课题草稿已创建");
+        }
+        closeMyProjectForm();
+        await Promise.all([
+          loadMyProjects({ reset: true }),
+          loadProjects({ reset: true }).catch(() => null),
+          loadDashboard().catch(() => null)
+        ]);
+      } catch (error) {
+        showToast(error.message || "课题保存失败");
+      } finally {
+        state.savingMyProject = false;
+      }
+    }
+
+    async function deleteMyProject(project) {
+      if (!project?.id || state.deletingMyProjectId) return;
+      const confirmed = await openConfirmDialog({
+        title: "确认删除课题",
+        message: `确认删除「${project.title}」吗？删除后公开课题库不可见，但会保留审计记录。`,
+        confirmText: "删除课题",
+        tone: "danger"
+      });
+      if (!confirmed) return;
+      state.deletingMyProjectId = project.id;
+      try {
+        await api.deleteProject(project.id);
+        showToast("课题已删除");
+        await Promise.all([
+          loadMyProjects({ reset: true }),
+          loadProjects({ reset: true }).catch(() => null),
+          loadDashboard().catch(() => null)
+        ]);
+      } catch (error) {
+        showToast(error.message || "课题删除失败");
+      } finally {
+        state.deletingMyProjectId = null;
       }
     }
 
@@ -996,6 +1160,11 @@ const App = {
       state.participationProjectIds = [];
       state.participationRequestsByProjectId = {};
       state.sponsorRequestsByProjectId = {};
+      state.myProjects = [];
+      state.myProjectPagination = {};
+      state.myProjectQuota = { daily_limit: 10, used_today: 0, remaining: 10, unlimited: false };
+      state.myProjectFormOpen = false;
+      state.myProjectForm = emptyProjectForm();
       state.submittingParticipationProjectIds = [];
       state.withdrawingParticipationProjectIds = [];
       state.submittingLikeProjectIds = [];
@@ -1028,10 +1197,6 @@ const App = {
 
     function invalidateProjectStatusCard() {
       return null;
-    }
-
-    function projectStageValue(project) {
-      return project?.stage || "";
     }
 
     function canFollowProject(project) {
@@ -1222,7 +1387,7 @@ const App = {
         showToast("当前阶段暂不接受新的参与申请");
         return;
       }
-      await submitInteraction(() => api.interest(state.currentProject.id, state.forms.interest), "申请参与已提交");
+      await submitInteraction(() => api.interest(state.currentProject.id, state.forms.interest), "已加入课题协作");
     }
 
     async function submitParticipationRequest(project) {
@@ -1236,7 +1401,7 @@ const App = {
         return;
       }
       if (isParticipationRequested(project)) {
-        showToast("申请参与已提交");
+        showToast("已加入课题协作");
         return;
       }
       const role = participationRoleForCurrentUser();
@@ -1250,7 +1415,12 @@ const App = {
         });
         markProjectInterestSubmitted(project, request, role);
         invalidateProjectStatusCard(project.id);
-        showToast("申请参与已提交");
+        showToast("已加入课题协作");
+        if (state.currentProject?.id === project.id) {
+          await loadProject(project.id, { preview: state.preview.open });
+        } else {
+          await loadProjects({ reset: true });
+        }
       } catch (error) {
         showToast(error.message || "申请参与失败");
       } finally {
@@ -1309,7 +1479,7 @@ const App = {
       try {
         await api.claim(project.id, { claim_type: "leader", message: "申请担任项目负责人" });
         invalidateProjectStatusCard(project.id);
-        showToast("Lead 申请已提交");
+        showToast("Lead 认领已通过");
         if (state.currentProject?.id === project.id) {
           await loadProject(project.id, { preview: state.preview.open });
         } else {
@@ -1418,8 +1588,8 @@ const App = {
         id: request?.id || `local-${id}`,
         project: request?.project || project,
         role,
-        status: request?.status || "pending",
-        status_label: request?.status_label || "待处理"
+        status: request?.status || "approved",
+        status_label: request?.status_label || "已通过"
       };
       state.participationRequestsByProjectId = {
         ...state.participationRequestsByProjectId,
@@ -1542,7 +1712,7 @@ const App = {
       if (!project) return;
       const request = participationRequestForProject(project);
       const labels = (project.viewer_state?.relationship_labels || [])
-        .filter((label) => !String(label).includes("申请参与"));
+        .filter((label) => !isParticipationRelationshipLabel(label));
       project.viewer_state = {
         ...(project.viewer_state || {}),
         is_following: isProjectFollowing(project),
@@ -1566,7 +1736,7 @@ const App = {
         ...(project.viewer_state || {}),
         interest_roles: [],
         relationship_labels: (project.viewer_state?.relationship_labels || [])
-          .filter((label) => !String(label).includes("申请参与"))
+          .filter((label) => !isParticipationRelationshipLabel(label))
       };
     }
 
@@ -1592,7 +1762,7 @@ const App = {
       return Boolean(
         state.participationProjectIds.includes(project.id) ||
         (project.viewer_state?.interest_roles || []).length ||
-        labels.some((label) => String(label).includes("申请参与"))
+        labels.some((label) => isParticipationRelationshipLabel(label))
       );
     }
 
@@ -1632,7 +1802,12 @@ const App = {
     }
 
     function participationRelationshipLabel(request) {
-      return `申请参与：${request?.status_label || "待处理"}`;
+      return `参与：${request?.status_label || "已通过"}`;
+    }
+
+    function isParticipationRelationshipLabel(label) {
+      const value = String(label || "");
+      return value.includes("申请参与") || value.startsWith("参与：");
     }
 
     function sponsorRequestForProject(project) {
@@ -2317,16 +2492,19 @@ const App = {
     }
 
     async function fetchProjectApprovedInteractions(project) {
-      const rows = [];
-      let page = 1;
-      let hasNext = true;
-      while (hasNext) {
-        const data = await api.adminInteractions({ status: "approved", project: project.topic_id, page, page_size: 100 });
-        rows.push(...(data.results || []));
-        hasNext = Boolean(data.pagination?.has_next);
-        page += 1;
-      }
-      return rows.filter((item) => item.project?.id === project.id);
+      const card = await api.projectStatusCard(project.id);
+      return (card.uid_groups?.groups || [])
+        .filter((group) => ["interest", "claim"].includes(group.type) && String(group.label || "").includes("已通过"))
+        .map((group) => ({
+          label: group.label,
+          items: (group.uids || []).map((uid) => ({
+            id: `${group.key}-${uid}`,
+            type: group.type,
+            user: { uid },
+            subtype_label: "",
+            status_label: "已通过"
+          }))
+        }));
     }
 
     async function fetchProjectContributions(project) {
@@ -2343,6 +2521,9 @@ const App = {
     }
 
     function approvedInteractionGroupsFor(rows = []) {
+      if (rows.some((item) => Array.isArray(item.items))) {
+        return rows;
+      }
       const groups = new Map();
       for (const item of rows) {
         const label = item.type_label || "协作";
@@ -2528,6 +2709,9 @@ const App = {
       }
       if (next !== "projectForm" && state.admin.projectFormOpen) {
         closeProjectForm();
+      }
+      if (next !== "myProjectForm" && state.myProjectFormOpen) {
+        closeMyProjectForm();
       }
       if (state.preview.open) {
         closeProjectPreview();
@@ -2962,6 +3146,10 @@ const App = {
         closeContributionModal();
         return;
       }
+      if (event.key === "Escape" && state.myProjectFormOpen) {
+        closeMyProjectForm();
+        return;
+      }
       if (event.key === "Escape" && state.admin.taskProjectDetail.open) {
         closeTaskProjectDetail();
         return;
@@ -3081,6 +3269,12 @@ const App = {
       state.profileMenuOpen = true;
     }
 
+    function openProfileMenuFromTrigger(event) {
+      window.clearTimeout(openProfileMenu.closeTimer);
+      state.profileMenuOpen = true;
+      event?.currentTarget?.blur();
+    }
+
     function scheduleCloseProfileMenu() {
       window.clearTimeout(openProfileMenu.closeTimer);
       openProfileMenu.closeTimer = window.setTimeout(() => {
@@ -3176,6 +3370,7 @@ const App = {
       projectSummaryText,
       canReviewInteraction,
       openProfileMenu,
+      openProfileMenuFromTrigger,
       scheduleCloseProfileMenu,
       closeProfileMenu,
       openReleaseModal,
@@ -3208,6 +3403,16 @@ const App = {
       taskProgressLabel,
       taskParticipantUids,
       setWorkspaceTab,
+      loadMyProjects,
+      myProjectQuotaText,
+      canCreateMyProject,
+      canEditMyProject,
+      canDeleteMyProject,
+      newMyProject,
+      editMyProject,
+      closeMyProjectForm,
+      saveMyProject,
+      deleteMyProject,
       saveProfile,
       startMyTask,
       prepareContribution,
@@ -3354,7 +3559,7 @@ const App = {
             @mouseleave="scheduleCloseProfileMenu"
             @focusin="openProfileMenu"
           >
-            <button class="text-button profile-trigger" type="button" @click="navigate('dashboard'); closeProfileMenu(); $event.currentTarget.blur()">
+            <button class="text-button profile-trigger" type="button" @click="openProfileMenuFromTrigger($event)" aria-haspopup="dialog" :aria-expanded="state.profileMenuOpen ? 'true' : 'false'">
               <span class="material-symbols-rounded" style="font-size: 18px;">person</span>
               <span>{{ state.user.profile?.display_name || state.user.username }}</span>
             </button>
@@ -3770,6 +3975,7 @@ const App = {
               <button type="button" :class="{ active: state.workspaceTab === 'overview' }" @click="setWorkspaceTab('overview')">总览</button>
               <button type="button" :class="{ active: state.workspaceTab === 'favorites' }" @click="setWorkspaceTab('favorites')">我的关注</button>
               <button type="button" :class="{ active: state.workspaceTab === 'interactions' }" @click="setWorkspaceTab('interactions')">我的任务</button>
+              <button type="button" :class="{ active: state.workspaceTab === 'uploads' }" @click="setWorkspaceTab('uploads')">我上传</button>
               <button type="button" :class="{ active: state.workspaceTab === 'profile' }" @click="setWorkspaceTab('profile')">个人资料</button>
             </div>
 
@@ -3853,6 +4059,43 @@ const App = {
                   <p>申请参与、认领或资助课题后，会在这里看到课题状态和你的任务进展。</p>
                   <button class="primary-button" type="button" @click="navigate('projects')">去课题库</button>
                 </section>
+              </section>
+
+              <section v-else-if="state.workspaceTab === 'uploads'" class="workspace-panel">
+                <article class="content-panel user-project-panel">
+                  <div class="panel-title-row">
+                    <div>
+                      <h2>我上传的课题</h2>
+                      <p>{{ myProjectQuotaText() }}</p>
+                    </div>
+                    <button class="primary-button" type="button" :disabled="!canCreateMyProject()" @click="newMyProject">新增课题</button>
+                  </div>
+                  <div v-if="state.myProjects.length" class="workspace-list user-project-list">
+                    <article class="workspace-row user-project-row" v-for="project in state.myProjects" :key="project.id">
+                      <span>
+                        <strong>{{ project.title }}</strong>
+                        <small>{{ topicCode(project) }} · {{ project.theme?.name || '未分类' }}</small>
+                      </span>
+                      <span>
+                        <strong>{{ project.stage_label }}</strong>
+                        <small>{{ adminProjectVisibilityLabel(project) }}</small>
+                      </span>
+                      <div class="button-row">
+                        <button v-if="canEditMyProject(project)" class="ghost-button" type="button" @click="editMyProject(project)">编辑</button>
+                        <span v-else class="status-chip">阶段由管理员维护</span>
+                        <button v-if="canDeleteMyProject(project)" class="ghost-button danger" type="button" :disabled="state.deletingMyProjectId === project.id" @click="deleteMyProject(project)">
+                          {{ state.deletingMyProjectId === project.id ? '删除中' : '删除' }}
+                        </button>
+                      </div>
+                    </article>
+                  </div>
+                  <section v-else class="empty-state favorites-empty">
+                    <h2>还没有上传课题</h2>
+                    <p>可以保存为草稿，也可以确认完整后发布到课题库。普通用户每天最多上传 10 个课题。</p>
+                    <button class="primary-button" type="button" :disabled="!canCreateMyProject()" @click="newMyProject">新增课题</button>
+                  </section>
+                  <p v-if="state.loadingMyProjects" class="muted-inline">正在读取我的上传课题...</p>
+                </article>
               </section>
 
               <section v-else class="workspace-panel">
@@ -4009,22 +4252,20 @@ const App = {
                 <div class="collaboration-management-head">
                   <div>
                     <h2>任务审批</h2>
-                    <p>审核用户提交的参与、认领和资助申请。审核通过后，开放招募课题会自动进入组队中。</p>
+                    <p>参与和认领由系统自动通过，管理员这里只审批资助意向。所有处理都会写入审计日志。</p>
                   </div>
                 </div>
                 <div class="collaboration-grid single-column">
                   <article class="content-panel">
                     <div class="panel-title-row compact-title-row">
                       <div>
-                        <h3>申请审批</h3>
-                        <p>处理待审核申请，状态变更会写入审计日志。</p>
+                        <h3>资助意向审批</h3>
+                        <p>只处理用户提交的资助意向，参与和认领不进入审批队列。</p>
                       </div>
                     </div>
                     <div class="admin-filter-row">
                       <select v-model="state.admin.interactionFilters.type" @change="loadAdminInteractions({ reset: true })">
-                        <option value="">全部类型</option>
-                        <option value="interest">申请参与</option>
-                        <option value="claim">认领意向</option>
+                        <option value="">全部资助</option>
                         <option value="sponsor">资助意向</option>
                       </select>
                       <select v-model="state.admin.interactionFilters.status" @change="loadAdminInteractions({ reset: true })">
@@ -4039,7 +4280,7 @@ const App = {
                     </div>
                     <div class="admin-table interaction-table">
                       <div class="admin-table-head">
-                        <span>申请</span><span>用户 UID</span><span>类型</span><span>状态</span><span>操作</span>
+                        <span>资助意向</span><span>用户 UID</span><span>资助类型</span><span>状态</span><span>操作</span>
                       </div>
                       <div class="admin-table-row" v-for="item in state.admin.interactions" :key="item.type + '-' + item.id">
                         <span><strong>{{ item.project.title }}</strong><small>{{ item.message || topicCode(item.project) }}</small></span>
@@ -4055,7 +4296,7 @@ const App = {
                         </span>
                       </div>
                     </div>
-                    <p v-if="!state.admin.loadingInteractions && !state.admin.interactions.length">没有匹配的协作申请。</p>
+                    <p v-if="!state.admin.loadingInteractions && !state.admin.interactions.length">没有匹配的资助意向。</p>
                   </article>
                 </div>
               </section>
@@ -4804,6 +5045,52 @@ const App = {
           </section>
         </div>
 
+        <div v-if="state.myProjectFormOpen" class="project-form-modal user-project-form-modal" @click.self="closeMyProjectForm">
+          <section class="project-form-dialog user-project-form-dialog" role="dialog" aria-modal="true" aria-label="我的课题表单">
+            <header class="project-form-dialog-header">
+              <div>
+                <span class="eyebrow">我上传的课题</span>
+                <h2>{{ state.myProjectForm.id ? '编辑课题' : '新增课题' }}</h2>
+                <p>可保存为草稿，或确认内容完整后发布到课题库。{{ myProjectQuotaText() }}</p>
+              </div>
+              <div class="modal-actions">
+                <button class="ghost-button" type="button" @click="closeMyProjectForm">关闭</button>
+              </div>
+            </header>
+            <form class="stack-form project-edit-form project-form-dialog-body" @submit.prevent="saveMyProject()">
+              <div class="form-grid">
+                <label><span>主题</span>
+                  <select v-model="state.myProjectForm.theme">
+                    <option value="">请选择主题</option>
+                    <option v-for="theme in state.meta.themes" :key="theme.id" :value="theme.slug">{{ theme.name }}</option>
+                  </select>
+                </label>
+                <label><span>阶段</span>
+                  <select v-model="state.myProjectForm.stage">
+                    <option value="draft">草稿</option>
+                    <option value="open_recruiting">开放招募</option>
+                  </select>
+                </label>
+              </div>
+              <label><span>Title（中文）</span><input v-model="state.myProjectForm.title" type="text" /></label>
+              <label><span>Title（英文，选填）</span><input v-model="state.myProjectForm.title_en" type="text" /></label>
+              <label><span>摘要</span><textarea v-model="state.myProjectForm.summary" placeholder="用一段话概括课题要解决的问题、核心方法和预期价值"></textarea></label>
+              <div class="form-grid">
+                <label><span>科学问题（选填，250字以内）</span><textarea v-model="state.myProjectForm.problem_statement" maxlength="250"></textarea></label>
+                <label><span>临床终点（选填，250字以内）</span><textarea v-model="state.myProjectForm.clinical_endpoint" maxlength="250"></textarea></label>
+                <label><span>已有基础（选填，250字以内）</span><textarea v-model="state.myProjectForm.existing_foundation" maxlength="250"></textarea></label>
+                <label><span>标签（逗号分隔）</span><input v-model="state.myProjectForm.tags" type="text" /></label>
+              </div>
+              <div class="button-row form-actions">
+                <button class="ghost-button" type="submit" :disabled="state.savingMyProject">保存草稿</button>
+                <button class="primary-button" type="button" :disabled="state.savingMyProject" @click="saveMyProject({ publish: true })">
+                  {{ state.savingMyProject ? '保存中' : '发布课题' }}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+
         <div v-if="state.contributionModal.open" class="project-form-modal task-result-modal" @click.self="closeContributionModal">
           <section class="project-form-dialog task-result-dialog" role="dialog" aria-modal="true" aria-label="提交任务结果">
             <header class="project-form-dialog-header">
@@ -4880,7 +5167,7 @@ const App = {
                       <strong>{{ group.label }}</strong>
                       <span v-for="item in group.items" :key="item.type + '-' + item.id">
                         <strong>{{ item.user.uid }}</strong>
-                        <small>{{ item.subtype_label }} · {{ item.status_label }}</small>
+                        <small>{{ item.subtype_label ? item.subtype_label + ' · ' : '' }}{{ item.status_label }}</small>
                       </span>
                     </div>
                   </div>
@@ -4896,11 +5183,12 @@ const App = {
                       <span>{{ item.user.uid }}</span>
                       <span>{{ item.status_label }}</span>
                       <span><textarea v-model="state.admin.taskProjectDetail.reviewDrafts[item.id].review_comment" placeholder="填写审核评语"></textarea></span>
-                      <span class="button-row">
+                      <span v-if="item.status === 'submitted'" class="button-row">
                         <button class="ghost-button" type="button" @click="reviewContribution(item, 'approved')">通过</button>
                         <button v-if="item.result_type === 'final'" class="ghost-button" type="button" @click="reviewContribution(item, 'approved', { closeProject: true })">通过并结题</button>
                         <button class="ghost-button danger" type="button" @click="reviewContribution(item, 'rejected')">拒绝</button>
                       </span>
+                      <span v-else class="muted-inline">已审核</span>
                     </div>
                   </div>
                   <p v-else>暂无任务结果记录。</p>
@@ -5463,6 +5751,10 @@ function projectFundingReady(project) {
 
 function projectFundingLabel(project) {
   return projectFundingReady(project) ? "已获资助" : "待资助";
+}
+
+function projectStageValue(project) {
+  return project?.stage || "";
 }
 
 function projectTeamReady(project) {
