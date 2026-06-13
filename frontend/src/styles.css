@@ -1401,6 +1401,21 @@ textarea:focus {
   min-height: 142px;
 }
 
+.user-project-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.user-project-list {
+  max-height: 620px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.user-project-row {
+  grid-template-columns: minmax(0, 1.5fr) minmax(140px, 0.45fr) minmax(150px, auto);
+}
+
 .collaboration-management {
   display: grid;
   gap: 16px;
@@ -1675,7 +1690,7 @@ textarea:focus {
 .confirm-modal-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 400;
+  z-index: 900;
   display: grid;
   place-items: center;
   padding: 18px;
@@ -1684,6 +1699,8 @@ textarea:focus {
 }
 
 .confirm-modal {
+  position: relative;
+  z-index: 901;
   width: min(460px, calc(100vw - 36px));
   padding: 20px;
   border: 1px solid rgba(217, 231, 233, 0.96);
@@ -3033,7 +3050,7 @@ code {
   position: fixed;
   right: 24px;
   bottom: 24px;
-  z-index: 120;
+  z-index: 850;
   max-width: min(420px, calc(100vw - 32px));
   padding: 12px 16px;
   border: 1px solid rgba(15, 159, 154, 0.25);

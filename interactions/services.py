@@ -9,7 +9,8 @@ def recalculate_project_community_score(project):
 
 
 def project_stat_annotations(queryset=None):
-    queryset = queryset or Project.objects.all()
+    if queryset is None:
+        queryset = Project.objects.all()
     return queryset.annotate(
         follow_count=Count("follows", distinct=True),
         score_count=Count("scores", distinct=True),

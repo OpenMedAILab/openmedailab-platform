@@ -72,6 +72,7 @@ class Project(models.Model):
     project_progress = models.TextField(blank=True)
     target_venue = models.CharField(max_length=255, blank=True)
     theme = models.ForeignKey(Theme, on_delete=models.SET_NULL, null=True, blank=True, related_name="projects")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="uploaded_projects")
     stage = models.CharField(max_length=32, choices=ProjectStage.choices, default=ProjectStage.DRAFT)
     source_payload = models.JSONField(default=dict, blank=True)
     is_public = models.BooleanField(default=False)
@@ -85,6 +86,7 @@ class Project(models.Model):
         indexes = [
             models.Index(fields=["stage", "is_public"]),
             models.Index(fields=["theme", "stage"]),
+            models.Index(fields=["created_by", "-created_at"]),
             models.Index(fields=["-updated_at"]),
         ]
     def __str__(self):
@@ -275,6 +277,11 @@ class AuditLog(models.Model):
     action = models.CharField(max_length=120)
     target_type = models.CharField(max_length=120, blank=True)
     target_id = models.CharField(max_length=120, blank=True)
+    request_id = models.CharField(max_length=64, blank=True)
+    source = models.CharField(max_length=80, blank=True, default="api")
+    status = models.CharField(max_length=32, blank=True, default="success")
+    error_code = models.CharField(max_length=120, blank=True)
+    error_message = models.TextField(blank=True)
     before = models.JSONField(default=dict, blank=True)
     after = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -284,6 +291,8 @@ class AuditLog(models.Model):
         indexes = [
             models.Index(fields=["action"]),
             models.Index(fields=["target_type", "target_id"]),
+            models.Index(fields=["request_id"]),
+            models.Index(fields=["status"]),
         ]
 
     def __str__(self):

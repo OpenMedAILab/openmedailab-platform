@@ -5,6 +5,7 @@ import { test } from "node:test";
 const mainSource = readFileSync(new URL("./main.js", import.meta.url), "utf8");
 const stylesSource = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 const apiSource = readFileSync(new URL("./api.js", import.meta.url), "utf8");
+const indexSource = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 
 test("project modal uses an in-modal toast instead of the global page toast", () => {
   assert.match(mainSource, /<div v-if="state\.toast && !state\.preview\.open" class="toast">/);
@@ -31,7 +32,10 @@ test("route changes close workspace and admin modal overlays", () => {
 
 test("profile menu action clicks blur the focused button after closing", () => {
   const blurCalls = mainSource.match(/\$event\.currentTarget\.blur\(\)/g) || [];
-  assert.equal(blurCalls.length, 4);
+  assert.equal(blurCalls.length, 3);
+  assert.match(mainSource, /function openProfileMenuFromTrigger\(event\)[\s\S]*?state\.profileMenuOpen = true;/);
+  assert.match(mainSource, /@click="openProfileMenuFromTrigger\(\$event\)" aria-haspopup="dialog" :aria-expanded="state\.profileMenuOpen \? 'true' : 'false'"/);
+  assert.doesNotMatch(mainSource, /class="text-button profile-trigger" type="button" @click="navigate\('dashboard'\); closeProfileMenu\(\); \$event\.currentTarget\.blur\(\)"/);
 });
 
 test("desktop layout uses a left sidebar and mobile restores the top navigation", () => {
@@ -189,6 +193,7 @@ test("project detail uses a top action bar instead of right side panels", () => 
   assert.match(mainSource, /class="detail-stack"/);
   assert.match(mainSource, /class="content-panel project-team-panel"/);
   assert.match(mainSource, /目标期刊\/会议/);
+  assert.match(mainSource, /function projectStageValue\(project\)\s*\{\s*return project\?\.stage \|\| "";\s*\}\s*function projectTeamReady/s);
   assert.match(mainSource, /projectStartupLabel\(state\.currentProject\)/);
   assert.match(mainSource, /projectFundingLabel\(state\.currentProject\)/);
   assert.doesNotMatch(mainSource, /<div class="score-panel">/);
@@ -277,11 +282,12 @@ test("task management reuses existing project patch flows for stage changes", ()
   assert.doesNotMatch(apiSource, /\b(publishProject|startProject|pauseProject|archiveProject)\b/);
 });
 
-test("project cards no longer fetch hover status cards after lifecycle writes", () => {
+test("project cards no longer keep hover status-card state after lifecycle writes", () => {
   assert.doesNotMatch(mainSource, /state\.projectStatusCards/);
-  assert.doesNotMatch(mainSource, /api\.projectStatusCard\(project\.id\)/);
   assert.doesNotMatch(mainSource, /课题状态读取失败/);
   assert.doesNotMatch(mainSource, /uid_groups:\s*\{\s*uids_visible:\s*false,\s*groups:\s*\[\]\s*\}/);
+  assert.match(mainSource, /async function fetchProjectApprovedInteractions\(project\)[\s\S]*?api\.projectStatusCard\(project\.id\)/);
+  assert.match(mainSource, /\["interest",\s*"claim"\]\.includes\(group\.type\)/);
   assert.match(mainSource, /function invalidateProjectStatusCard\(\)\s*\{\s*return null;/);
   assert.match(mainSource, /invalidateProjectStatusCard\(projectId\)/);
   assert.match(mainSource, /invalidateProjectStatusCard\(item\.project\?\.id\)/);
@@ -291,6 +297,8 @@ test("project cards no longer fetch hover status cards after lifecycle writes", 
 test("task result review hides legacy task reward and revision actions", () => {
   assert.match(mainSource, />任务管理<\/button>/);
   assert.match(mainSource, /<h2>任务管理<\/h2>/);
+  assert.match(mainSource, /v-if="item\.status === 'submitted'"/);
+  assert.match(mainSource, />已审核<\/span>/);
   assert.match(mainSource, /reviewContribution\(item,\s*'approved'\)/);
   assert.match(mainSource, /reviewContribution\(item,\s*'rejected'\)/);
   assert.doesNotMatch(mainSource, /通过并奖励/);
@@ -396,16 +404,28 @@ test("workspace overview uses the same clickable card affordance as admin overvi
   assert.match(stylesSource, /\.admin-overview-card:hover\s*\{[\s\S]*?scale\(1\.02\)/);
 });
 
+test("user uploaded projects expose edit only for user-managed stages", () => {
+  assert.match(mainSource, /function canEditMyProject\(project\)[\s\S]*?\["draft",\s*"open_recruiting"\]\.includes\(project\?\.stage\)/);
+  assert.match(mainSource, /v-if="canEditMyProject\(project\)"/);
+  assert.match(mainSource, /阶段由管理员维护/);
+  assert.match(mainSource, /function resetUserProjectState\(\)[\s\S]*?state\.myProjects = \[\];/);
+  assert.match(mainSource, /function resetUserProjectState\(\)[\s\S]*?state\.myProjectPagination = \{\};/);
+  assert.match(mainSource, /function resetUserProjectState\(\)[\s\S]*?state\.myProjectQuota = \{ daily_limit: 10, used_today: 0, remaining: 10, unlimited: false \};/);
+});
+
 test("business modals use an explicit z-index scale and close competing overlays", () => {
   assert.match(mainSource, /function closeMutuallyExclusiveModals\(next = ""\)/);
   assert.match(mainSource, /closeMutuallyExclusiveModals\("contribution"\)/);
   assert.match(mainSource, /closeMutuallyExclusiveModals\("taskProjectDetail"\)/);
   assert.match(mainSource, /closeMutuallyExclusiveModals\("projectForm"\)/);
-  assert.match(stylesSource, /\.toast\s*\{[\s\S]*?z-index:\s*120;/);
+  assert.match(mainSource, /closeMutuallyExclusiveModals\("myProjectForm"\)/);
+  assert.match(stylesSource, /\.toast\s*\{[\s\S]*?z-index:\s*850;/);
   assert.match(stylesSource, /\.project-modal-backdrop\s*\{[\s\S]*?z-index:\s*200;/);
   assert.match(stylesSource, /\.project-form-modal\s*\{[\s\S]*?z-index:\s*300;/);
   assert.match(stylesSource, /\.task-result-modal,\s*\.task-detail-modal\s*\{[\s\S]*?z-index:\s*320;/);
-  assert.match(stylesSource, /\.confirm-modal-backdrop\s*\{[\s\S]*?z-index:\s*400;/);
+  assert.match(stylesSource, /\.confirm-modal-backdrop\s*\{[\s\S]*?z-index:\s*900;/);
+  assert.match(indexSource, /href="\/src\/styles\.css\?v=0\.7\.1"/);
+  assert.match(indexSource, /src="\/src\/main\.js\?v=0\.7\.1"/);
 });
 
 test("legacy approved-project handoff helpers are not returned as product entry points", () => {

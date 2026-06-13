@@ -63,6 +63,7 @@ from projects.models import (
 )
 
 from .rbac import capabilities_for_user, has_capability
+from .middleware import current_request_id
 from .responses import form_errors
 from .serializers import (
     admin_user_detail_payload,
@@ -73,6 +74,7 @@ from .serializers import (
     dashboard_payload,
     document_payload,
     admin_project_summary_payload,
+    follow_payload,
     interest_payload,
     project_detail_payload,
     public_project_detail_payload,
@@ -100,6 +102,14 @@ api = NinjaAPI(
 
 REVIEWABLE_INTERACTION_STATUSES = {InteractionStatus.APPROVED, InteractionStatus.REJECTED}
 REVIEWABLE_CONTRIBUTION_STATUSES = {ContributionStatus.APPROVED, ContributionStatus.REJECTED}
+USER_PROJECT_ALLOWED_STAGES = {ProjectStage.DRAFT, ProjectStage.OPEN_RECRUITING}
+DAILY_USER_PROJECT_UPLOAD_LIMIT = 10
+AUDIT_ACTION_MAX_LENGTH = 120
+AUDIT_TARGET_TYPE_MAX_LENGTH = 120
+AUDIT_TARGET_ID_MAX_LENGTH = 120
+AUDIT_SOURCE_MAX_LENGTH = 80
+AUDIT_STATUS_MAX_LENGTH = 32
+AUDIT_ERROR_CODE_MAX_LENGTH = 120
 
 
 class Envelope(Schema):
@@ -111,10 +121,12 @@ class ErrorDetail(Schema):
     code: str
     message: str
     details: Optional[Any] = None
+    request_id: Optional[str] = None
 
 
 class ErrorEnvelope(Schema):
     ok: bool
+    request_id: Optional[str] = None
     error: ErrorDetail
 
 
@@ -418,9 +430,20 @@ def register(request, payload: RegisterRequest):
     data = payload.model_dump()
     form = RegisterForm(data)
     if not form.is_valid():
+        audit(
+            None,
+            "auth.register",
+            "User",
+            data.get("username") or "new",
+            after=audit_submitted_user_payload(data),
+            status="failed",
+            error_code="validation_error",
+            error_message="Registration failed.",
+        )
         return fail("Registration failed.", status=422, code="validation_error", errors=form_errors(form))
     user = create_registered_user(form)
     login(request, user)
+    audit(user, "auth.register", "User", audit_user_target_id(user), after=audit_user_snapshot(user))
     return 201, ok(user_payload(user))
 
 
@@ -428,14 +451,29 @@ def register(request, payload: RegisterRequest):
 def login_view(request, payload: LoginRequest):
     user = authenticate(request, username=payload.username, password=payload.password)
     if user is None:
+        audit(
+            None,
+            "auth.login",
+            "User",
+            payload.username or "unknown",
+            after={"username": payload.username or ""},
+            status="failed",
+            error_code="invalid_credentials",
+            error_message="用户名或密码错误。",
+        )
         return fail("用户名或密码错误。", status=400, code="invalid_credentials")
     login(request, user)
+    audit(user, "auth.login", "User", audit_user_target_id(user), after=audit_user_snapshot(user))
     return ok(user_payload(user))
 
 
 @api.post("/auth/logout/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Auth"])
 def logout_view(request):
+    actor = request.user if request.user.is_authenticated else None
+    target_id = audit_user_target_id(actor) if actor else "unknown"
+    before = audit_user_snapshot(actor) if actor else {}
     logout(request)
+    audit(actor, "auth.logout", "User", target_id, before=before, after={"logged_out": True})
     return ok({"logged_out": True})
 
 
@@ -444,19 +482,50 @@ def password_change_required(request, payload: RequiredPasswordChangeRequest):
     auth_error = require_login(request)
     if auth_error:
         return auth_error
+    user_before = audit_user_snapshot(request.user)
     if not request.user.profile.must_change_password:
+        audit(
+            request.user,
+            "auth.password_change_required",
+            "User",
+            audit_user_target_id(request.user),
+            before=user_before,
+            status="failed",
+            error_code="password_change_not_required",
+            error_message="Password change is not required.",
+        )
         return fail("Password change is not required.", status=400, code="password_change_not_required")
     form = SetPasswordForm(
         request.user,
         {"new_password1": payload.password1, "new_password2": payload.password2},
     )
     if not form.is_valid():
+        audit(
+            request.user,
+            "auth.password_change_required",
+            "User",
+            audit_user_target_id(request.user),
+            before=user_before,
+            status="failed",
+            error_code="validation_error",
+            error_message="Password reset failed.",
+        )
         return fail("Password reset failed.", status=422, code="validation_error", errors=password_reset_form_errors(form))
     try:
         system_default_password = get_system_default_password()
     except DefaultPasswordConfigError:
         system_default_password = None
     if system_default_password and payload.password1 == system_default_password:
+        audit(
+            request.user,
+            "auth.password_change_required",
+            "User",
+            audit_user_target_id(request.user),
+            before=user_before,
+            status="failed",
+            error_code="password_unchanged",
+            error_message="Password reset failed.",
+        )
         return fail(
             "Password reset failed.",
             status=422,
@@ -464,6 +533,16 @@ def password_change_required(request, payload: RequiredPasswordChangeRequest):
             errors={"password1": [{"message": "新密码不能与系统默认密码相同。", "code": "password_unchanged"}]},
         )
     if request.user.check_password(payload.password1):
+        audit(
+            request.user,
+            "auth.password_change_required",
+            "User",
+            audit_user_target_id(request.user),
+            before=user_before,
+            status="failed",
+            error_code="password_unchanged",
+            error_message="Password reset failed.",
+        )
         return fail(
             "Password reset failed.",
             status=422,
@@ -474,6 +553,15 @@ def password_change_required(request, payload: RequiredPasswordChangeRequest):
     profile = request.user.profile
     profile.must_change_password = False
     profile.save(update_fields=["must_change_password", "updated_at"])
+    user_after = audit_user_snapshot(request.user)
+    audit(
+        request.user,
+        "auth.password_change_required",
+        "User",
+        audit_user_target_id(request.user),
+        before=user_before,
+        after=user_after,
+    )
     logout(request)
     return ok({"password_changed": True, "logged_out": True})
 
@@ -491,12 +579,27 @@ def profile_patch(request, payload: ProfilePatchRequest):
     auth_error = require_login(request)
     if auth_error:
         return auth_error
+    before = audit_user_snapshot(request.user)
     data = profile_form_initial(request.user.profile)
     data.update({key: value for key, value in payload.model_dump().items() if value is not None})
     form = UserProfileForm(data, instance=request.user.profile)
     if not form.is_valid():
+        audit(
+            request.user,
+            "profile.update",
+            "UserProfile",
+            audit_user_target_id(request.user),
+            before=before,
+            after=safe_profile_update_payload(payload.model_dump()),
+            status="failed",
+            error_code="validation_error",
+            error_message="Profile update failed.",
+        )
         return fail("Profile update failed.", status=422, code="validation_error", errors=form_errors(form))
     form.save()
+    request.user.refresh_from_db()
+    request.user.profile.refresh_from_db()
+    audit(request.user, "profile.update", "UserProfile", audit_user_target_id(request.user), before=before, after=audit_user_snapshot(request.user))
     return ok(user_payload(request.user))
 
 
@@ -505,10 +608,25 @@ def profile_put(request, payload: ProfilePatchRequest):
     auth_error = require_login(request)
     if auth_error:
         return auth_error
+    before = audit_user_snapshot(request.user)
     form = UserProfileForm(payload.model_dump(), instance=request.user.profile)
     if not form.is_valid():
+        audit(
+            request.user,
+            "profile.update",
+            "UserProfile",
+            audit_user_target_id(request.user),
+            before=before,
+            after=safe_profile_update_payload(payload.model_dump()),
+            status="failed",
+            error_code="validation_error",
+            error_message="Profile update failed.",
+        )
         return fail("Profile update failed.", status=422, code="validation_error", errors=form_errors(form))
     form.save()
+    request.user.refresh_from_db()
+    request.user.profile.refresh_from_db()
+    audit(request.user, "profile.update", "UserProfile", audit_user_target_id(request.user), before=before, after=audit_user_snapshot(request.user))
     return ok(user_payload(request.user))
 
 
@@ -524,7 +642,9 @@ def project_list(
     page_size: int = 20,
 ):
     projects = project_stat_annotations(
-        Project.objects.filter(is_public=True, stage__in=PUBLIC_PROJECT_STAGES).select_related("theme").prefetch_related("tags")
+        Project.objects.filter(is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
+        .select_related("theme", "created_by", "created_by__profile")
+        .prefetch_related("tags")
     )
     q = q.strip()
     theme = theme.strip()
@@ -571,7 +691,7 @@ def project_detail(request, project_id: int):
     project = get_object_or_404(
         project_stat_annotations(
             Project.objects.filter(is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
-            .select_related("theme")
+            .select_related("theme", "created_by", "created_by__profile")
             .prefetch_related("tags", "documents")
         ),
         pk=project_id,
@@ -584,9 +704,15 @@ def project_detail(request, project_id: int):
 
 @api.get("/projects/{project_id}/status-card/", response={200: Envelope, 404: ErrorEnvelope}, tags=["Projects"], auth=None)
 def project_status_card(request, project_id: int):
+    if request.user.is_authenticated and has_capability(request.user, "manage_projects"):
+        project_queryset = Project.objects.all()
+    else:
+        project_queryset = Project.objects.filter(is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
     project = get_object_or_404(
         project_stat_annotations(
-            Project.objects.filter(is_public=True, stage__in=PUBLIC_PROJECT_STAGES).select_related("theme").prefetch_related("tags")
+            project_queryset
+            .select_related("theme", "created_by", "created_by__profile")
+            .prefetch_related("tags")
         ),
         pk=project_id,
     )
@@ -615,6 +741,169 @@ def project_status_card(request, project_id: int):
             },
         }
     )
+
+
+@api.post("/projects/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Projects"])
+def user_project_create(request, payload: ProjectWriteRequest):
+    auth_error = require_login(request)
+    if auth_error:
+        return auth_error
+    data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    normalize_project_identity_alias(data)
+    data.pop("is_public", None)
+    error = validate_user_project_payload(data, creating=True)
+    if error:
+        audit(
+            request.user,
+            "project.user_create",
+            "Project",
+            "new",
+            after=data,
+            status="failed",
+            error_code=error[1]["error"]["code"],
+            error_message=error[1]["error"]["message"],
+        )
+        return error
+    if data.get("topic_id") and Project.objects.filter(topic_id=data["topic_id"]).exists():
+        audit(
+            request.user,
+            "project.user_create",
+            "Project",
+            "new",
+            after=data,
+            status="failed",
+            error_code="validation_error",
+            error_message="id already exists.",
+        )
+        return fail("id already exists.", status=422, code="validation_error")
+    try:
+        with transaction.atomic():
+            if not user_can_bypass_project_upload_quota(request.user):
+                User.objects.select_for_update().get(pk=request.user.pk)
+                if user_project_uploads_today(request.user) >= DAILY_USER_PROJECT_UPLOAD_LIMIT:
+                    audit(
+                        request.user,
+                        "project.user_create",
+                        "Project",
+                        "new",
+                        after={"title": payload.title or "", "limit": DAILY_USER_PROJECT_UPLOAD_LIMIT},
+                        status="failed",
+                        error_code="daily_project_upload_limit_exceeded",
+                        error_message="普通用户每天最多上传 10 个课题。",
+                    )
+                    return fail("普通用户每天最多上传 10 个课题。", status=422, code="daily_project_upload_limit_exceeded")
+            project = create_project(data, source_label="api-user", allow_create_theme=False, created_by=request.user)
+            project = Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents").get(pk=project.pk)
+            audit(request.user, "project.user_create", "Project", project.id, after=project_detail_payload(project))
+    except ValueError as exc:
+        audit(
+            request.user,
+            "project.user_create",
+            "Project",
+            "new",
+            after=data,
+            status="failed",
+            error_code="validation_error",
+            error_message=str(exc),
+        )
+        return fail(str(exc), status=422, code="validation_error")
+    return 201, ok(project_detail_payload(project))
+
+
+@api.patch("/projects/{project_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Projects"])
+def user_project_update(request, project_id: int, payload: ProjectWriteRequest):
+    auth_error = require_login(request)
+    if auth_error:
+        return auth_error
+    project = get_object_or_404(Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents"), pk=project_id)
+    ownership_error = require_project_owner_or_admin(request, project, "project.user_update")
+    if ownership_error:
+        return ownership_error
+    before = project_detail_payload(project)
+    patch_data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    normalize_project_identity_alias(patch_data)
+    patch_data.pop("is_public", None)
+    if "topic_id" in patch_data and patch_data["topic_id"] != project.topic_id:
+        audit(
+            request.user,
+            "project.user_update",
+            "Project",
+            project.id,
+            before=before,
+            after=patch_data,
+            status="failed",
+            error_code="validation_error",
+            error_message="topic_id cannot be changed.",
+        )
+        return fail("topic_id cannot be changed.", status=422, code="validation_error")
+    if not user_can_bypass_project_upload_quota(request.user) and project.stage not in USER_PROJECT_ALLOWED_STAGES:
+        audit(
+            request.user,
+            "project.user_update",
+            "Project",
+            project.id,
+            before=before,
+            after=patch_data,
+            status="failed",
+            error_code="user_project_stage_locked",
+            error_message="当前课题阶段只能由管理员修改。",
+        )
+        return fail("当前课题阶段只能由管理员修改。", status=422, code="user_project_stage_locked")
+    data = project_import_payload(project)
+    data.update(patch_data)
+    data["topic_id"] = project.topic_id
+    error = validate_user_project_payload(data, creating=False, current_project=project, stage_change_requested="stage" in patch_data)
+    if error:
+        audit(
+            request.user,
+            "project.user_update",
+            "Project",
+            project.id,
+            before=before,
+            after=data,
+            status="failed",
+            error_code=error[1]["error"]["code"],
+            error_message=error[1]["error"]["message"],
+        )
+        return error
+    try:
+        with transaction.atomic():
+            project = update_project(project, data, source_label="api-user", allow_create_theme=False)
+            project = Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents").get(pk=project.pk)
+            audit(request.user, "project.user_update", "Project", project.id, before=before, after=project_detail_payload(project))
+    except ValueError as exc:
+        audit(
+            request.user,
+            "project.user_update",
+            "Project",
+            project.id,
+            before=before,
+            after=data,
+            status="failed",
+            error_code="validation_error",
+            error_message=str(exc),
+        )
+        return fail(str(exc), status=422, code="validation_error")
+    return ok(project_detail_payload(project))
+
+
+@api.delete("/projects/{project_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope}, tags=["Projects"])
+def user_project_delete(request, project_id: int):
+    auth_error = require_login(request)
+    if auth_error:
+        return auth_error
+    project = get_object_or_404(Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents"), pk=project_id)
+    ownership_error = require_project_owner_or_admin(request, project, "project.user_archive")
+    if ownership_error:
+        return ownership_error
+    before = project_detail_payload(project)
+    with transaction.atomic():
+        project.is_public = False
+        project.stage = ProjectStage.ARCHIVED
+        project.save(update_fields=["is_public", "stage", "updated_at"])
+        project.refresh_from_db()
+        audit(request.user, "project.user_archive", "Project", project.id, before=before, after=project_detail_payload(project))
+    return ok(project_detail_payload(project))
 
 
 @api.get("/me/dashboard/", response={200: Envelope, 401: ErrorEnvelope}, tags=["Me"])
@@ -646,6 +935,30 @@ def dashboard(request):
         .order_by("-created_at")[:50]
     )
     return ok(dashboard_payload(request.user, follows, interests, claims, sponsors, scores, tasks, contributions, credits))
+
+
+@api.get("/me/projects/", response={200: Envelope, 401: ErrorEnvelope}, tags=["Me"])
+def me_project_list(request, page: int = 1, page_size: int = 20):
+    auth_error = require_login(request)
+    if auth_error:
+        return auth_error
+    projects = (
+        project_stat_annotations(
+            Project.objects.filter(created_by=request.user)
+            .select_related("theme", "created_by", "created_by__profile")
+            .prefetch_related("tags")
+        )
+        .order_by("-created_at", "topic_id")
+    )
+    quota_unlimited = user_can_bypass_project_upload_quota(request.user)
+    used_today = user_project_uploads_today(request.user)
+    quota = {
+        "daily_limit": None if quota_unlimited else DAILY_USER_PROJECT_UPLOAD_LIMIT,
+        "used_today": used_today,
+        "remaining": None if quota_unlimited else max(0, DAILY_USER_PROJECT_UPLOAD_LIMIT - used_today),
+        "unlimited": quota_unlimited,
+    }
+    return ok({**paginated_queryset(projects, page, page_size, admin_project_summary_payload, max_page_size=100), "quota": quota})
 
 
 @api.get("/admin/users/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Admin"])
@@ -808,6 +1121,8 @@ def admin_interaction_update_status(request, type: str, interaction_id: int, pay
     auth_error = require_capability(request, "review_interactions")
     if auth_error:
         return auth_error
+    if type != "sponsor":
+        return fail("管理员只审批资助意向。", status=422, code="invalid_interaction_type")
     if payload.status not in REVIEWABLE_INTERACTION_STATUSES:
         return fail("Invalid interaction status.", status=422, code="validation_error")
     with transaction.atomic():
@@ -820,8 +1135,6 @@ def admin_interaction_update_status(request, type: str, interaction_id: int, pay
         previous_project_stage = project.stage
         item.status = payload.status
         item.save(update_fields=["status", "updated_at"])
-        if payload.status == InteractionStatus.APPROVED:
-            maybe_advance_project_stage_after_interaction(project, request.user)
         item.project.refresh_from_db()
         after = interaction_payload(type, item)
         audit(
@@ -1587,7 +1900,7 @@ def admin_project_list(
     auth_error = require_capability(request, "manage_projects")
     if auth_error:
         return auth_error
-    projects = project_stat_annotations(Project.objects.all().select_related("theme").prefetch_related("tags"))
+    projects = project_stat_annotations(Project.objects.all().select_related("theme", "created_by", "created_by__profile").prefetch_related("tags"))
     q = q.strip()
     theme = theme.strip()
     stage = stage.strip()
@@ -1669,8 +1982,8 @@ def admin_project_import_json(request, payload: ProjectBulkImportRequest):
     updated_count = 0
     with transaction.atomic():
         for index, data in validated_projects:
-            project, created = upsert_project_with_instance(data, source_label="api-admin-json-import", allow_create_theme=True)
-            project = Project.objects.select_related("theme").prefetch_related("tags", "documents").get(pk=project.pk)
+            project, created = upsert_project_with_instance(data, source_label="api-admin-json-import", allow_create_theme=True, created_by=request.user)
+            project = Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents").get(pk=project.pk)
             if created:
                 created_count += 1
             else:
@@ -1724,7 +2037,7 @@ def admin_project_get(request, project_id: int):
     auth_error = require_capability(request, "manage_projects")
     if auth_error:
         return auth_error
-    project = get_object_or_404(Project.objects.select_related("theme").prefetch_related("tags", "documents"), pk=project_id)
+    project = get_object_or_404(Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents"), pk=project_id)
     return ok(project_detail_payload(project))
 
 
@@ -1737,16 +2050,46 @@ def admin_project_create(request, payload: ProjectWriteRequest):
     normalize_project_identity_alias(data)
     error = validate_admin_project_payload(data, creating=True)
     if error:
+        audit(
+            request.user,
+            "project.create",
+            "Project",
+            "new",
+            after=data,
+            status="failed",
+            error_code=error[1]["error"]["code"],
+            error_message=error[1]["error"]["message"],
+        )
         return error
     data["stage"] = ProjectStage.DRAFT
     data["is_public"] = False
     if data.get("topic_id") and Project.objects.filter(topic_id=data["topic_id"]).exists():
+        audit(
+            request.user,
+            "project.create",
+            "Project",
+            "new",
+            after=data,
+            status="failed",
+            error_code="validation_error",
+            error_message="id already exists.",
+        )
         return fail("id already exists.", status=422, code="validation_error")
     try:
-        project = create_project(data, source_label="api-admin", allow_create_theme=False)
+        project = create_project(data, source_label="api-admin", allow_create_theme=False, created_by=request.user)
     except ValueError as exc:
+        audit(
+            request.user,
+            "project.create",
+            "Project",
+            "new",
+            after=data,
+            status="failed",
+            error_code="validation_error",
+            error_message=str(exc),
+        )
         return fail(str(exc), status=422, code="validation_error")
-    project = get_object_or_404(Project.objects.select_related("theme").prefetch_related("tags", "documents"), pk=project.pk)
+    project = get_object_or_404(Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents"), pk=project.pk)
     audit(request.user, "project.create", "Project", project.id, after=project_detail_payload(project))
     return 201, ok(project_detail_payload(project))
 
@@ -1756,23 +2099,56 @@ def admin_project_update(request, project_id: int, payload: ProjectWriteRequest)
     auth_error = require_capability(request, "manage_projects")
     if auth_error:
         return auth_error
-    project = get_object_or_404(Project.objects.select_related("theme").prefetch_related("tags", "documents"), pk=project_id)
+    project = get_object_or_404(Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents"), pk=project_id)
     before = project_detail_payload(project)
     patch_data = payload.model_dump(exclude_unset=True, exclude_none=True)
     normalize_project_identity_alias(patch_data)
     if "topic_id" in patch_data and patch_data["topic_id"] != project.topic_id:
+        audit(
+            request.user,
+            "project.update",
+            "Project",
+            project.id,
+            before=before,
+            after=patch_data,
+            status="failed",
+            error_code="validation_error",
+            error_message="topic_id cannot be changed.",
+        )
         return fail("topic_id cannot be changed.", status=422, code="validation_error")
     data = project_import_payload(project)
     data.update(patch_data)
     data["topic_id"] = project.topic_id
     error = validate_admin_project_payload(data, creating=False, current_project=project)
     if error:
+        audit(
+            request.user,
+            "project.update",
+            "Project",
+            project.id,
+            before=before,
+            after=data,
+            status="failed",
+            error_code=error[1]["error"]["code"],
+            error_message=error[1]["error"]["message"],
+        )
         return error
     try:
         project = update_project(project, data, source_label="api-admin", allow_create_theme=False)
     except ValueError as exc:
+        audit(
+            request.user,
+            "project.update",
+            "Project",
+            project.id,
+            before=before,
+            after=data,
+            status="failed",
+            error_code="validation_error",
+            error_message=str(exc),
+        )
         return fail(str(exc), status=422, code="validation_error")
-    project = get_object_or_404(Project.objects.select_related("theme").prefetch_related("tags", "documents"), pk=project.pk)
+    project = get_object_or_404(Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents"), pk=project.pk)
     audit(request.user, "project.update", "Project", project.id, before=before, after=project_detail_payload(project))
     return ok(project_detail_payload(project))
 
@@ -1782,7 +2158,7 @@ def admin_project_delete(request, project_id: int):
     auth_error = require_capability(request, "manage_projects")
     if auth_error:
         return auth_error
-    project = get_object_or_404(Project.objects.select_related("theme").prefetch_related("tags", "documents"), pk=project_id)
+    project = get_object_or_404(Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents"), pk=project_id)
     before = project_detail_payload(project)
     project.is_public = False
     project.stage = ProjectStage.ARCHIVED
@@ -1900,7 +2276,8 @@ def follow_project(request, project_id: int):
     if auth_error:
         return auth_error
     project = get_object_or_404(Project, pk=project_id, is_public=True, stage__in=FOLLOWABLE_PROJECT_STAGES)
-    ProjectFollow.objects.get_or_create(user=request.user, project=project)
+    follow, created = ProjectFollow.objects.get_or_create(user=request.user, project=project)
+    audit(request.user, "project.follow", "ProjectFollow", follow.pk, after=follow_payload(follow))
     return ok({"is_following": True})
 
 
@@ -1921,6 +2298,9 @@ def unfollow_project(request, project_id: int):
     if auth_error:
         return auth_error
     project = get_object_or_404(Project, pk=project_id)
+    follows = list(ProjectFollow.objects.filter(user=request.user, project=project))
+    for follow in follows:
+        audit(request.user, "project.unfollow", "ProjectFollow", follow.pk, before=follow_payload(follow))
     ProjectFollow.objects.filter(user=request.user, project=project).delete()
     return ok({"is_following": False})
 
@@ -1940,6 +2320,7 @@ def score_project(request, project_id: int, payload: ScoreRequest):
         defaults={"score": form.cleaned_data["score"], "comment": form.cleaned_data.get("comment", "")},
     )
     recalculate_project_community_score(project)
+    audit(request.user, "project.score", "ProjectScore", score.pk, after=score_payload(score))
     return ok(score_payload(score))
 
 
@@ -1960,6 +2341,9 @@ def unscore_project(request, project_id: int):
     if auth_error:
         return auth_error
     project = get_object_or_404(Project, pk=project_id)
+    scores = list(ProjectScore.objects.filter(user=request.user, project=project))
+    for score in scores:
+        audit(request.user, "project.unscore", "ProjectScore", score.pk, before=score_payload(score))
     ProjectScore.objects.filter(user=request.user, project=project).delete()
     recalculate_project_community_score(project)
     return ok({"is_liked": False, "score": None})
@@ -1976,17 +2360,21 @@ def interest_project(request, project_id: int, payload: InterestRequest):
     form = ProjectInterestForm(payload.model_dump())
     if not form.is_valid():
         return fail("Interest submit failed.", status=422, code="validation_error", errors=form_errors(form))
-    interest, _ = ProjectInterest.objects.update_or_create(
-        user=request.user,
-        project=project,
-        role=form.cleaned_data["role"],
-        defaults={
-            "available_hours_per_week": form.cleaned_data["available_hours_per_week"],
-            "experience": form.cleaned_data.get("experience", ""),
-            "message": form.cleaned_data.get("message", ""),
-            "status": InteractionStatus.PENDING,
-        },
-    )
+    with transaction.atomic():
+        interest, _ = ProjectInterest.objects.update_or_create(
+            user=request.user,
+            project=project,
+            role=form.cleaned_data["role"],
+            defaults={
+                "available_hours_per_week": form.cleaned_data["available_hours_per_week"],
+                "experience": form.cleaned_data.get("experience", ""),
+                "message": form.cleaned_data.get("message", ""),
+                "status": InteractionStatus.APPROVED,
+            },
+        )
+        maybe_advance_project_stage_after_interaction(project, request.user)
+        interest.refresh_from_db()
+        audit(request.user, "interaction.auto_approve", "ProjectInterest", interest.pk, after=interest_payload(interest))
     return 201, ok(interest_payload(interest))
 
 
@@ -2001,12 +2389,16 @@ def claim_project(request, project_id: int, payload: ClaimRequest):
     form = ProjectClaimIntentForm(payload.model_dump())
     if not form.is_valid():
         return fail("Claim submit failed.", status=422, code="validation_error", errors=form_errors(form))
-    claim, _ = ProjectClaimIntent.objects.update_or_create(
-        user=request.user,
-        project=project,
-        claim_type=form.cleaned_data["claim_type"],
-        defaults={"message": form.cleaned_data.get("message", ""), "status": InteractionStatus.PENDING},
-    )
+    with transaction.atomic():
+        claim, _ = ProjectClaimIntent.objects.update_or_create(
+            user=request.user,
+            project=project,
+            claim_type=form.cleaned_data["claim_type"],
+            defaults={"message": form.cleaned_data.get("message", ""), "status": InteractionStatus.APPROVED},
+        )
+        maybe_advance_project_stage_after_interaction(project, request.user)
+        claim.refresh_from_db()
+        audit(request.user, "interaction.auto_approve", "ProjectClaimIntent", claim.pk, after=claim_payload(claim))
     return 201, ok(claim_payload(claim))
 
 
@@ -2027,6 +2419,7 @@ def sponsor_project(request, project_id: int, payload: SponsorRequest):
         sponsor_type=form.cleaned_data["sponsor_type"],
         defaults={"note": form.cleaned_data.get("note", ""), "status": InteractionStatus.PENDING},
     )
+    audit(request.user, "interaction.submit_sponsor", "SponsorIntent", sponsor.pk, after=sponsor_payload(sponsor))
     return 201, ok(sponsor_payload(sponsor))
 
 
@@ -2052,7 +2445,8 @@ def password_reset_form_errors(form):
 
 
 def error_payload(message, code="bad_request", errors=None):
-    payload = {"ok": False, "error": {"code": code, "message": message}}
+    request_id = current_request_id()
+    payload = {"ok": False, "request_id": request_id, "error": {"code": code, "message": message, "request_id": request_id}}
     if errors is not None:
         payload["error"]["details"] = errors
     return payload
@@ -2071,6 +2465,30 @@ def require_capability(request, capability):
     if not has_capability(request.user, capability):
         return fail("Permission denied.", status=403, code="permission_denied")
     return None
+
+
+def user_can_bypass_project_upload_quota(user):
+    return has_capability(user, "manage_projects")
+
+
+def user_project_uploads_today(user):
+    return Project.objects.filter(created_by=user, created_at__date=timezone.localdate()).count()
+
+
+def require_project_owner_or_admin(request, project, action):
+    if project.created_by_id == request.user.id or has_capability(request.user, "manage_projects"):
+        return None
+    audit(
+        request.user,
+        action,
+        "Project",
+        project.id,
+        before=project_detail_payload(project),
+        status="failed",
+        error_code="permission_denied",
+        error_message="Permission denied.",
+    )
+    return fail("Permission denied.", status=403, code="permission_denied")
 
 
 def choice_payload(choices):
@@ -2218,23 +2636,15 @@ def status_uid_groups_for_project(project, authenticated):
 
 
 def pending_interaction_count():
-    return (
-        ProjectInterest.objects.filter(status=InteractionStatus.PENDING).count()
-        + ProjectClaimIntent.objects.filter(status=InteractionStatus.PENDING).count()
-        + SponsorIntent.objects.filter(status=InteractionStatus.PENDING).count()
-    )
+    return SponsorIntent.objects.filter(status=InteractionStatus.PENDING).count()
 
 
 def maybe_advance_project_stage_after_interaction(project, actor):
     if project.stage not in {ProjectStage.OPEN_RECRUITING, ProjectStage.TEAM_BUILDING}:
         return
     before_project = project_detail_payload(project)
-    status = project.team_status
     next_stage = None
-    if status.get("basic_ready") and status.get("sponsor_count", 0) >= 1:
-        next_stage = ProjectStage.ACTIVE
-        action = "project.stage_auto_active"
-    elif project.stage == ProjectStage.OPEN_RECRUITING:
+    if project.stage == ProjectStage.OPEN_RECRUITING:
         next_stage = ProjectStage.TEAM_BUILDING
         action = "project.stage_auto_team_building"
     if not next_stage or next_stage == project.stage:
@@ -2257,12 +2667,11 @@ def user_has_approved_project_relation(user, project):
     return (
         ProjectInterest.objects.filter(**filters).exists()
         or ProjectClaimIntent.objects.filter(**filters).exists()
-        or SponsorIntent.objects.filter(**filters).exists()
     )
 
 
 def interaction_kinds(type_filter=""):
-    valid = ["interest", "claim", "sponsor"]
+    valid = ["sponsor"]
     if not type_filter:
         return valid
     return [type_filter] if type_filter in valid else []
@@ -2471,6 +2880,34 @@ def validate_admin_project_payload(data, creating, current_project=None, allow_c
     if stage and stage not in ProjectStage.values and stage not in stage_labels:
         return fail("stage is invalid.", status=422, code="validation_error")
     return None
+
+
+def validate_user_project_payload(data, creating, current_project=None, stage_change_requested=True):
+    if creating:
+        data.setdefault("stage", ProjectStage.DRAFT)
+    error = validate_admin_project_payload(data, creating=creating, current_project=current_project, allow_create_theme=False)
+    if error:
+        return error
+    requested_stage = normalize_project_stage_value(data.get("stage")) or ProjectStage.DRAFT
+    data["stage"] = requested_stage
+    if (creating or stage_change_requested) and requested_stage not in USER_PROJECT_ALLOWED_STAGES:
+        return fail("普通用户只能将课题保存为草稿或发布到开放招募。", status=422, code="user_project_stage_forbidden")
+    if requested_stage == ProjectStage.DRAFT:
+        data["is_public"] = False
+    elif requested_stage == ProjectStage.OPEN_RECRUITING:
+        data["is_public"] = True
+    return None
+
+
+def normalize_project_stage_value(stage):
+    if not stage:
+        return None
+    if stage in ProjectStage.values:
+        return stage
+    for value, label in ProjectStage.choices:
+        if stage == label:
+            return value
+    return stage
 
 
 def normalize_project_identity_alias(data):
@@ -2786,15 +3223,71 @@ def normalize_theme_file_type(file_type):
     return ThemeFile.FileType.OTHER
 
 
-def audit(actor, action, target_type, target_id, before=None, after=None):
+def audit(actor, action, target_type, target_id, before=None, after=None, source="api", status="success", error_code="", error_message=""):
     AuditLog.objects.create(
         actor=actor if actor and actor.is_authenticated else None,
-        action=action,
-        target_type=target_type,
-        target_id=str(target_id),
+        action=bounded_audit_text(action, AUDIT_ACTION_MAX_LENGTH),
+        target_type=bounded_audit_text(target_type, AUDIT_TARGET_TYPE_MAX_LENGTH),
+        target_id=bounded_audit_text(target_id, AUDIT_TARGET_ID_MAX_LENGTH),
+        request_id=current_request_id(),
+        source=bounded_audit_text(source, AUDIT_SOURCE_MAX_LENGTH),
+        status=bounded_audit_text(status, AUDIT_STATUS_MAX_LENGTH),
+        error_code=bounded_audit_text(error_code, AUDIT_ERROR_CODE_MAX_LENGTH),
+        error_message=error_message,
         before=json_safe(before or {}),
         after=json_safe(after or {}),
     )
+
+
+def bounded_audit_text(value, max_length):
+    text = str(value or "")
+    return text[:max_length]
+
+
+def audit_user_target_id(user):
+    profile = getattr(user, "profile", None)
+    return getattr(profile, "uid", "") or getattr(user, "username", "") or getattr(user, "pk", "unknown")
+
+
+def audit_user_snapshot(user):
+    if not user:
+        return {}
+    profile = getattr(user, "profile", None)
+    return {
+        "uid": getattr(profile, "uid", ""),
+        "username": getattr(user, "username", ""),
+        "role_type": getattr(profile, "role_type", ""),
+        "role_label": profile.get_role_type_display() if profile else "",
+        "organization": getattr(profile, "organization", ""),
+        "must_change_password": getattr(profile, "must_change_password", False),
+    }
+
+
+def audit_submitted_user_payload(data):
+    return {
+        "username": data.get("username", ""),
+        "role_type": data.get("role_type", ""),
+    }
+
+
+def safe_profile_update_payload(data):
+    return {
+        key: value
+        for key, value in data.items()
+        if key
+        in {
+            "display_name",
+            "real_name",
+            "role_type",
+            "organization",
+            "title",
+            "research_interests",
+            "skills",
+            "available_hours_per_week",
+            "contact_wechat",
+            "bio",
+        }
+    }
 
 
 def json_safe(value):

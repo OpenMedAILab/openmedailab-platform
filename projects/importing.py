@@ -1,6 +1,6 @@
 import re
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Max, Q
 from django.utils import timezone
 from django.utils.text import slugify
@@ -81,31 +81,42 @@ def sync_themes(themes):
         theme.save(update_fields=["slug", "description", "cover_image", "file_space", "sort_order", "is_active", "updated_at"])
 
 
-def upsert_project(item, source_label="api-json", allow_create_theme=True):
+def upsert_project(item, source_label="api-json", allow_create_theme=True, created_by=None):
     normalized = normalize_project_item(item, source_label, allow_create_theme=allow_create_theme)
     if normalized["topic_id"]:
         project, created = Project.objects.update_or_create(topic_id=normalized["topic_id"], defaults=normalized["defaults"])
     else:
-        project = Project.objects.create(topic_id=next_topic_id(), **normalized["defaults"])
+        project = create_project_with_auto_topic_id(normalized["defaults"])
         created = True
+    if created_by and (created or project.created_by_id is None):
+        project.created_by = created_by
+        project.save(update_fields=["created_by", "updated_at"])
     sync_project_tags(project, normalized["tags"])
     return created
 
 
-def upsert_project_with_instance(item, source_label="api-json", allow_create_theme=True):
+def upsert_project_with_instance(item, source_label="api-json", allow_create_theme=True, created_by=None):
     normalized = normalize_project_item(item, source_label, allow_create_theme=allow_create_theme)
     if normalized["topic_id"]:
         project, created = Project.objects.update_or_create(topic_id=normalized["topic_id"], defaults=normalized["defaults"])
     else:
-        project = Project.objects.create(topic_id=next_topic_id(), **normalized["defaults"])
+        project = create_project_with_auto_topic_id(normalized["defaults"])
         created = True
+    if created_by and (created or project.created_by_id is None):
+        project.created_by = created_by
+        project.save(update_fields=["created_by", "updated_at"])
     sync_project_tags(project, normalized["tags"])
     return project, created
 
 
-def create_project(item, source_label="api-admin", allow_create_theme=False):
+def create_project(item, source_label="api-admin", allow_create_theme=False, created_by=None):
     normalized = normalize_project_item(item, source_label, allow_create_theme=allow_create_theme)
-    project = Project.objects.create(topic_id=normalized["topic_id"] or next_topic_id(), **normalized["defaults"])
+    if created_by:
+        normalized["defaults"]["created_by"] = created_by
+    if normalized["topic_id"]:
+        project = Project.objects.create(topic_id=normalized["topic_id"], **normalized["defaults"])
+    else:
+        project = create_project_with_auto_topic_id(normalized["defaults"])
     sync_project_tags(project, normalized["tags"])
     return project
 
@@ -232,6 +243,21 @@ def next_topic_id():
     if number > 9999:
         raise ValueError("topic_id exceeds T9999")
     return number
+
+
+def create_project_with_auto_topic_id(defaults, max_attempts=5):
+    for attempt in range(max_attempts):
+        topic_id = next_topic_id()
+        try:
+            with transaction.atomic():
+                return Project.objects.create(topic_id=topic_id, **defaults)
+        except IntegrityError as exc:
+            message = str(exc).lower()
+            if "topic_id" not in message and "unique" not in message:
+                raise
+            if attempt == max_attempts - 1:
+                raise ValueError("topic_id auto-number collision, please retry.") from exc
+    raise ValueError("topic_id auto-number collision, please retry.")
 
 
 def unique_slug(model, text):
