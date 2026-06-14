@@ -1,12 +1,14 @@
-# OpenMedAI Lab Agent 开工导航与系统基准文档
+# AGENTS.md - OpenMedAI Lab Agent 开工导航与系统基准文档
 
 更新时间：2026-06-13
 
-代码基准：`codex/system-lifecycle-remediation` 分支
+文件位置：项目根目录 `AGENTS.md`
+
+代码基准：以当前仓库代码为准；若本文档与当前代码冲突，必须先核对代码，再同步修正文档。
 
 当前产品版本文件：`VERSION = 0.7.1`
 
-本文档用途：后续 agent 在执行任何任务前，先读本文档，再按“任务定位索引”打开必要代码文件。目标是避免每次从零通读完整仓库，同时保证生命周期、API、数据库、权限和前端入口不被改乱。
+本文档用途：后续任何 agent 在执行任何任务前，必须先读本文档，再按“任务定位索引”打开必要代码文件。目标是避免每次从零通读完整仓库，同时保证生命周期、API、数据库、权限和前端入口不被改乱。
 
 本文档不是一次性 PR 说明，也不是替代代码的绝对真相。若本文档与当前代码冲突，必须先核对代码，再同步修正文档。
 
@@ -712,7 +714,7 @@ git diff --check
 
 ```bash
 git diff --check
-rg -n 'TO[D]O|TB[D]|FIX[M]E|待[定]|不确[定]' docs/system-state-lifecycle-api-reference.md
+rg -n 'TO[D]O|TB[D]|FIX[M]E|待[定]|不确[定]' AGENTS.md
 ```
 
 如果本机没有 `npm`，不要声称 `npm run build` 已通过；明确说明环境缺少 npm。

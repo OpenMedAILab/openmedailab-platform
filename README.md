@@ -1,5 +1,7 @@
 # OpenMedAILab Backend MVP
 
+Agent work starts from `AGENTS.md` in the project root. Read it before changing lifecycle, API, database, permissions, frontend entry points, versioning, or acceptance behavior.
+
 This repository is the Django backend MVP for OpenMedAILab. It implements the part owned by 钱护磊: database models, topic import, authentication, user interactions, admin management, basic statistics, and deployment-ready settings.
 
 ## Scope
