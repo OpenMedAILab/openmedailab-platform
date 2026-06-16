@@ -31,7 +31,6 @@ class ThemeAdmin(admin.ModelAdmin):
     inlines = (ThemeFileInline,)
     fieldsets = (
         ("基础信息", {"fields": ("name", "slug", "description", "cover_image", "sort_order", "is_active")}),
-        ("文件空间", {"fields": ("file_space",)}),
         ("时间", {"fields": ("created_at", "updated_at")}),
     )
 

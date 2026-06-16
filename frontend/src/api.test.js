@@ -113,6 +113,8 @@ test("workspace lifecycle api wrappers are exposed", async () => {
     "createProject",
     "updateProject",
     "deleteProject",
+    "uploadProjectDocuments",
+    "deleteProjectDocument",
     "unscore",
     "updateMeTaskStatus",
     "createMeContribution",
@@ -127,7 +129,10 @@ test("workspace lifecycle api wrappers are exposed", async () => {
     "adminContributions",
     "reviewAdminContribution",
     "adminCredits",
-    "adminAuditLogs"
+    "adminAuditLogs",
+    "adminUploadThemeFileDetailPdf",
+    "adminExportContentBackup",
+    "adminRestoreContentBackup"
   ].forEach((method) => assert.equal(typeof api[method], "function", `${method} should be exposed`));
 });
 

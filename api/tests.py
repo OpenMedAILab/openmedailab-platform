@@ -1,6 +1,8 @@
 import json
 import importlib.util
+import io
 import tempfile
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -56,11 +58,21 @@ class ApiTests(TestCase):
     def test_project_list_and_detail_api(self):
         ProjectDocument.objects.create(
             project=self.project,
-            doc_type=ProjectDocument.DocumentType.MARKDOWN,
-            title="课题介绍",
-            description="课题介绍",
-            path="media/project-documents/T0001/intro.md",
+            doc_type=ProjectDocument.DocumentType.PDF,
+            document_kind=ProjectDocument.DocumentKind.DETAIL,
+            title="课题完整方案",
+            description="课题 PDF 详情",
+            path="media/project-documents/T0001/detail.pdf",
             content_hash="document-public-hash",
+        )
+        ProjectDocument.objects.create(
+            project=self.project,
+            doc_type=ProjectDocument.DocumentType.MARKDOWN,
+            document_kind=ProjectDocument.DocumentKind.SUPPLEMENT,
+            title="补充说明",
+            description="补充说明",
+            path="media/project-documents/T0001/intro.md",
+            content_hash="supplement-public-hash",
         )
 
         list_response = self.client.get("/api/projects/?q=RAG&page_size=10")
@@ -69,14 +81,16 @@ class ApiTests(TestCase):
         self.assertTrue(list_payload["ok"])
         self.assertEqual(list_payload["data"]["pagination"]["total_count"], 1)
         self.assertEqual(list_payload["data"]["results"][0]["topic_id"], 1)
+        self.assertEqual(list_payload["data"]["results"][0]["detail_document"]["title"], "课题完整方案")
 
         detail_response = self.client.get(f"/api/projects/{self.project.pk}/")
         self.assertEqual(detail_response.status_code, 200)
         detail_payload = detail_response.json()
         self.assertEqual(detail_payload["data"]["team_status"]["basic_ready"], False)
-        self.assertEqual(detail_payload["data"]["documents"][0]["title"], "课题介绍")
-        self.assertEqual(detail_payload["data"]["documents"][0]["description"], "课题介绍")
-        self.assertEqual(detail_payload["data"]["documents"][0]["path"], "media/project-documents/T0001/intro.md")
+        self.assertEqual(detail_payload["data"]["detail_document"]["document_kind"], "detail")
+        self.assertEqual(detail_payload["data"]["detail_document"]["path"], "media/project-documents/T0001/detail.pdf")
+        self.assertEqual(detail_payload["data"]["documents"][0]["title"], "课题完整方案")
+        self.assertEqual(len(detail_payload["data"]["documents"]), 1)
         self.assertNotIn("document-public-hash", json.dumps(detail_payload["data"], ensure_ascii=False))
         self.assertEqual(detail_payload["data"]["problem_statement"], "随访证据分散，难以复核。")
         self.assertEqual(detail_payload["data"]["clinical_endpoint"], "复核一致性")
@@ -118,12 +132,84 @@ class ApiTests(TestCase):
         self.assertEqual(self.client.get(f"/api/projects/{draft.pk}/").status_code, 404)
         self.assertEqual(self.client.get(f"/api/projects/{archived.pk}/").status_code, 404)
 
-        theme_space_response = self.client.get(f"/api/themes/{self.theme.slug}/space/")
-        self.assertEqual(theme_space_response.status_code, 200)
-        theme_space_ids = {item["topic_id"] for item in theme_space_response.json()["data"]["projects"]}
-        self.assertIn(self.project.topic_id, theme_space_ids)
-        self.assertNotIn(draft.topic_id, theme_space_ids)
-        self.assertNotIn(archived.topic_id, theme_space_ids)
+        theme_dataset_response = self.client.get(f"/api/themes/{self.theme.slug}/datasets/")
+        self.assertEqual(theme_dataset_response.status_code, 200)
+        theme_dataset_ids = {item["topic_id"] for item in theme_dataset_response.json()["data"]["projects"]}
+        self.assertIn(self.project.topic_id, theme_dataset_ids)
+        self.assertNotIn(draft.topic_id, theme_dataset_ids)
+        self.assertNotIn(archived.topic_id, theme_dataset_ids)
+
+    def test_project_list_includes_persisted_viewer_state_for_authenticated_user(self):
+        user = User.objects.create_user(username="viewerstate", email="viewerstate@example.com", password="StrongPass12345")
+        ProjectFollow.objects.create(user=user, project=self.project)
+        ProjectScore.objects.create(user=user, project=self.project, score=10, comment="点赞")
+        ProjectInterest.objects.create(
+            user=user,
+            project=self.project,
+            role="学生",
+            available_hours_per_week=4,
+            status=InteractionStatus.APPROVED,
+        )
+        claim = ProjectClaimIntent.objects.create(
+            user=user,
+            project=self.project,
+            claim_type="leader",
+            status=InteractionStatus.APPROVED,
+        )
+        SponsorIntent.objects.create(user=user, project=self.project, sponsor_type="compute", status=InteractionStatus.PENDING)
+
+        self.client.force_login(user)
+        response = self.client.get("/api/projects/?page_size=10")
+
+        self.assertEqual(response.status_code, 200)
+        project = response.json()["data"]["results"][0]
+        viewer = project["viewer_state"]
+        self.assertTrue(viewer["is_following"])
+        self.assertEqual(viewer["score"]["score"], 10)
+        self.assertIn("学生", viewer["interest_roles"])
+        self.assertIn("leader", viewer["claim_types"])
+        self.assertIn("compute", viewer["sponsor_types"])
+
+        claim.status = InteractionStatus.WITHDRAWN
+        claim.save(update_fields=["status", "updated_at"])
+        withdrawn_response = self.client.get("/api/projects/?page_size=10")
+
+        self.assertEqual(withdrawn_response.status_code, 200)
+        withdrawn_viewer = withdrawn_response.json()["data"]["results"][0]["viewer_state"]
+        self.assertNotIn("leader", withdrawn_viewer["claim_types"])
+
+    def test_project_list_sorts_by_topic_id_by_default_and_newest_number(self):
+        popular_user = User.objects.create_user(username="popularsort", email="popularsort@example.com", password="StrongPass12345")
+        Project.objects.create(
+            topic_id=3,
+            title="第三个公开课题",
+            summary="默认排序不应被热度影响。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        Project.objects.create(
+            topic_id=2,
+            title="第二个公开课题",
+            summary="默认排序按编号。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        ProjectFollow.objects.create(user=popular_user, project=Project.objects.get(topic_id=3))
+        self.project.title = "最近更新但编号最小"
+        self.project.save(update_fields=["title", "updated_at"])
+
+        default_response = self.client.get("/api/projects/?page_size=10")
+        newest_response = self.client.get("/api/projects/?sort=newest&page_size=10")
+        updated_response = self.client.get("/api/projects/?sort=updated&page_size=10")
+
+        self.assertEqual(default_response.status_code, 200)
+        self.assertEqual(newest_response.status_code, 200)
+        self.assertEqual(updated_response.status_code, 200)
+        self.assertEqual([row["topic_id"] for row in default_response.json()["data"]["results"][:3]], [1, 2, 3])
+        self.assertEqual([row["topic_id"] for row in newest_response.json()["data"]["results"][:3]], [3, 2, 1])
+        self.assertEqual(updated_response.json()["data"]["results"][0]["topic_id"], 1)
 
     def test_recruiting_and_follow_stage_rules(self):
         user = User.objects.create_user(username="stageuser", email="stageuser@example.com", password="StrongPass12345")
@@ -207,10 +293,14 @@ class ApiTests(TestCase):
         self.assertIn("/api/admin/users/{uid}/reset-password/", schema["paths"])
         self.assertIn("/api/admin/projects/import-json/", schema["paths"])
         self.assertIn("/api/admin/theme-files/", schema["paths"])
-        self.assertIn("/api/admin/file-space/", schema["paths"])
-        self.assertIn("/api/admin/file-space/file/", schema["paths"])
-        self.assertIn("/api/admin/file-space/upload/", schema["paths"])
-        self.assertIn("/api/admin/themes/{theme_id}/file-space-root/", schema["paths"])
+        self.assertIn("/api/admin/theme-files/{file_id}/detail-pdf/", schema["paths"])
+        self.assertIn("/api/themes/{slug}/datasets/", schema["paths"])
+        self.assertNotIn("/api/themes/{slug}/space/", schema["paths"])
+        self.assertNotIn("/api/admin/file-space/", schema["paths"])
+        self.assertNotIn("/api/admin/file-space/root/", schema["paths"])
+        self.assertNotIn("/api/admin/file-space/file/", schema["paths"])
+        self.assertNotIn("/api/admin/file-space/upload/", schema["paths"])
+        self.assertNotIn("/api/admin/themes/{theme_id}/file-space-root/", schema["paths"])
         self.assertIn("/api/admin/projects/{project_id}/", schema["paths"])
         self.assertIn("/api/projects/{project_id}/status-card/", schema["paths"])
         self.assertIn("/api/admin/overview/", schema["paths"])
@@ -240,14 +330,18 @@ class ApiTests(TestCase):
         self.assertNotIn("source_md_path", contract_fields)
         self.assertNotIn("source_pdf_path", contract_fields)
         self.assertIn("json_template", contract_data)
+        self.assertIn("document_kinds", contract_data)
+        self.assertEqual([item["value"] for item in contract_data["document_types"]], ["pdf"])
+        self.assertEqual([item["value"] for item in contract_data["document_kinds"]], ["detail"])
         self.assertNotIn("jsonl_template", contract_data)
         self.assertNotIn('"id":1', contract_data["json_template"])
         self.assertIn("250字以内", contract_data["json_template"])
         self.assertNotIn("markdown_template", contract_data)
         self.assertNotIn("example", contract_data)
         theme_file_types = [item["value"] for item in contract_data["theme_file_types"]]
-        self.assertIn("dataset", theme_file_types)
-        self.assertIn("data_dictionary", theme_file_types)
+        self.assertEqual(theme_file_types, ["dataset_meta"])
+        self.assertNotIn("dataset", theme_file_types)
+        self.assertNotIn("data_dictionary", theme_file_types)
         self.assertNotIn("markdown", theme_file_types)
         self.assertNotIn("pdf", theme_file_types)
 
@@ -281,82 +375,76 @@ class ApiTests(TestCase):
         self.assertEqual(payload["version"], version)
         self.assertEqual(payload["latest"]["version"], version)
 
-    def test_theme_file_space_api(self):
-        self.theme.file_space = {"sections": ["数据集文件", "数据字典"]}
-        self.theme.save(update_fields=["file_space", "updated_at"])
+    def test_theme_dataset_pdf_api(self):
         ThemeFile.objects.create(
             theme=self.theme,
-            section="数据集文件",
-            file_type=ThemeFile.FileType.DATASET,
-            title="抗 VEGF 脱敏随访样例索引",
-            path="datasets/antivegf/followup-index.csv",
+            section="数据集说明文件",
+            file_type=ThemeFile.FileType.DATASET_META,
+            title="抗 VEGF 脱敏随访数据说明",
+            path="dataset-descriptions/antivegf-followup",
+            detail_pdf_title="数据集特点说明",
+            detail_pdf_path="media/theme-file-detail-pdfs/antivegf/1/detail.pdf",
         )
 
-        response = self.client.get(f"/api/themes/{self.theme.slug}/space/")
+        response = self.client.get(f"/api/themes/{self.theme.slug}/datasets/")
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()["data"]
-        self.assertEqual(payload["theme"]["file_space"]["sections"], ["数据集文件", "数据字典"])
+        self.assertEqual(payload["theme"]["slug"], "antivegf")
+        self.assertNotIn("file_space", payload["theme"])
         self.assertEqual(payload["project_count"], 1)
         self.assertEqual(payload["file_count"], 1)
-        self.assertEqual(payload["sections"][0]["name"], "数据集文件")
-        self.assertEqual(payload["sections"][0]["files"][0]["title"], "抗 VEGF 脱敏随访样例索引")
+        self.assertEqual(payload["sections"][0]["name"], "数据集说明文件")
+        self.assertEqual(payload["sections"][0]["files"][0]["title"], "抗 VEGF 脱敏随访数据说明")
+        self.assertEqual(payload["sections"][0]["files"][0]["detail_pdf_title"], "数据集特点说明")
+        self.assertEqual(payload["sections"][0]["files"][0]["detail_pdf_path"], "media/theme-file-detail-pdfs/antivegf/1/detail.pdf")
         self.assertNotIn("documents_by_type", payload)
 
-    def test_admin_file_space_manager_is_limited_to_configured_root(self):
+    def test_admin_can_upload_dataset_detail_pdf(self):
         self.login_platform_admin()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            media_root = Path(tmpdir) / "media"
-            file_space_root = media_root / "theme-file-space"
-            with override_settings(MEDIA_ROOT=media_root, MEDIA_URL="/media/", OPENMEDAILAB_FILE_SPACE_ROOT=file_space_root):
-                outside_response = self.patch_json(
-                    f"/api/admin/themes/{self.theme.pk}/file-space-root/",
-                    {"server_directory": str(Path(tmpdir).parent)},
-                )
-                self.assertEqual(outside_response.status_code, 422)
+        dataset = ThemeFile.objects.create(
+            theme=self.theme,
+            section="数据集说明文件",
+            file_type=ThemeFile.FileType.DATASET_META,
+            title="抗 VEGF 脱敏随访数据说明",
+            path="dataset-descriptions/antivegf-followup",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir), MEDIA_URL="/media/"):
+            response = self.client.post(
+                f"/api/admin/theme-files/{dataset.pk}/detail-pdf/",
+                {
+                    "title": "数据集特点说明",
+                    "file": SimpleUploadedFile("dataset-detail.pdf", b"%PDF-1.4\n% Dataset\n%%EOF\n", content_type="application/pdf"),
+                },
+            )
 
-                root_response = self.patch_json(
-                    f"/api/admin/themes/{self.theme.pk}/file-space-root/",
-                    {"server_directory": "antivegf-data"},
-                )
-                self.assertEqual(root_response.status_code, 200)
-                self.assertTrue((file_space_root / "antivegf-data").exists())
+            self.assertEqual(response.status_code, 201)
+            payload = response.json()["data"]
+            self.assertEqual(payload["detail_pdf_title"], "数据集特点说明")
+            self.assertTrue(payload["detail_pdf_path"].endswith(f"/media/theme-file-detail-pdfs/antivegf/{dataset.pk}/dataset-detail.pdf"))
+            self.assertTrue((Path(tmpdir) / "theme-file-detail-pdfs" / "antivegf" / str(dataset.pk) / "dataset-detail.pdf").exists())
 
-                directory_response = self.post_json(
-                    "/api/admin/file-space/directories/",
-                    {"theme_id": self.theme.pk, "path": "", "name": "datasets"},
-                )
-                self.assertEqual(directory_response.status_code, 201)
+            public_response = self.client.get(f"/api/themes/{self.theme.slug}/datasets/")
+            self.assertEqual(public_response.status_code, 200)
+            public_file = public_response.json()["data"]["sections"][0]["files"][0]
+            self.assertEqual(public_file["detail_pdf_title"], "数据集特点说明")
+            self.assertEqual(public_file["detail_pdf_path"], payload["detail_pdf_path"])
 
-                file_response = self.post_json(
-                    "/api/admin/file-space/files/",
-                    {"theme_id": self.theme.pk, "path": "datasets", "name": "README.md", "content": "脱敏数据说明"},
-                )
-                self.assertEqual(file_response.status_code, 201)
-                self.assertTrue((file_space_root / "antivegf-data" / "datasets" / "README.md").exists())
-                self.assertTrue(ThemeFile.objects.filter(theme=self.theme, path="/media/theme-file-space/antivegf-data/datasets/README.md").exists())
-
-                read_response = self.client.get(f"/api/admin/file-space/file/?theme_id={self.theme.pk}&path=datasets/README.md")
-                self.assertEqual(read_response.status_code, 200)
-                self.assertEqual(read_response.json()["data"]["content"], "脱敏数据说明")
-
-                upload_response = self.client.post(
-                    "/api/admin/file-space/upload/",
-                    data={
-                        "theme_id": str(self.theme.pk),
-                        "path": "datasets",
-                        "relative_paths": ["batch/sample.csv"],
-                        "files": [SimpleUploadedFile("sample.csv", b"id,value\n1,ok\n", content_type="text/csv")],
-                    },
-                )
-                self.assertEqual(upload_response.status_code, 201)
-                self.assertTrue((file_space_root / "antivegf-data" / "datasets" / "batch" / "sample.csv").exists())
-
-                list_response = self.client.get(f"/api/admin/file-space/?theme_id={self.theme.pk}&path=datasets")
-                self.assertEqual(list_response.status_code, 200)
-                names = {entry["name"] for entry in list_response.json()["data"]["entries"]}
-                self.assertIn("README.md", names)
-                self.assertIn("batch", names)
+    def test_admin_theme_dataset_description_uses_generated_path(self):
+        self.login_platform_admin()
+        response = self.post_json(
+            "/api/admin/theme-files/",
+            {
+                "theme_id": self.theme.pk,
+                "title": "抗 VEGF 数据集说明",
+                "description": "只保存说明 PDF，不保存原始数据集。",
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        payload = response.json()["data"]
+        self.assertEqual(payload["section"], "数据集说明文件")
+        self.assertEqual(payload["file_type"], ThemeFile.FileType.DATASET_META)
+        self.assertTrue(payload["path"].startswith("dataset-descriptions/"))
 
     def test_protected_post_uses_csrf_envelope_when_enforced(self):
         user = User.objects.create_user(username="csrfuser", password="StrongPass12345")
@@ -388,11 +476,11 @@ class ApiTests(TestCase):
                 "name": "视网膜影像",
                 "slug": "retina-imaging",
                 "description": "眼科影像相关课题",
-                "file_space": {"sections": ["数据集文件", "标注规范"]},
             },
         )
         self.assertEqual(theme_response.status_code, 201)
-        self.assertEqual(theme_response.json()["data"]["file_space"]["sections"], ["数据集文件", "标注规范"])
+        self.assertEqual(theme_response.json()["data"]["slug"], "retina-imaging")
+        self.assertNotIn("file_space", theme_response.json()["data"])
 
         create_response = self.post_json(
             "/api/admin/projects/",
@@ -422,8 +510,7 @@ class ApiTests(TestCase):
                 "section": "数据说明",
                 "file_type": "dataset_meta",
                 "title": "脱敏数据说明",
-                "path": "spaces/retina-imaging/data.json",
-                "description": "主题级文件空间记录",
+                "description": "主题级数据集说明记录",
             },
         )
         self.assertEqual(file_response.status_code, 201)
@@ -644,6 +731,11 @@ class ApiTests(TestCase):
         created.refresh_from_db()
         self.assertEqual(created.stage, ProjectStage.ACTIVE)
         self.assertNotEqual(created.title, "不允许回退")
+        content_update_response = self.patch_json(f"/api/projects/{created.pk}/", {"title": "允许维护内容", "summary": "后续阶段仍允许维护自己上传的课题内容。"})
+        self.assertEqual(content_update_response.status_code, 200)
+        created.refresh_from_db()
+        self.assertEqual(created.stage, ProjectStage.ACTIVE)
+        self.assertEqual(created.title, "允许维护内容")
         self.assertTrue(
             AuditLog.objects.filter(
                 actor=owner,
@@ -694,6 +786,76 @@ class ApiTests(TestCase):
         )
         self.assertEqual(admin_response.status_code, 201)
         self.assertEqual(Project.objects.get(title="管理员不受配额限制").created_by, admin)
+
+    def test_regular_user_can_upload_replace_and_delete_owned_project_pdf(self):
+        owner = User.objects.create_user(username="pdf_owner", email="pdf-owner@example.com", password="StrongPass12345")
+        other = User.objects.create_user(username="pdf_other", email="pdf-other@example.com", password="StrongPass12345")
+        project = Project.objects.create(
+            topic_id=8,
+            title="用户 PDF 课题",
+            summary="普通用户需要上传课题说明 PDF。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+            created_by=owner,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir), MEDIA_URL="media/"):
+            self.client.force_login(owner)
+            upload_response = self.client.post(
+                "/api/project-documents/upload/",
+                {
+                    "project_id": project.pk,
+                    "document_kind": "detail",
+                    "doc_type": "pdf",
+                    "title": "用户课题 PDF",
+                    "files": SimpleUploadedFile("detail.pdf", b"%PDF-1.4\n% User detail\n%%EOF\n", content_type="application/pdf"),
+                },
+            )
+            self.assertEqual(upload_response.status_code, 201)
+            self.assertEqual(ProjectDocument.objects.filter(project=project, document_kind=ProjectDocument.DocumentKind.DETAIL).count(), 1)
+            public_payload = self.client.get(f"/api/projects/{project.pk}/").json()["data"]
+            self.assertEqual(public_payload["created_by"]["uid"], owner.profile.uid)
+            self.assertEqual(public_payload["detail_document"]["title"], "用户课题 PDF")
+
+            self.client.force_login(other)
+            forbidden_response = self.client.post(
+                "/api/project-documents/upload/",
+                {
+                    "project_id": project.pk,
+                    "files": SimpleUploadedFile("other.pdf", b"%PDF-1.4\n% Other\n%%EOF\n", content_type="application/pdf"),
+                },
+            )
+            self.assertEqual(forbidden_response.status_code, 403)
+
+            self.client.force_login(owner)
+            replacement_response = self.client.post(
+                "/api/project-documents/upload/",
+                {
+                    "project_id": project.pk,
+                    "title": "替换后的用户课题 PDF",
+                    "files": SimpleUploadedFile("detail-v2.pdf", b"%PDF-1.4\n% User detail v2\n%%EOF\n", content_type="application/pdf"),
+                },
+            )
+            self.assertEqual(replacement_response.status_code, 201)
+            self.assertEqual(ProjectDocument.objects.filter(project=project, document_kind=ProjectDocument.DocumentKind.DETAIL).count(), 1)
+            document = ProjectDocument.objects.get(project=project)
+            self.assertEqual(document.title, "替换后的用户课题 PDF")
+
+            delete_response = self.client.delete(f"/api/project-documents/{document.pk}/")
+            self.assertEqual(delete_response.status_code, 200)
+            self.assertFalse(ProjectDocument.objects.filter(project=project).exists())
+
+            project.stage = ProjectStage.ARCHIVED
+            project.save(update_fields=["stage", "updated_at"])
+            locked_response = self.client.post(
+                "/api/project-documents/upload/",
+                {
+                    "project_id": project.pk,
+                    "files": SimpleUploadedFile("locked.pdf", b"%PDF-1.4\n% Locked\n%%EOF\n", content_type="application/pdf"),
+                },
+            )
+            self.assertEqual(locked_response.status_code, 422)
+            self.assertEqual(locked_response.json()["error"]["code"], "user_project_stage_locked")
 
     def test_request_id_is_bounded_in_errors_and_audit_logs(self):
         owner = User.objects.create_user(username="request_owner", email="request-owner@example.com", password="StrongPass12345")
@@ -950,21 +1112,10 @@ class ApiTests(TestCase):
         self.assertNotIn("document-internal-hash", json.dumps(payload, ensure_ascii=False))
         self.assertNotIn("document-traversal-hash", json.dumps(payload, ensure_ascii=False))
 
-    def test_admin_project_document_upload_requires_description_and_serves_public_detail(self):
+    def test_admin_project_document_upload_accepts_only_one_public_detail_pdf(self):
         self.login_platform_admin()
         with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir), MEDIA_URL="media/"):
-            missing_description = self.client.post(
-                "/api/admin/project-documents/upload/",
-                {
-                    "project_id": self.project.pk,
-                    "doc_type": "markdown",
-                    "title": "课题介绍",
-                    "files": SimpleUploadedFile("intro.md", b"# Intro", content_type="text/markdown"),
-                },
-            )
-            self.assertEqual(missing_description.status_code, 422)
-
-            response = self.client.post(
+            unsupported_markdown = self.client.post(
                 "/api/admin/project-documents/upload/",
                 {
                     "project_id": self.project.pk,
@@ -974,25 +1125,43 @@ class ApiTests(TestCase):
                     "files": SimpleUploadedFile("intro.md", b"# Intro", content_type="text/markdown"),
                 },
             )
+            self.assertEqual(unsupported_markdown.status_code, 422)
 
-            self.assertEqual(response.status_code, 201)
-            payload = response.json()["data"]
-            self.assertEqual(payload["saved"][0]["description"], "课题介绍")
-            self.assertTrue(payload["saved"][0]["path"].endswith("media/project-documents/T0001/intro.md"))
-            saved_path = Path(tmpdir) / "project-documents" / "T0001" / "intro.md"
-            self.assertTrue(saved_path.exists())
+            detail_response = self.client.post(
+                "/api/admin/project-documents/upload/",
+                {
+                    "project_id": self.project.pk,
+                    "document_kind": "detail",
+                    "doc_type": "pdf",
+                    "title": "课题主文档",
+                    "files": SimpleUploadedFile("detail.pdf", b"%PDF-1.4\n% Detail\n%%EOF\n", content_type="application/pdf"),
+                },
+            )
+            self.assertEqual(detail_response.status_code, 201)
+            detail_payload = detail_response.json()["data"]
+            self.assertEqual(detail_payload["saved"][0]["document_kind"], "detail")
+            self.assertEqual(detail_payload["saved"][0]["doc_type"], "pdf")
+            self.assertEqual(detail_payload["saved"][0]["description"], "课题 PDF 详情")
+            public_detail = self.client.get(f"/api/projects/{self.project.pk}/").json()["data"]
+            self.assertEqual(public_detail["detail_document"]["title"], "课题主文档")
+            self.assertEqual(public_detail["documents"][0]["title"], "课题主文档")
 
-            public_response = self.client.get(f"/api/projects/{self.project.pk}/")
-            self.assertEqual(public_response.status_code, 200)
-            public_document = public_response.json()["data"]["documents"][0]
-            self.assertEqual(public_document["title"], "课题介绍")
-            self.assertEqual(public_document["description"], "课题介绍")
-            self.assertEqual(public_document["path"], payload["saved"][0]["path"])
-
-            delete_response = self.client.delete(f"/api/admin/project-documents/{payload['saved'][0]['id']}/")
-            self.assertEqual(delete_response.status_code, 200)
-            self.assertFalse(ProjectDocument.objects.filter(pk=payload["saved"][0]["id"]).exists())
-            self.assertFalse(saved_path.exists())
+            replacement_response = self.client.post(
+                "/api/admin/project-documents/upload/",
+                {
+                    "project_id": self.project.pk,
+                    "document_kind": "detail",
+                    "doc_type": "pdf",
+                    "title": "替换后的主文档",
+                    "files": SimpleUploadedFile("detail-v2.pdf", b"%PDF-1.4\n% Detail v2\n%%EOF\n", content_type="application/pdf"),
+                },
+            )
+            self.assertEqual(replacement_response.status_code, 201)
+            self.assertEqual(ProjectDocument.objects.filter(project=self.project, document_kind=ProjectDocument.DocumentKind.DETAIL).count(), 1)
+            self.assertEqual(
+                self.client.get(f"/api/projects/{self.project.pk}/").json()["data"]["detail_document"]["title"],
+                "替换后的主文档",
+            )
 
     def test_import_project_bundle_binds_pdf_documents(self):
         with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir) / "media", MEDIA_URL="media/"):
@@ -1112,6 +1281,83 @@ class ApiTests(TestCase):
             self.assertTrue(Project.objects.filter(topic_id=4).exists())
             self.assertFalse(Project.objects.get(topic_id=4).documents.exists())
             self.assertFalse(ProjectDocument.objects.filter(path__contains="orphan.pdf").exists())
+
+    def test_admin_content_backup_exports_and_restores_projects_themes_and_pdfs(self):
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir) / "media", MEDIA_URL="media/"):
+            media_root = Path(settings.MEDIA_ROOT)
+            project_pdf = media_root / "project-documents" / "T0001" / "detail.pdf"
+            dataset_pdf = media_root / "theme-datasets" / "antivegf" / "dataset.pdf"
+            project_pdf.parent.mkdir(parents=True, exist_ok=True)
+            dataset_pdf.parent.mkdir(parents=True, exist_ok=True)
+            project_pdf.write_bytes(b"%PDF-1.4\n% Project detail\n%%EOF\n")
+            dataset_pdf.write_bytes(b"%PDF-1.4\n% Dataset description\n%%EOF\n")
+            ProjectDocument.objects.create(
+                project=self.project,
+                doc_type=ProjectDocument.DocumentType.PDF,
+                document_kind=ProjectDocument.DocumentKind.DETAIL,
+                title="课题完整方案",
+                description="课题 PDF 详情",
+                path="media/project-documents/T0001/detail.pdf",
+                content_hash="old-project-hash",
+            )
+            ThemeFile.objects.create(
+                theme=self.theme,
+                section="数据集说明文件",
+                file_type=ThemeFile.FileType.DATASET_META,
+                title="AntiVEGF 数据集说明",
+                description="数据集 PDF 详情",
+                path="media/theme-datasets/antivegf/dataset.pdf",
+                detail_pdf_title="数据集说明 PDF",
+                detail_pdf_path="media/theme-datasets/antivegf/dataset.pdf",
+                detail_pdf_hash="old-dataset-hash",
+                is_active=True,
+            )
+            self.login_platform_admin()
+
+            export_response = self.client.get("/api/admin/content-backup/export/")
+
+            self.assertEqual(export_response.status_code, 200)
+            self.assertEqual(export_response.headers["Content-Type"], "application/zip")
+            self.assertIn("openmedailab-content-backup", export_response.headers["Content-Disposition"])
+            backup_bytes = export_response.content
+            with zipfile.ZipFile(io.BytesIO(backup_bytes)) as archive:
+                manifest = json.loads(archive.read("openmedailab-backup.json").decode("utf-8"))
+                self.assertEqual(manifest["counts"]["themes"], 1)
+                self.assertEqual(manifest["counts"]["projects"], 1)
+                self.assertIn("files/project-documents/T0001/detail.pdf", archive.namelist())
+                self.assertIn("files/theme-datasets/antivegf/dataset.pdf", archive.namelist())
+
+            self.theme.name = "被污染的主题"
+            self.theme.save(update_fields=["name", "updated_at"])
+            self.project.title = "被污染的课题"
+            self.project.summary = "被污染的摘要"
+            self.project.save(update_fields=["title", "summary", "updated_at"])
+            self.project.tags.clear()
+            ProjectDocument.objects.all().delete()
+            ThemeFile.objects.all().delete()
+            project_pdf.unlink()
+            dataset_pdf.unlink()
+
+            restore_response = self.client.post(
+                "/api/admin/content-backup/restore/",
+                {"file": SimpleUploadedFile("backup.zip", backup_bytes, content_type="application/zip")},
+            )
+
+            self.assertEqual(restore_response.status_code, 200)
+            restore_payload = restore_response.json()["data"]
+            self.assertEqual(restore_payload["themes"], 1)
+            self.assertEqual(restore_payload["projects"], 1)
+            self.assertEqual(restore_payload["project_documents"], 1)
+            self.assertEqual(restore_payload["theme_files"], 1)
+            self.theme.refresh_from_db()
+            self.project.refresh_from_db()
+            self.assertEqual(self.theme.name, "AntiVEGF")
+            self.assertEqual(self.project.title, "纵向病例证据 RAG")
+            self.assertEqual(list(self.project.tags.values_list("slug", flat=True)), ["rag"])
+            self.assertEqual(self.project.documents.get().title, "课题完整方案")
+            self.assertEqual(ThemeFile.objects.get(theme=self.theme).detail_pdf_title, "数据集说明 PDF")
+            self.assertTrue(project_pdf.exists())
+            self.assertTrue(dataset_pdf.exists())
 
     def test_regular_user_cannot_manage_content(self):
         user = User.objects.create_user(username="normaluser", password="StrongPass12345")
@@ -1393,7 +1639,7 @@ class ApiTests(TestCase):
             {
                 "project_id": self.project.pk,
                 "title": "整理数据字典",
-                "description": "梳理主题文件空间的数据字段。",
+                "description": "梳理主题数据集说明的关键字段。",
                 "task_type": "data_dictionary",
                 "required_role": "学生",
                 "difficulty": 2,
@@ -1443,7 +1689,7 @@ class ApiTests(TestCase):
         self.client.force_login(admin)
         review_response = self.patch_json(
             f"/api/admin/contributions/{contribution_id}/review/",
-            {"status": "approved", "review_comment": "可进入主题文件空间", "grant_reward": True},
+            {"status": "approved", "review_comment": "可进入数据集说明模块", "grant_reward": True},
         )
 
         self.assertEqual(review_response.status_code, 200)

@@ -1,7 +1,8 @@
 import hashlib
-import mimetypes
+import io
+import json
 import re
-import shutil
+import zipfile
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -14,7 +15,7 @@ from django.contrib.auth.models import User
 from django.core.paginator import Paginator
 from django.db import transaction
 from django.db.models import Case, IntegerField, Q, Value, When
-from django.http import Http404
+from django.http import Http404, HttpResponse
 from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -25,7 +26,7 @@ from ninja.security import SessionAuth
 
 from config.release import APP_VERSION, release_payload
 from accounts.forms import RegisterForm, UserProfileForm
-from accounts.models import PLATFORM_ADMIN_UID, PUBLIC_ROLE_CHOICES, RoleType, UserProfile
+from accounts.models import PLATFORM_ADMIN_UID, PUBLIC_ROLE_CHOICES, UserProfile
 from accounts.services import (
     DefaultPasswordConfigError,
     create_registered_user,
@@ -46,7 +47,7 @@ from interactions.models import (
     SponsorType,
 )
 from interactions.services import project_stat_annotations, recalculate_project_community_score
-from projects.contracts import DEFAULT_THEME_FILE_SPACE, PROJECT_FIELD_CONTRACT, PROJECT_JSON_TEMPLATE
+from projects.contracts import PROJECT_FIELD_CONTRACT, PROJECT_JSON_TEMPLATE
 from projects.importing import create_project, unique_slug, update_project, upsert_project_with_instance
 from projects.models import (
     FOLLOWABLE_PROJECT_STAGES,
@@ -85,7 +86,7 @@ from .serializers import (
     task_payload,
     theme_file_payload,
     theme_payload,
-    theme_space_payload,
+    theme_dataset_payload,
     uid_only_user_payload,
     user_payload,
 )
@@ -102,6 +103,7 @@ api = NinjaAPI(
 
 REVIEWABLE_INTERACTION_STATUSES = {InteractionStatus.APPROVED, InteractionStatus.REJECTED}
 REVIEWABLE_CONTRIBUTION_STATUSES = {ContributionStatus.APPROVED, ContributionStatus.REJECTED}
+ACTIVE_VIEWER_INTERACTION_STATUSES = {InteractionStatus.APPROVED, InteractionStatus.PENDING}
 USER_PROJECT_ALLOWED_STAGES = {ProjectStage.DRAFT, ProjectStage.OPEN_RECRUITING}
 DAILY_USER_PROJECT_UPLOAD_LIMIT = 10
 AUDIT_ACTION_MAX_LENGTH = 120
@@ -190,7 +192,6 @@ class ThemeWriteRequest(Schema):
     slug: Optional[str] = None
     description: Optional[str] = ""
     cover_image: Optional[str] = ""
-    file_space: Optional[Any] = None
     sort_order: Optional[int] = 0
     is_active: Optional[bool] = True
 
@@ -225,6 +226,7 @@ class ProjectBulkArchiveRequest(Schema):
 
 class ProjectDocumentWriteRequest(Schema):
     doc_type: Optional[str] = None
+    document_kind: Optional[str] = None
     title: Optional[str] = None
     description: Optional[str] = None
     path: Optional[str] = None
@@ -238,37 +240,10 @@ class ThemeFileWriteRequest(Schema):
     title: Optional[str] = None
     description: Optional[str] = ""
     path: Optional[str] = None
+    detail_pdf_title: Optional[str] = ""
+    detail_pdf_path: Optional[str] = ""
     sort_order: Optional[int] = 0
     is_active: Optional[bool] = True
-
-
-class FileSpaceDirectoryRequest(Schema):
-    theme_id: int
-    path: Optional[str] = ""
-    name: str
-
-
-class FileSpaceFileRequest(Schema):
-    theme_id: int
-    path: Optional[str] = ""
-    name: str
-    content: Optional[str] = ""
-
-
-class FileSpaceUpdateRequest(Schema):
-    theme_id: int
-    path: str
-    new_name: Optional[str] = None
-    content: Optional[str] = None
-
-
-class FileSpaceDeleteRequest(Schema):
-    theme_id: int
-    path: str
-
-
-class FileSpaceRootRequest(Schema):
-    server_directory: str
 
 
 class InteractionStatusRequest(Schema):
@@ -396,25 +371,25 @@ def project_schema(request):
             "json_template": PROJECT_JSON_TEMPLATE,
             "template_version": "v1",
             "stage_values": choice_payload(ProjectStage.choices),
-            "document_types": choice_payload(ProjectDocument.DocumentType.choices),
-            "theme_file_types": choice_payload(ThemeFile.FileType.choices),
-            "default_theme_file_space": DEFAULT_THEME_FILE_SPACE,
+            "document_types": choice_payload([(ProjectDocument.DocumentType.PDF, ProjectDocument.DocumentType.PDF.label)]),
+            "document_kinds": choice_payload([(ProjectDocument.DocumentKind.DETAIL, ProjectDocument.DocumentKind.DETAIL.label)]),
+            "theme_file_types": choice_payload([(ThemeFile.FileType.DATASET_META, ThemeFile.FileType.DATASET_META.label)]),
         }
     )
 
 
-@api.get("/themes/{slug}/space/", response={200: Envelope, 404: ErrorEnvelope}, tags=["Projects"], auth=None)
-def theme_space(request, slug: str):
+@api.get("/themes/{slug}/datasets/", response={200: Envelope, 404: ErrorEnvelope}, tags=["Projects"], auth=None)
+def theme_datasets(request, slug: str):
     theme = get_object_or_404(Theme, slug=slug, is_active=True)
     projects = list(
         project_stat_annotations(
             Project.objects.filter(theme=theme, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
             .select_related("theme")
-            .prefetch_related("tags")
+            .prefetch_related("tags", "documents")
         ).order_by("topic_id", "-updated_at")[:80]
     )
     files = list(ThemeFile.objects.filter(theme=theme, is_active=True).order_by("sort_order", "section", "title")[:300])
-    return ok(theme_space_payload(theme, projects, files))
+    return ok(theme_dataset_payload(theme, projects, files))
 
 
 @api.get("/me/", response={200: Envelope, 401: ErrorEnvelope}, tags=["Me"])
@@ -637,14 +612,14 @@ def project_list(
     theme: str = "",
     tag: str = "",
     stage: str = "",
-    sort: str = "follows",
+    sort: str = "project_id",
     page: int = 1,
     page_size: int = 20,
 ):
     projects = project_stat_annotations(
         Project.objects.filter(is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
         .select_related("theme", "created_by", "created_by__profile")
-        .prefetch_related("tags")
+        .prefetch_related("tags", "documents")
     )
     q = q.strip()
     theme = theme.strip()
@@ -660,19 +635,20 @@ def project_list(
     if stage:
         projects = projects.filter(stage=stage)
     sort_map = {
-        "recommended": ("topic_id",),
+        "recommended": ("topic_id", "id"),
         "follows": ("-follow_count", "-interest_count", "topic_id"),
-        "updated": ("-updated_at",),
-        "project_id": ("topic_id",),
+        "updated": ("-updated_at", "-topic_id"),
+        "newest": ("-topic_id", "-id"),
+        "project_id": ("topic_id", "id"),
     }
-    projects = projects.order_by(*sort_map.get(sort, sort_map["recommended"]))
+    projects = projects.order_by(*sort_map.get(sort, sort_map["project_id"]))
 
     page_size = max(1, min(page_size, 100))
     paginator = Paginator(projects, page_size)
     page_obj = paginator.get_page(page)
     return ok(
         {
-            "results": [project_summary_payload(project) for project in page_obj.object_list],
+            "results": [project_list_payload(project, request.user) for project in page_obj.object_list],
             "pagination": {
                 "page": page_obj.number,
                 "page_size": page_size,
@@ -712,7 +688,7 @@ def project_status_card(request, project_id: int):
         project_stat_annotations(
             project_queryset
             .select_related("theme", "created_by", "created_by__profile")
-            .prefetch_related("tags")
+            .prefetch_related("tags", "documents")
         ),
         pk=project_id,
     )
@@ -836,7 +812,7 @@ def user_project_update(request, project_id: int, payload: ProjectWriteRequest):
             error_message="topic_id cannot be changed.",
         )
         return fail("topic_id cannot be changed.", status=422, code="validation_error")
-    if not user_can_bypass_project_upload_quota(request.user) and project.stage not in USER_PROJECT_ALLOWED_STAGES:
+    if not user_can_bypass_project_upload_quota(request.user) and project.stage not in USER_PROJECT_ALLOWED_STAGES and "stage" in patch_data:
         audit(
             request.user,
             "project.user_update",
@@ -946,7 +922,7 @@ def me_project_list(request, page: int = 1, page_size: int = 20):
         project_stat_annotations(
             Project.objects.filter(created_by=request.user)
             .select_related("theme", "created_by", "created_by__profile")
-            .prefetch_related("tags")
+            .prefetch_related("tags", "documents")
         )
         .order_by("-created_at", "topic_id")
     )
@@ -1524,7 +1500,6 @@ def admin_theme_create(request, payload: ThemeWriteRequest):
         slug=slug,
         description=data.get("description", ""),
         cover_image=data.get("cover_image", ""),
-        file_space={**DEFAULT_THEME_FILE_SPACE, **(data.get("file_space") or {})},
         sort_order=data.get("sort_order", 0),
         is_active=data.get("is_active", True),
     )
@@ -1552,8 +1527,6 @@ def admin_theme_update(request, theme_id: int, payload: ThemeWriteRequest):
     for field in ["description", "cover_image", "sort_order", "is_active"]:
         if field in data:
             setattr(theme, field, data[field])
-    if "file_space" in data:
-        theme.file_space = {**DEFAULT_THEME_FILE_SPACE, **(data["file_space"] or {})}
     theme.save()
     audit(request.user, "theme.update", "Theme", theme.id, before=before, after=theme_payload(theme))
     return ok(theme_payload(theme))
@@ -1616,17 +1589,23 @@ def admin_theme_file_create(request, payload: ThemeFileWriteRequest):
         return fail("Theme is required.", status=422, code="validation_error")
     title = (data.get("title") or "").strip()
     path = (data.get("path") or "").strip()
-    if not title or not path:
-        return fail("title and path are required.", status=422, code="validation_error")
+    if not title:
+        return fail("title is required.", status=422, code="validation_error")
+    if ThemeFile.objects.filter(theme=theme, is_active=True).exists():
+        return fail("Each theme can only have one active dataset description.", status=422, code="validation_error")
+    if not path:
+        path = unique_dataset_description_path(theme, title)
     if ThemeFile.objects.filter(theme=theme, path=path).exists():
-        return fail("Theme file path already exists.", status=422, code="validation_error")
+        return fail("Dataset description already exists.", status=422, code="validation_error")
     file = ThemeFile.objects.create(
         theme=theme,
-        section=(data.get("section") or "数据集文件").strip(),
-        file_type=normalize_theme_file_type(data.get("file_type")),
+        section=(data.get("section") or "数据集说明文件").strip(),
+        file_type=normalize_theme_file_type(data.get("file_type") or ThemeFile.FileType.DATASET_META),
         title=title,
         description=data.get("description", ""),
         path=path,
+        detail_pdf_title=str(data.get("detail_pdf_title") or "").strip()[:255],
+        detail_pdf_path=public_document_path_for_admin(data.get("detail_pdf_path") or ""),
         sort_order=data.get("sort_order", 0),
         is_active=data.get("is_active", True),
     )
@@ -1645,6 +1624,9 @@ def admin_theme_file_update(request, file_id: int, payload: ThemeFileWriteReques
     theme = theme_from_payload(data, current=file.theme)
     if theme:
         file.theme = theme
+    target_is_active = data.get("is_active", file.is_active)
+    if target_is_active and ThemeFile.objects.filter(theme=file.theme, is_active=True).exclude(pk=file.pk).exists():
+        return fail("Each theme can only have one active dataset description.", status=422, code="validation_error")
     if "title" in data:
         title = (data.get("title") or "").strip()
         if not title:
@@ -1653,18 +1635,59 @@ def admin_theme_file_update(request, file_id: int, payload: ThemeFileWriteReques
     if "path" in data:
         path = (data.get("path") or "").strip()
         if not path:
-            return fail("path is required.", status=422, code="validation_error")
+            path = unique_dataset_description_path(file.theme, file.title or "dataset")
         if ThemeFile.objects.filter(theme=file.theme, path=path).exclude(pk=file.pk).exists():
-            return fail("Theme file path already exists.", status=422, code="validation_error")
+            return fail("Dataset description already exists.", status=422, code="validation_error")
         file.path = path
     for field in ["section", "description", "sort_order", "is_active"]:
         if field in data:
             setattr(file, field, data[field])
+    if "detail_pdf_title" in data:
+        file.detail_pdf_title = str(data.get("detail_pdf_title") or "").strip()[:255]
+    if "detail_pdf_path" in data:
+        path = public_document_path_for_admin(data.get("detail_pdf_path") or "")
+        if data.get("detail_pdf_path") and not path:
+            return fail("detail_pdf_path is invalid.", status=422, code="validation_error")
+        file.detail_pdf_path = path
     if "file_type" in data:
         file.file_type = normalize_theme_file_type(data.get("file_type"))
     file.save()
     audit(request.user, "theme_file.update", "ThemeFile", file.id, before=before, after=theme_file_payload(file))
     return ok(theme_file_payload(file))
+
+
+@api.post(
+    "/admin/theme-files/{file_id}/detail-pdf/",
+    response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope},
+    tags=["Admin"],
+)
+def admin_theme_file_detail_pdf_upload(request, file_id: int):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    file = get_object_or_404(ThemeFile.objects.select_related("theme"), pk=file_id)
+    uploaded = request.FILES.get("file")
+    if not uploaded:
+        return fail("No file uploaded.", status=422, code="validation_error")
+    file_name = sanitize_file_name(uploaded.name)
+    if not file_name or Path(file_name).suffix.lower() != ".pdf":
+        return fail("Only PDF files are allowed.", status=422, code="validation_error")
+    title = (request.POST.get("title") or Path(file_name).stem or "数据集说明").strip()[:255]
+    root = theme_file_detail_pdf_root()
+    directory = safe_child_path(root, f"{file.theme.slug}/{file.pk}", root, expect_parent=False)
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = unique_theme_file_detail_pdf_destination(directory, file_name)
+    before = theme_file_payload(file)
+    old_path = file.detail_pdf_path
+    content_hash = write_uploaded_file_with_hash(uploaded, destination)
+    file.detail_pdf_title = title
+    file.detail_pdf_path = public_media_path(destination)
+    file.detail_pdf_hash = content_hash
+    file.save(update_fields=["detail_pdf_title", "detail_pdf_path", "detail_pdf_hash", "updated_at"])
+    maybe_delete_managed_theme_file_detail_pdf(old_path, keep_path=file.detail_pdf_path)
+    after = theme_file_payload(file)
+    audit(request.user, "theme_file.detail_pdf_upload", "ThemeFile", file.id, before=before, after=after)
+    return 201, ok(after)
 
 
 @api.delete("/admin/theme-files/{file_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope}, tags=["Admin"])
@@ -1680,210 +1703,50 @@ def admin_theme_file_delete(request, file_id: int):
     return ok(theme_file_payload(file))
 
 
-@api.get("/admin/file-space/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
-def admin_file_space_list(request, theme_id: int, path: str = ""):
-    auth_error = require_capability(request, "manage_themes")
+@api.get("/admin/content-backup/export/", response={401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Admin"])
+def admin_content_backup_export(request):
+    auth_error = require_content_backup_capability(request)
     if auth_error:
         return auth_error
-    theme = get_object_or_404(Theme, pk=theme_id)
-    try:
-        root = theme_file_space_root(theme)
-        directory = safe_file_space_path(theme, path, expect_parent=False)
-    except ValueError as exc:
-        return fail(str(exc), status=422, code="invalid_file_space_path")
-    if not directory.exists():
-        directory.mkdir(parents=True, exist_ok=True)
-    if not directory.is_dir():
-        return fail("Path is not a directory.", status=422, code="not_directory")
-    entries = [file_space_entry(item, root) for item in sorted(directory.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))]
-    return ok(
-        {
-            "theme": theme_payload(theme),
-            "base_root": str(file_space_base_root()),
-            "root_path": str(root),
-            "relative_path": relative_file_space_path(directory, root),
-            "breadcrumbs": file_space_breadcrumbs(directory, root),
-            "entries": entries,
-        }
-    )
+    manifest, files = build_content_backup_manifest()
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for archive_name, source_path in files.items():
+            if source_path.is_file():
+                archive.write(source_path, archive_name)
+        archive.writestr("openmedailab-backup.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+    file_name = f"openmedailab-content-backup-{timezone.localtime().strftime('%Y%m%d-%H%M%S')}.zip"
+    audit(request.user, "content_backup.export", "ContentBackup", file_name, after=manifest["counts"])
+    response = HttpResponse(buffer.getvalue(), content_type="application/zip")
+    response["Content-Disposition"] = f'attachment; filename="{file_name}"'
+    return response
 
 
-@api.get("/admin/file-space/file/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
-def admin_file_space_read_file(request, theme_id: int, path: str):
-    auth_error = require_capability(request, "manage_themes")
+@api.post("/admin/content-backup/restore/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_content_backup_restore(request):
+    auth_error = require_content_backup_capability(request)
     if auth_error:
         return auth_error
-    theme = get_object_or_404(Theme, pk=theme_id)
+    uploaded = request.FILES.get("file")
+    if not uploaded:
+        return fail("请上传备份 zip 文件。", status=422, code="validation_error")
+    if not str(uploaded.name or "").lower().endswith(".zip"):
+        return fail("备份文件必须是 zip 格式。", status=422, code="validation_error")
     try:
-        root = theme_file_space_root(theme)
-        file_path = safe_file_space_path(theme, path, expect_parent=False)
-    except ValueError as exc:
-        return fail(str(exc), status=422, code="invalid_file_space_path")
-    if not file_path.exists() or not file_path.is_file():
-        raise Http404("File not found")
-    if file_path.stat().st_size > 1024 * 1024:
-        return fail("File is too large to edit online.", status=422, code="file_too_large")
-    try:
-        content = file_path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return fail("Only UTF-8 text files can be edited online.", status=422, code="binary_file")
-    return ok({"entry": file_space_entry(file_path, root), "content": content})
-
-
-@api.patch("/admin/themes/{theme_id}/file-space-root/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
-def admin_theme_file_space_root_update(request, theme_id: int, payload: FileSpaceRootRequest):
-    auth_error = require_capability(request, "manage_themes")
-    if auth_error:
-        return auth_error
-    theme = get_object_or_404(Theme, pk=theme_id)
-    before = theme_payload(theme)
-    raw_directory = payload.server_directory.strip()
-    try:
-        resolved = resolve_file_space_root(raw_directory, theme)
-    except ValueError as exc:
-        return fail(str(exc), status=422, code="invalid_file_space_root")
-    resolved.mkdir(parents=True, exist_ok=True)
-    file_space = dict(theme.file_space or {})
-    file_space["server_directory"] = str(resolved)
-    theme.file_space = {**DEFAULT_THEME_FILE_SPACE, **file_space}
-    theme.save(update_fields=["file_space", "updated_at"])
-    audit(request.user, "theme.file_space_root.update", "Theme", theme.id, before=before, after=theme_payload(theme))
-    return ok({"theme": theme_payload(theme), "root_path": str(resolved), "base_root": str(file_space_base_root())})
-
-
-@api.post("/admin/file-space/directories/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
-def admin_file_space_create_directory(request, payload: FileSpaceDirectoryRequest):
-    auth_error = require_capability(request, "manage_themes")
-    if auth_error:
-        return auth_error
-    theme = get_object_or_404(Theme, pk=payload.theme_id)
-    name = sanitize_file_name(payload.name)
-    if not name:
-        return fail("Directory name is required.", status=422, code="validation_error")
-    try:
-        root = theme_file_space_root(theme)
-        directory = safe_file_space_path(theme, f"{payload.path or ''}/{name}", expect_parent=True)
-    except ValueError as exc:
-        return fail(str(exc), status=422, code="invalid_file_space_path")
-    directory.mkdir(parents=True, exist_ok=True)
-    audit(request.user, "file_space.directory.create", "Theme", theme.id, after={"path": relative_file_space_path(directory, root)})
-    return 201, ok({"entry": file_space_entry(directory, root)})
-
-
-@api.post("/admin/file-space/files/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
-def admin_file_space_create_file(request, payload: FileSpaceFileRequest):
-    auth_error = require_capability(request, "manage_themes")
-    if auth_error:
-        return auth_error
-    theme = get_object_or_404(Theme, pk=payload.theme_id)
-    name = sanitize_file_name(payload.name)
-    if not name:
-        return fail("File name is required.", status=422, code="validation_error")
-    try:
-        root = theme_file_space_root(theme)
-        file_path = safe_file_space_path(theme, f"{payload.path or ''}/{name}", expect_parent=True)
-    except ValueError as exc:
-        return fail(str(exc), status=422, code="invalid_file_space_path")
-    if file_path.exists():
-        return fail("File already exists.", status=422, code="file_exists")
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    file_path.write_text(payload.content or "", encoding="utf-8")
-    upsert_theme_file_for_path(theme, file_path, root)
-    audit(request.user, "file_space.file.create", "Theme", theme.id, after={"path": relative_file_space_path(file_path, root)})
-    return 201, ok({"entry": file_space_entry(file_path, root)})
-
-
-@api.patch("/admin/file-space/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
-def admin_file_space_update(request, payload: FileSpaceUpdateRequest):
-    auth_error = require_capability(request, "manage_themes")
-    if auth_error:
-        return auth_error
-    theme = get_object_or_404(Theme, pk=payload.theme_id)
-    try:
-        root = theme_file_space_root(theme)
-        target = safe_file_space_path(theme, payload.path, expect_parent=False)
-    except ValueError as exc:
-        return fail(str(exc), status=422, code="invalid_file_space_path")
-    if not target.exists():
-        raise Http404("File space item not found")
-    before = {"path": relative_file_space_path(target, root)}
-    if payload.content is not None:
-        if not target.is_file():
-            return fail("Only files can be edited.", status=422, code="not_file")
-        target.write_text(payload.content, encoding="utf-8")
-    if payload.new_name:
-        new_name = sanitize_file_name(payload.new_name)
-        if not new_name:
-            return fail("New name is invalid.", status=422, code="validation_error")
-        destination = safe_file_space_path(theme, f"{Path(payload.path).parent.as_posix()}/{new_name}", expect_parent=True)
-        if destination.exists() and destination != target:
-            return fail("Destination already exists.", status=422, code="file_exists")
-        target.rename(destination)
-        sync_theme_file_after_rename(theme, target, destination, root)
-        target = destination
-    elif target.is_file():
-        upsert_theme_file_for_path(theme, target, root)
-    after = {"path": relative_file_space_path(target, root)}
-    audit(request.user, "file_space.update", "Theme", theme.id, before=before, after=after)
-    return ok({"entry": file_space_entry(target, root)})
-
-
-@api.delete("/admin/file-space/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
-def admin_file_space_delete(request, payload: FileSpaceDeleteRequest):
-    auth_error = require_capability(request, "manage_themes")
-    if auth_error:
-        return auth_error
-    theme = get_object_or_404(Theme, pk=payload.theme_id)
-    try:
-        root = theme_file_space_root(theme)
-        target = safe_file_space_path(theme, payload.path, expect_parent=False)
-    except ValueError as exc:
-        return fail(str(exc), status=422, code="invalid_file_space_path")
-    if not target.exists():
-        raise Http404("File space item not found")
-    before = {"path": relative_file_space_path(target, root), "type": "directory" if target.is_dir() else "file"}
-    if target.is_dir():
-        shutil.rmtree(target)
-    else:
-        target.unlink()
-        deactivate_theme_file_for_path(theme, public_file_space_path(target))
-    audit(request.user, "file_space.delete", "Theme", theme.id, before=before)
-    return ok({"deleted": True, "path": before["path"]})
-
-
-@api.post("/admin/file-space/upload/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
-def admin_file_space_upload(request):
-    auth_error = require_capability(request, "manage_themes")
-    if auth_error:
-        return auth_error
-    theme_id = request.POST.get("theme_id")
-    path = request.POST.get("path", "")
-    if not theme_id:
-        return fail("theme_id is required.", status=422, code="validation_error")
-    theme = get_object_or_404(Theme, pk=theme_id)
-    files = request.FILES.getlist("files")
-    relative_paths = request.POST.getlist("relative_paths")
-    if not files:
-        return fail("No files uploaded.", status=422, code="validation_error")
-    try:
-        root = theme_file_space_root(theme)
-        directory = safe_file_space_path(theme, path, expect_parent=True)
-    except ValueError as exc:
-        return fail(str(exc), status=422, code="invalid_file_space_path")
-    directory.mkdir(parents=True, exist_ok=True)
-    saved = []
-    for index, uploaded in enumerate(files):
-        relative_name = relative_paths[index] if index < len(relative_paths) else uploaded.name
-        relative_name = safe_relative_upload_path(relative_name or uploaded.name)
-        destination = safe_child_path(directory, relative_name, root)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        with destination.open("wb") as output:
-            for chunk in uploaded.chunks():
-                output.write(chunk)
-        upsert_theme_file_for_path(theme, destination, root)
-        saved.append(file_space_entry(destination, root))
-    audit(request.user, "file_space.upload", "Theme", theme.id, after={"count": len(saved), "path": relative_file_space_path(directory, root)})
-    return 201, ok({"saved": saved})
+        result = restore_content_backup(uploaded.read())
+    except (ValueError, zipfile.BadZipFile) as exc:
+        audit(
+            request.user,
+            "content_backup.restore",
+            "ContentBackup",
+            uploaded.name or "backup.zip",
+            status="failed",
+            error_code="validation_error",
+            error_message=str(exc),
+        )
+        return fail(str(exc), status=422, code="validation_error")
+    audit(request.user, "content_backup.restore", "ContentBackup", uploaded.name or "backup.zip", after=result)
+    return ok(result)
 
 
 @api.get("/admin/projects/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Admin"])
@@ -1900,7 +1763,7 @@ def admin_project_list(
     auth_error = require_capability(request, "manage_projects")
     if auth_error:
         return auth_error
-    projects = project_stat_annotations(Project.objects.all().select_related("theme", "created_by", "created_by__profile").prefetch_related("tags"))
+    projects = project_stat_annotations(Project.objects.all().select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents"))
     q = q.strip()
     theme = theme.strip()
     stage = stage.strip()
@@ -2188,15 +2051,37 @@ def admin_project_document_upload(request):
         return auth_error
     project_id = request.POST.get("project_id")
     project = get_object_or_404(Project, pk=project_id)
+    return save_project_detail_pdf(request, project, "project_document.upload")
+
+
+@api.post(
+    "/project-documents/upload/",
+    response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope},
+    tags=["Projects"],
+)
+def user_project_document_upload(request):
+    auth_error = require_login(request)
+    if auth_error:
+        return auth_error
+    project_id = request.POST.get("project_id")
+    project = get_object_or_404(Project.objects.select_related("created_by", "created_by__profile"), pk=project_id)
+    access_error = require_user_project_document_access(request, project, "project_document.user_upload")
+    if access_error:
+        return access_error
+    return save_project_detail_pdf(request, project, "project_document.user_upload")
+
+
+def save_project_detail_pdf(request, project, audit_action):
+    document_kind = normalize_project_document_kind(request.POST.get("document_kind"))
+    if document_kind != ProjectDocument.DocumentKind.DETAIL:
+        return fail("Only project detail PDF is supported.", status=422, code="validation_error")
     description = (request.POST.get("description") or "").strip()
-    if not description:
-        return fail("description is required.", status=422, code="validation_error")
     files = request.FILES.getlist("files")
     if not files:
         return fail("No files uploaded.", status=422, code="validation_error")
+    if len(files) != 1:
+        return fail("Project detail PDF accepts exactly one file.", status=422, code="validation_error")
 
-    requested_doc_type = request.POST.get("doc_type")
-    doc_type = requested_doc_type if requested_doc_type in ProjectDocument.DocumentType.values else ""
     title = (request.POST.get("title") or "").strip()
     root = project_document_root()
     directory = safe_child_path(root, project.topic_code, root, expect_parent=False)
@@ -2207,19 +2092,26 @@ def admin_project_document_upload(request):
         file_name = sanitize_file_name(uploaded.name)
         if not file_name:
             return fail("file name is invalid.", status=422, code="validation_error")
+        if Path(file_name).suffix.lower() != ".pdf":
+            return fail("Project detail document must be a PDF.", status=422, code="validation_error")
         destination = unique_project_document_destination(directory, file_name)
         content_hash = write_uploaded_file_with_hash(uploaded, destination)
-        document_type = doc_type or project_document_type_for_name(file_name)
+        old_detail_documents = list(ProjectDocument.objects.filter(project=project, document_kind=ProjectDocument.DocumentKind.DETAIL))
         document = ProjectDocument.objects.create(
             project=project,
-            doc_type=document_type,
+            doc_type=ProjectDocument.DocumentType.PDF,
+            document_kind=ProjectDocument.DocumentKind.DETAIL,
             title=title or Path(file_name).stem,
-            description=description,
-            path=public_file_space_path(destination),
+            description=description or "课题 PDF 详情",
+            path=public_media_path(destination),
             content_hash=content_hash,
         )
+        for old_document in old_detail_documents:
+            before_path = old_document.path
+            old_document.delete()
+            maybe_delete_managed_project_document_file(before_path)
         saved.append(document_payload(document))
-    audit(request.user, "project_document.upload", "Project", project.id, after={"count": len(saved), "documents": saved})
+    audit(request.user, audit_action, "Project", project.id, after={"count": len(saved), "documents": saved})
     return 201, ok({"project_id": project.id, "saved": saved, "documents": [document_payload(document) for document in project_documents_for(project)]})
 
 
@@ -2236,7 +2128,15 @@ def admin_project_document_update(request, document_id: int, payload: ProjectDoc
     before = document_payload(document)
     data = payload.model_dump(exclude_unset=True, exclude_none=True)
     if "doc_type" in data:
-        document.doc_type = normalize_project_document_type(data.get("doc_type"))
+        if normalize_project_document_type(data.get("doc_type")) != ProjectDocument.DocumentType.PDF:
+            return fail("Only project detail PDF is supported.", status=422, code="validation_error")
+        document.doc_type = ProjectDocument.DocumentType.PDF
+    if "document_kind" in data:
+        if normalize_project_document_kind(data.get("document_kind")) != ProjectDocument.DocumentKind.DETAIL:
+            return fail("Only project detail PDF is supported.", status=422, code="validation_error")
+        document.document_kind = ProjectDocument.DocumentKind.DETAIL
+        document.doc_type = ProjectDocument.DocumentType.PDF
+        ProjectDocument.objects.filter(project=document.project, document_kind=ProjectDocument.DocumentKind.DETAIL).exclude(pk=document.pk).delete()
     if "title" in data:
         document.title = str(data.get("title") or "").strip()[:255]
     if "description" in data:
@@ -2246,7 +2146,7 @@ def admin_project_document_update(request, document_id: int, payload: ProjectDoc
         if not path:
             return fail("path is invalid.", status=422, code="validation_error")
         document.path = path
-    document.save(update_fields=["doc_type", "title", "description", "path"])
+    document.save(update_fields=["doc_type", "document_kind", "title", "description", "path"])
     after = document_payload(document)
     audit(request.user, "project_document.update", "ProjectDocument", document.id, before=before, after=after)
     return ok({"document": after, "documents": [document_payload(item) for item in project_documents_for(document.project)]})
@@ -2262,11 +2162,32 @@ def admin_project_document_delete(request, document_id: int):
     if auth_error:
         return auth_error
     document = get_object_or_404(ProjectDocument.objects.select_related("project"), pk=document_id)
+    return delete_project_document_for_request(request, document, "project_document.delete")
+
+
+@api.delete(
+    "/project-documents/{document_id}/",
+    response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope},
+    tags=["Projects"],
+)
+def user_project_document_delete(request, document_id: int):
+    auth_error = require_login(request)
+    if auth_error:
+        return auth_error
+    document = get_object_or_404(ProjectDocument.objects.select_related("project", "project__created_by", "project__created_by__profile"), pk=document_id)
+    access_error = require_user_project_document_access(request, document.project, "project_document.user_delete")
+    if access_error:
+        return access_error
+    return delete_project_document_for_request(request, document, "project_document.user_delete")
+
+
+def delete_project_document_for_request(request, document, audit_action):
     project = document.project
+    document_id = document.id
     before = document_payload(document)
     maybe_delete_managed_project_document_file(document.path)
     document.delete()
-    audit(request.user, "project_document.delete", "ProjectDocument", document_id, before=before)
+    audit(request.user, audit_action, "ProjectDocument", document_id, before=before)
     return ok({"project_id": project.id, "documents": [document_payload(item) for item in project_documents_for(project)]})
 
 
@@ -2467,12 +2388,371 @@ def require_capability(request, capability):
     return None
 
 
+def require_content_backup_capability(request):
+    auth_error = require_capability(request, "manage_projects")
+    if auth_error:
+        return auth_error
+    if not has_capability(request.user, "manage_themes"):
+        return fail("Permission denied.", status=403, code="permission_denied")
+    return None
+
+
 def user_can_bypass_project_upload_quota(user):
     return has_capability(user, "manage_projects")
 
 
 def user_project_uploads_today(user):
     return Project.objects.filter(created_by=user, created_at__date=timezone.localdate()).count()
+
+
+def build_content_backup_manifest():
+    files = {}
+    themes = [
+        {
+            "name": theme.name,
+            "slug": theme.slug,
+            "description": theme.description,
+            "cover_image": theme.cover_image,
+            "sort_order": theme.sort_order,
+            "is_active": theme.is_active,
+        }
+        for theme in Theme.objects.order_by("sort_order", "name")
+    ]
+    tags = [{"name": tag.name, "slug": tag.slug} for tag in Tag.objects.order_by("name")]
+
+    theme_files = []
+    for item in ThemeFile.objects.select_related("theme").order_by("theme__slug", "sort_order", "title"):
+        payload = {
+            "theme_slug": item.theme.slug,
+            "section": item.section,
+            "file_type": item.file_type,
+            "title": item.title,
+            "description": item.description,
+            "path": item.path,
+            "detail_pdf_title": item.detail_pdf_title,
+            "detail_pdf_path": item.detail_pdf_path,
+            "detail_pdf_hash": item.detail_pdf_hash,
+            "sort_order": item.sort_order,
+            "is_active": item.is_active,
+        }
+        attach_backup_file(payload, "detail_pdf_path", files)
+        theme_files.append(payload)
+
+    projects = []
+    for project in Project.objects.select_related("theme").prefetch_related("tags", "documents").order_by("topic_id"):
+        projects.append(
+            {
+                "topic_id": project.topic_id,
+                "title": project.title,
+                "title_en": project.title_en,
+                "summary": project.summary,
+                "problem_statement": project.problem_statement,
+                "clinical_endpoint": project.clinical_endpoint,
+                "existing_foundation": project.existing_foundation,
+                "team_requirements": project.team_requirements,
+                "project_progress": project.project_progress,
+                "target_venue": project.target_venue,
+                "theme_slug": project.theme.slug if project.theme else "",
+                "stage": project.stage,
+                "source_payload": json_safe(project.source_payload or {}),
+                "is_public": project.is_public,
+                "tag_slugs": [tag.slug for tag in project.tags.all()],
+            }
+        )
+
+    project_documents = []
+    for item in ProjectDocument.objects.select_related("project").order_by("project__topic_id", "created_at", "id"):
+        payload = {
+            "project_topic_id": item.project.topic_id,
+            "doc_type": item.doc_type,
+            "document_kind": item.document_kind,
+            "title": item.title,
+            "description": item.description,
+            "path": item.path,
+            "content_hash": item.content_hash,
+        }
+        attach_backup_file(payload, "path", files)
+        project_documents.append(payload)
+
+    manifest = {
+        "kind": "openmedailab-content-backup",
+        "version": 1,
+        "app_version": APP_VERSION,
+        "created_at": timezone.localtime().isoformat(),
+        "counts": {
+            "themes": len(themes),
+            "tags": len(tags),
+            "theme_files": len(theme_files),
+            "projects": len(projects),
+            "project_documents": len(project_documents),
+            "files": len(files),
+        },
+        "themes": themes,
+        "tags": tags,
+        "theme_files": theme_files,
+        "projects": projects,
+        "project_documents": project_documents,
+    }
+    return manifest, files
+
+
+def attach_backup_file(payload, path_key, files):
+    source = media_file_for_public_path(payload.get(path_key))
+    if not source or not source.is_file():
+        payload["backup_file"] = ""
+        return
+    media_root = Path(settings.MEDIA_ROOT).expanduser().resolve()
+    relative = source.resolve().relative_to(media_root).as_posix()
+    archive_name = f"files/{relative}"
+    payload["backup_file"] = archive_name
+    files[archive_name] = source
+
+
+def restore_content_backup(raw_zip):
+    with zipfile.ZipFile(io.BytesIO(raw_zip)) as archive:
+        manifest = read_content_backup_manifest(archive)
+        restored_files = {}
+        with transaction.atomic():
+            theme_count = restore_backup_themes(manifest.get("themes", []))
+            tag_count = restore_backup_tags(manifest.get("tags", []))
+            project_count = restore_backup_projects(manifest.get("projects", []))
+            theme_file_count = restore_backup_theme_files(archive, manifest.get("theme_files", []), restored_files)
+            document_count = restore_backup_project_documents(archive, manifest.get("project_documents", []), restored_files)
+    return {
+        "themes": theme_count,
+        "tags": tag_count,
+        "projects": project_count,
+        "theme_files": theme_file_count,
+        "project_documents": document_count,
+        "files": len(restored_files),
+    }
+
+
+def read_content_backup_manifest(archive):
+    try:
+        raw = archive.read("openmedailab-backup.json")
+    except KeyError as exc:
+        raise ValueError("备份包缺少 openmedailab-backup.json。") from exc
+    try:
+        manifest = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("备份清单不是合法 JSON。") from exc
+    if manifest.get("kind") != "openmedailab-content-backup":
+        raise ValueError("备份包类型不正确。")
+    if int(manifest.get("version") or 0) != 1:
+        raise ValueError("备份包版本不支持。")
+    return manifest
+
+
+def restore_backup_themes(items):
+    count = 0
+    for item in items:
+        slug = str(item.get("slug") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if not slug or not name:
+            raise ValueError("主题备份记录缺少 name 或 slug。")
+        Theme.objects.update_or_create(
+            slug=slug,
+            defaults={
+                "name": name,
+                "description": item.get("description") or "",
+                "cover_image": item.get("cover_image") or "",
+                "sort_order": int(item.get("sort_order") or 0),
+                "is_active": bool(item.get("is_active", True)),
+            },
+        )
+        count += 1
+    return count
+
+
+def restore_backup_tags(items):
+    count = 0
+    for item in items:
+        slug = str(item.get("slug") or "").strip()
+        name = str(item.get("name") or "").strip() or slug
+        if not slug:
+            continue
+        Tag.objects.update_or_create(slug=slug, defaults={"name": name})
+        count += 1
+    return count
+
+
+def restore_backup_projects(items):
+    count = 0
+    for item in items:
+        topic_id = backup_int(item.get("topic_id"), "课题 topic_id 不合法。")
+        theme = Theme.objects.filter(slug=str(item.get("theme_slug") or "").strip()).first()
+        project, _ = Project.objects.update_or_create(
+            topic_id=topic_id,
+            defaults={
+                "title": str(item.get("title") or "").strip() or f"课题 {topic_id}",
+                "title_en": item.get("title_en") or "",
+                "summary": item.get("summary") or "",
+                "problem_statement": item.get("problem_statement") or "",
+                "clinical_endpoint": item.get("clinical_endpoint") or "",
+                "existing_foundation": item.get("existing_foundation") or "",
+                "team_requirements": item.get("team_requirements") or "",
+                "project_progress": item.get("project_progress") or "",
+                "target_venue": item.get("target_venue") or "",
+                "theme": theme,
+                "stage": item.get("stage") if item.get("stage") in ProjectStage.values else ProjectStage.DRAFT,
+                "source_payload": item.get("source_payload") if isinstance(item.get("source_payload"), dict) else {},
+                "is_public": bool(item.get("is_public", False)),
+            },
+        )
+        tags = [Tag.objects.filter(slug=str(slug or "").strip()).first() for slug in item.get("tag_slugs", [])]
+        project.tags.set([tag for tag in tags if tag])
+        count += 1
+    return count
+
+
+def restore_backup_theme_files(archive, items, restored_files):
+    count = 0
+    for item in items:
+        theme = Theme.objects.filter(slug=str(item.get("theme_slug") or "").strip()).first()
+        if not theme:
+            raise ValueError("数据集说明记录引用了不存在的主题。")
+        path = str(item.get("path") or "").strip() or unique_dataset_description_path(theme, item.get("title") or "dataset")
+        if item.get("backup_file"):
+            restored_files[item["backup_file"]] = restore_backup_media_file(archive, item["backup_file"])
+        is_active = bool(item.get("is_active", True))
+        if is_active:
+            ThemeFile.objects.filter(theme=theme, is_active=True).exclude(path=path).update(is_active=False)
+        ThemeFile.objects.update_or_create(
+            theme=theme,
+            path=path,
+            defaults={
+                "section": item.get("section") or "数据集说明文件",
+                "file_type": normalize_theme_file_type(item.get("file_type") or ThemeFile.FileType.DATASET_META),
+                "title": item.get("title") or f"{theme.name} 数据集说明",
+                "description": item.get("description") or "",
+                "detail_pdf_title": item.get("detail_pdf_title") or "",
+                "detail_pdf_path": public_document_path_for_admin(item.get("detail_pdf_path") or ""),
+                "detail_pdf_hash": item.get("detail_pdf_hash") or restored_files.get(item.get("backup_file"), ""),
+                "sort_order": int(item.get("sort_order") or 0),
+                "is_active": is_active,
+            },
+        )
+        count += 1
+    return count
+
+
+def restore_backup_project_documents(archive, items, restored_files):
+    count = 0
+    for item in items:
+        topic_id = backup_int(item.get("project_topic_id"), "课题文档引用的课题编号不合法。")
+        project = Project.objects.filter(topic_id=topic_id).first()
+        if not project:
+            raise ValueError("课题文档引用了不存在的课题。")
+        path = public_document_path_for_admin(item.get("path") or "")
+        if not path:
+            raise ValueError("课题文档路径不合法。")
+        if item.get("backup_file"):
+            restored_files[item["backup_file"]] = restore_backup_media_file(archive, item["backup_file"])
+        document = ProjectDocument.objects.filter(project=project, path=path).first()
+        if not document:
+            document = ProjectDocument(project=project, path=path)
+        document.doc_type = normalize_project_document_type(item.get("doc_type"))
+        document.document_kind = normalize_project_document_kind(item.get("document_kind"))
+        document.title = str(item.get("title") or "").strip()[:255]
+        document.description = str(item.get("description") or "")
+        document.content_hash = item.get("content_hash") or restored_files.get(item.get("backup_file"), "")
+        document.save()
+        if document.document_kind == ProjectDocument.DocumentKind.DETAIL:
+            ProjectDocument.objects.filter(project=project, document_kind=ProjectDocument.DocumentKind.DETAIL).exclude(pk=document.pk).delete()
+        count += 1
+    return count
+
+
+def restore_backup_media_file(archive, archive_name):
+    normalized = safe_backup_archive_name(archive_name)
+    try:
+        member = archive.getinfo(normalized)
+    except KeyError as exc:
+        raise ValueError(f"备份包缺少文件：{normalized}") from exc
+    if member.is_dir():
+        raise ValueError(f"备份文件路径不合法：{normalized}")
+    relative = normalized.removeprefix("files/")
+    media_root = Path(settings.MEDIA_ROOT).expanduser().resolve()
+    destination = safe_child_path(media_root, relative, media_root, expect_parent=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    hasher = hashlib.sha256()
+    with archive.open(member) as source, destination.open("wb") as output:
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+            output.write(chunk)
+    return hasher.hexdigest()
+
+
+def safe_backup_archive_name(value):
+    raw = str(value or "").replace("\\", "/").strip()
+    parts = [part for part in raw.split("/") if part]
+    if not parts or parts[0] != "files" or any(part in {".", ".."} for part in parts):
+        raise ValueError(f"备份文件路径不合法：{raw}")
+    return "/".join(parts)
+
+
+def media_file_for_public_path(path):
+    value = str(path or "").strip().replace("\\", "/")
+    if not value:
+        return None
+    media_url = settings.MEDIA_URL.strip("/")
+    if value.startswith("/"):
+        value = value.lstrip("/")
+    if media_url and value.startswith(f"{media_url}/"):
+        relative = value[len(media_url) + 1 :]
+    elif value.startswith("media/"):
+        relative = value[len("media/") :]
+    else:
+        return None
+    media_root = Path(settings.MEDIA_ROOT).expanduser().resolve()
+    try:
+        return safe_child_path(media_root, relative, media_root)
+    except ValueError:
+        return None
+
+
+def backup_int(value, message):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(message) from exc
+    if parsed <= 0:
+        raise ValueError(message)
+    return parsed
+
+
+def require_user_project_document_access(request, project, action):
+    if has_capability(request.user, "manage_projects"):
+        return None
+    if project.created_by_id != request.user.id:
+        audit(
+            request.user,
+            action,
+            "Project",
+            project.id,
+            before=project_detail_payload(project),
+            status="failed",
+            error_code="permission_denied",
+            error_message="Permission denied.",
+        )
+        return fail("Permission denied.", status=403, code="permission_denied")
+    if project.stage == ProjectStage.ARCHIVED:
+        audit(
+            request.user,
+            action,
+            "Project",
+            project.id,
+            before=project_detail_payload(project),
+            status="failed",
+            error_code="user_project_stage_locked",
+            error_message="归档课题只能由管理员修改。",
+        )
+        return fail("归档课题只能由管理员修改。", status=422, code="user_project_stage_locked")
+    return None
 
 
 def require_project_owner_or_admin(request, project, action):
@@ -2791,24 +3071,34 @@ def viewer_state(user, project):
     interests = list(ProjectInterest.objects.filter(user=user, project=project).order_by("-updated_at"))
     claims = list(ProjectClaimIntent.objects.filter(user=user, project=project).order_by("-updated_at"))
     sponsors = list(SponsorIntent.objects.filter(user=user, project=project).order_by("-updated_at"))
+    active_interests = [item for item in interests if item.status in ACTIVE_VIEWER_INTERACTION_STATUSES]
+    active_claims = [item for item in claims if item.status in ACTIVE_VIEWER_INTERACTION_STATUSES]
+    active_sponsors = [item for item in sponsors if item.status in ACTIVE_VIEWER_INTERACTION_STATUSES]
     activity_labels = []
     if is_following:
         activity_labels.append("已收藏")
     activity_labels.extend(
-        f"参与：{interest.get_role_display()}（{interest.get_status_display()}）" for interest in interests
+        f"参与：{interest.get_role_display()}（{interest.get_status_display()}）" for interest in active_interests
     )
-    activity_labels.extend(f"{claim.get_claim_type_display()}（{claim.get_status_display()}）" for claim in claims)
-    activity_labels.extend(f"资助：{sponsor.get_sponsor_type_display()}（{sponsor.get_status_display()}）" for sponsor in sponsors)
+    activity_labels.extend(f"{claim.get_claim_type_display()}（{claim.get_status_display()}）" for claim in active_claims)
+    activity_labels.extend(f"资助：{sponsor.get_sponsor_type_display()}（{sponsor.get_status_display()}）" for sponsor in active_sponsors)
     profile = getattr(user, "profile", None)
     return {
         "uid": getattr(profile, "uid", None),
         "is_following": is_following,
         "score": score_payload(score) if score else None,
-        "interest_roles": [interest.role for interest in interests],
-        "claim_types": [claim.claim_type for claim in claims],
-        "sponsor_types": [sponsor.sponsor_type for sponsor in sponsors],
+        "interest_roles": [interest.role for interest in active_interests],
+        "claim_types": [claim.claim_type for claim in active_claims],
+        "sponsor_types": [sponsor.sponsor_type for sponsor in active_sponsors],
         "activity_labels": activity_labels,
     }
+
+
+def project_list_payload(project, user):
+    payload = project_summary_payload(project)
+    if getattr(user, "is_authenticated", False):
+        payload["viewer_state"] = viewer_state(user, project)
+    return payload
 
 
 def profile_form_initial(profile):
@@ -2978,13 +3268,19 @@ def project_import_payload(project):
 
 
 def project_documents_for(project):
-    return project.documents.all().order_by("created_at", "id")
+    return project.documents.all().order_by("document_kind", "created_at", "id")
 
 
 def normalize_project_document_type(doc_type):
     if doc_type in ProjectDocument.DocumentType.values:
         return doc_type
     return ProjectDocument.DocumentType.OTHER
+
+
+def normalize_project_document_kind(document_kind):
+    if document_kind in ProjectDocument.DocumentKind.values:
+        return document_kind
+    return ProjectDocument.DocumentKind.DETAIL
 
 
 def project_document_type_for_name(name):
@@ -3062,32 +3358,43 @@ def maybe_delete_managed_project_document_file(path):
         target.unlink()
 
 
-def file_space_base_root():
-    root = Path(getattr(settings, "OPENMEDAILAB_FILE_SPACE_ROOT", settings.MEDIA_ROOT / "theme-file-space"))
-    return root.expanduser().resolve()
+def theme_file_detail_pdf_root():
+    return (Path(settings.MEDIA_ROOT) / "theme-file-detail-pdfs").expanduser().resolve()
 
 
-def resolve_file_space_root(raw_directory, theme):
-    base = file_space_base_root()
-    value = (raw_directory or "").strip() or theme.slug
-    candidate = Path(value).expanduser()
-    if not candidate.is_absolute():
-        candidate = base / candidate
-    candidate = candidate.resolve()
-    if candidate != base and base not in candidate.parents:
-        raise ValueError(f"文件空间目录必须位于 {base} 之下。")
+def unique_theme_file_detail_pdf_destination(directory, file_name):
+    suffix = Path(file_name).suffix
+    stem = Path(file_name).stem or "dataset-detail"
+    candidate = (directory / file_name).resolve()
+    index = 2
+    while candidate.exists():
+        candidate = (directory / f"{stem}-{index}{suffix}").resolve()
+        index += 1
+    root = theme_file_detail_pdf_root()
+    if candidate.parent != root and root not in candidate.parent.parents:
+        raise ValueError("文件路径不能超出数据集说明 PDF 目录。")
     return candidate
 
 
-def theme_file_space_root(theme):
-    file_space = theme.file_space if isinstance(theme.file_space, dict) else {}
-    return resolve_file_space_root(file_space.get("server_directory") or theme.slug, theme)
+def theme_file_detail_pdf_for_public_path(path):
+    value = str(path or "").strip().lstrip("/")
+    media_url = settings.MEDIA_URL.strip("/")
+    if not media_url or not value.startswith(f"{media_url}/"):
+        return None
+    relative = value[len(media_url) + 1 :]
+    candidate = (Path(settings.MEDIA_ROOT) / relative).expanduser().resolve()
+    root = theme_file_detail_pdf_root()
+    if candidate != root and root in candidate.parents:
+        return candidate
+    return None
 
 
-def safe_file_space_path(theme, relative_path, expect_parent=False):
-    root = theme_file_space_root(theme)
-    root.mkdir(parents=True, exist_ok=True)
-    return safe_child_path(root, relative_path or "", root, expect_parent=expect_parent)
+def maybe_delete_managed_theme_file_detail_pdf(path, keep_path=""):
+    if not path or path == keep_path:
+        return
+    target = theme_file_detail_pdf_for_public_path(path)
+    if target and target.is_file():
+        target.unlink()
 
 
 def safe_child_path(parent, relative_path, root, expect_parent=False):
@@ -3097,13 +3404,8 @@ def safe_child_path(parent, relative_path, root, expect_parent=False):
     candidate = (parent / raw).resolve() if raw else parent.resolve()
     check = candidate.parent if expect_parent else candidate
     if check != root and root not in check.parents:
-        raise ValueError("文件路径不能超出文件空间根目录。")
+        raise ValueError("文件路径不能超出允许目录。")
     return candidate
-
-
-def safe_relative_upload_path(relative_path):
-    parts = [sanitize_file_name(part) for part in str(relative_path or "").replace("\\", "/").split("/") if part not in {"", ".", ".."}]
-    return "/".join(part for part in parts if part)
 
 
 def sanitize_file_name(name):
@@ -3113,39 +3415,7 @@ def sanitize_file_name(name):
     return value
 
 
-def relative_file_space_path(path, root):
-    try:
-        return path.resolve().relative_to(root.resolve()).as_posix()
-    except ValueError:
-        return ""
-
-
-def file_space_breadcrumbs(path, root):
-    relative = relative_file_space_path(path, root)
-    breadcrumbs = [{"name": "根目录", "path": ""}]
-    current = []
-    for part in [item for item in relative.split("/") if item]:
-        current.append(part)
-        breadcrumbs.append({"name": part, "path": "/".join(current)})
-    return breadcrumbs
-
-
-def file_space_entry(path, root):
-    stat = path.stat()
-    relative = relative_file_space_path(path, root)
-    is_dir = path.is_dir()
-    return {
-        "name": path.name,
-        "path": relative,
-        "type": "directory" if is_dir else "file",
-        "size": None if is_dir else stat.st_size,
-        "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-        "mime_type": "" if is_dir else (mimetypes.guess_type(path.name)[0] or "application/octet-stream"),
-        "public_path": "" if is_dir else public_file_space_path(path),
-    }
-
-
-def public_file_space_path(path):
+def public_media_path(path):
     media_root = Path(settings.MEDIA_ROOT).expanduser().resolve()
     try:
         return f"{settings.MEDIA_URL.rstrip('/')}/{path.resolve().relative_to(media_root).as_posix()}"
@@ -3153,54 +3423,15 @@ def public_file_space_path(path):
         return str(path)
 
 
-def theme_file_section_for_path(path):
-    parent = path.parent.name
-    return parent if parent and parent != path.name else "数据集文件"
-
-
-def theme_file_type_for_path(path):
-    mime_type = mimetypes.guess_type(path.name)[0] or ""
-    suffix = path.suffix.lower()
-    if mime_type.startswith("text/") or suffix in {".csv", ".tsv", ".xlsx", ".xls", ".json", ".parquet"}:
-        return ThemeFile.FileType.DATASET
-    if suffix in {".md", ".txt", ".pdf", ".doc", ".docx"}:
-        return ThemeFile.FileType.DATASET_META
-    return ThemeFile.FileType.OTHER
-
-
-def upsert_theme_file_for_path(theme, path, root):
-    public_path = public_file_space_path(path)
-    title = path.stem or path.name
-    file, _ = ThemeFile.objects.get_or_create(
-        theme=theme,
-        path=public_path,
-        defaults={
-            "section": theme_file_section_for_path(path),
-            "file_type": theme_file_type_for_path(path),
-            "title": title,
-            "description": "",
-            "is_active": True,
-        },
-    )
-    if not file.is_active or file.title != title:
-        file.title = title
-        file.is_active = True
-        file.section = file.section or theme_file_section_for_path(path)
-        file.file_type = file.file_type or theme_file_type_for_path(path)
-        file.save(update_fields=["title", "section", "file_type", "is_active", "updated_at"])
-    return file
-
-
-def sync_theme_file_after_rename(theme, old_path, new_path, root):
-    old_public_path = public_file_space_path(old_path)
-    new_public_path = public_file_space_path(new_path)
-    ThemeFile.objects.filter(theme=theme, path=old_public_path).update(path=new_public_path, title=new_path.stem or new_path.name, is_active=True)
-    if new_path.is_file():
-        upsert_theme_file_for_path(theme, new_path, root)
-
-
-def deactivate_theme_file_for_path(theme, public_path):
-    ThemeFile.objects.filter(theme=theme, path=public_path).update(is_active=False)
+def unique_dataset_description_path(theme, title):
+    slug = slugify(title or "dataset", allow_unicode=True) or "dataset"
+    base = f"dataset-descriptions/{slug}"
+    candidate = base
+    index = 2
+    while ThemeFile.objects.filter(theme=theme, path=candidate).exists():
+        candidate = f"{base}-{index}"
+        index += 1
+    return candidate
 
 
 def theme_from_payload(data, current=None):

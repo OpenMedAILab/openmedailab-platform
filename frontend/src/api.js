@@ -82,11 +82,28 @@ export async function requestForm(path, formData, options = {}) {
   return payload.data;
 }
 
+export async function requestDownload(path) {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "GET",
+    credentials: "include"
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    const message = payload?.error?.message || `请求失败：${response.status}`;
+    throw new ApiError(message, response, payload);
+  }
+
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const filename = filenameFromDisposition(disposition) || "openmedailab-content-backup.zip";
+  return { blob: await response.blob(), filename };
+}
+
 export const api = {
   meta: () => request("/api/meta/"),
   rbac: () => request("/api/rbac/"),
   projectSchema: () => request("/api/project-schema/"),
-  themeSpace: (slug) => request(`/api/themes/${encodeURIComponent(slug)}/space/`),
+  themeDatasets: (slug) => request(`/api/themes/${encodeURIComponent(slug)}/datasets/`),
   me: () => request("/api/me/"),
   dashboard: () => request("/api/me/dashboard/"),
   profile: (payload) => request("/api/me/profile/", { method: "PATCH", body: payload }),
@@ -101,6 +118,8 @@ export const api = {
   createProject: (payload) => request("/api/projects/", { method: "POST", body: payload }),
   updateProject: (id, payload) => request(`/api/projects/${id}/`, { method: "PATCH", body: payload }),
   deleteProject: (id) => request(`/api/projects/${id}/`, { method: "DELETE", body: {} }),
+  uploadProjectDocuments: (formData) => requestForm("/api/project-documents/upload/", formData),
+  deleteProjectDocument: (id) => request(`/api/project-documents/${id}/`, { method: "DELETE", body: {} }),
   follow: (id) => request(`/api/projects/${id}/follow/`, { method: "POST", body: {} }),
   unfollow: (id) => request(`/api/projects/${id}/unfollow/`, { method: "POST", body: {} }),
   score: (id, payload) => request(`/api/projects/${id}/score/`, { method: "POST", body: payload }),
@@ -119,15 +138,7 @@ export const api = {
   adminThemeFiles: (params = {}) => request(`/api/admin/theme-files/?${new URLSearchParams(cleanParams(params))}`),
   adminCreateThemeFile: (payload) => request("/api/admin/theme-files/", { method: "POST", body: payload }),
   adminUpdateThemeFile: (id, payload) => request(`/api/admin/theme-files/${id}/`, { method: "PATCH", body: payload }),
-  adminDeleteThemeFile: (id) => request(`/api/admin/theme-files/${id}/`, { method: "DELETE", body: {} }),
-  adminFileSpace: (params = {}) => request(`/api/admin/file-space/?${new URLSearchParams(cleanParams(params))}`),
-  adminReadFileSpaceFile: (params = {}) => request(`/api/admin/file-space/file/?${new URLSearchParams(cleanParams(params))}`),
-  adminUpdateThemeFileSpaceRoot: (id, payload) => request(`/api/admin/themes/${id}/file-space-root/`, { method: "PATCH", body: payload }),
-  adminCreateFileSpaceDirectory: (payload) => request("/api/admin/file-space/directories/", { method: "POST", body: payload }),
-  adminCreateFileSpaceFile: (payload) => request("/api/admin/file-space/files/", { method: "POST", body: payload }),
-  adminUpdateFileSpaceItem: (payload) => request("/api/admin/file-space/", { method: "PATCH", body: payload }),
-  adminDeleteFileSpaceItem: (payload) => request("/api/admin/file-space/", { method: "DELETE", body: payload }),
-  adminUploadFileSpaceFiles: (formData) => requestForm("/api/admin/file-space/upload/", formData),
+  adminUploadThemeFileDetailPdf: (id, formData) => requestForm(`/api/admin/theme-files/${id}/detail-pdf/`, formData),
   adminUsers: (params = {}) => request(`/api/admin/users/?${new URLSearchParams(cleanParams(params))}`),
   adminResetUserPassword: (uid) => request(`/api/admin/users/${encodeURIComponent(uid)}/reset-password/`, { method: "POST", body: {} }),
   adminInteractions: (params = {}) => request(`/api/admin/interactions/?${new URLSearchParams(cleanParams(params))}`),
@@ -140,6 +151,8 @@ export const api = {
   reviewAdminContribution: (id, payload) => request(`/api/admin/contributions/${id}/review/`, { method: "PATCH", body: payload }),
   adminCredits: (params = {}) => request(`/api/admin/credits/?${new URLSearchParams(cleanParams(params))}`),
   adminAuditLogs: (params = {}) => request(`/api/admin/audit-logs/?${new URLSearchParams(cleanParams(params))}`),
+  adminExportContentBackup: () => requestDownload("/api/admin/content-backup/export/"),
+  adminRestoreContentBackup: (formData) => requestForm("/api/admin/content-backup/restore/", formData),
   adminProjects: (params = {}) => request(`/api/admin/projects/?${new URLSearchParams(cleanParams(params))}`),
   adminProject: (id) => request(`/api/admin/projects/${id}/`),
   adminImportProjects: (payload) => request("/api/admin/projects/import-json/", { method: "POST", body: payload }),
@@ -147,11 +160,14 @@ export const api = {
   adminUpdateProject: (id, payload) => request(`/api/admin/projects/${id}/`, { method: "PATCH", body: payload }),
   adminDeleteProject: (id) => request(`/api/admin/projects/${id}/`, { method: "DELETE", body: {} }),
   adminBulkArchiveProjects: (payload) => request("/api/admin/projects/bulk-archive/", { method: "POST", body: payload }),
-  adminProjectDocuments: (params = {}) => request(`/api/admin/project-documents/?${new URLSearchParams(cleanParams(params))}`),
   adminUploadProjectDocuments: (formData) => requestForm("/api/admin/project-documents/upload/", formData),
-  adminUpdateProjectDocument: (id, payload) => request(`/api/admin/project-documents/${id}/`, { method: "PATCH", body: payload }),
   adminDeleteProjectDocument: (id) => request(`/api/admin/project-documents/${id}/`, { method: "DELETE", body: {} })
 };
+
+function filenameFromDisposition(disposition) {
+  const match = disposition.match(/filename="?([^";]+)"?/i);
+  return match ? match[1] : "";
+}
 
 function cleanParams(params) {
   return Object.fromEntries(Object.entries(params).filter(([, value]) => value !== "" && value !== null && value !== undefined));

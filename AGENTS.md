@@ -1,12 +1,12 @@
 # AGENTS.md - OpenMedAI Lab Agent 开工导航与系统基准文档
 
-更新时间：2026-06-13
+更新时间：2026-06-14
 
 文件位置：项目根目录 `AGENTS.md`
 
 代码基准：以当前仓库代码为准；若本文档与当前代码冲突，必须先核对代码，再同步修正文档。
 
-当前产品版本文件：`VERSION = 0.7.1`
+当前产品版本文件：`VERSION = 0.7.4`
 
 本文档用途：后续任何 agent 在执行任何任务前，必须先读本文档，再按“任务定位索引”打开必要代码文件。目标是避免每次从零通读完整仓库，同时保证生命周期、API、数据库、权限和前端入口不被改乱。
 
@@ -33,7 +33,7 @@
 | 收藏、参与、认领、资助、撤回 | 2.4、3.4、4.4、5.3 |
 | 我的空间、我的任务、任务结果 | 2.5、3.5、4.5、6.2 |
 | 管理员工作台、任务审批、任务管理 | 2.6、3.5、4.6、6.3 |
-| 主题、文件空间、课题文档 | 2.7、3.6、4.7、5.2 |
+| 主题、数据集说明 PDF、课题 PDF | 2.7、3.6、4.7、5.2 |
 | 审计日志、异常、请求 ID | 2.8、3.7、4.8、5.5 |
 | 弹窗遮挡、响应式、顶部导航、悬浮卡 | 2.9、6、7.3 |
 | 版本号、更新日志弹窗 | 2.10、8 |
@@ -71,16 +71,18 @@
 | 目的 | 主要文件 | 重点位置 |
 | --- | --- | --- |
 | 课题和阶段模型 | `projects/models.py` | `ProjectStage`、`Project`、`ProjectTag`、`ProjectDocument` |
-| 公开课题 API | `api/ninja_api.py` | `project_list`、`project_detail`、`project_status_card`、`theme_space` |
+| 公开课题 API | `api/ninja_api.py` | `project_list`、`project_detail`、`project_status_card`、`theme_datasets` |
 | 搜索和可见性辅助 | `api/ninja_api.py` | `project_search_q`、`related_project_search_q`、`viewer_state`、`status_uid_groups_for_project` |
-| 课题序列化 | `api/serializers.py` | `project_summary_payload`、`project_detail_payload`、`public_project_detail_payload`、`theme_space_payload` |
-| 前端课题库加载 | `frontend/src/main.js` | `loadProjects`、`projectListRequestParams`、`loadProject`、`openProjectPreview`、`loadThemeSpace` |
+| 课题序列化 | `api/serializers.py` | `project_summary_payload`、`project_detail_payload`、`public_project_detail_payload`、`theme_dataset_payload` |
+| 前端课题库加载 | `frontend/src/main.js` | `loadProjects`、`projectListRequestParams`、`loadProject`、`openProjectPreview`、`loadProjectThemeDatasets` |
 | 前端状态卡 | `frontend/src/main.js`、`frontend/src/styles.css` | 状态卡渲染、悬浮定位、小屏防遮挡 |
 | 测试 | `api/tests.py`、`frontend/src/uiPlacement.test.js` | 公开过滤、状态卡 UID 分组、响应式 |
 
 产品规则：
 
 - 访客和普通公开列表只能看到 `is_public = true` 且阶段为开放招募、组队中、进行中、暂停的课题。
+- 已登录用户读取公开课题列表时，每个课题应带 `viewer_state`，用于从数据库恢复收藏、点赞、参与、认领、资助等按钮状态；已撤回关系不能继续算作当前激活状态。
+- 公开课题列表默认按课题编号 `topic_id` 正序；“最新编号”按 `topic_id` 倒序；“最近更新”才按 `updated_at` 排序，避免编辑课题打乱编号顺序。
 - 草稿和归档不进入公开课题库、公开详情、公开主题空间。
 - 状态卡只展示阶段、我的关系、按收藏/参与/认领/资助分组的 UID。
 - 涉及他人信息时只展示 UID，不展示用户名、邮箱、真实姓名。
@@ -172,26 +174,29 @@
 - 管理员用户管理中，平台管理员固定第一行，其他用户按 UID 稳定排序。
 - 历史 `ProjectTask` 接口仍存在，但不要把“拆任务、分配 UID、任务奖励”恢复成主流程。
 
-### 2.7 主题、主题文件空间、课题文档
+### 2.7 主题、数据集说明 PDF、课题 PDF
 
 | 目的 | 主要文件 | 重点位置 |
 | --- | --- | --- |
 | 数据模型 | `projects/models.py` | `Theme`、`ThemeFile`、`ProjectDocument` |
-| 公开主题空间 | `api/ninja_api.py` | `theme_space` |
+| 公开主题数据集说明 | `api/ninja_api.py` | `theme_datasets` |
 | 管理员主题 API | `api/ninja_api.py` | `admin_theme_list/create/update/delete` |
-| 主题文件 API | `api/ninja_api.py` | `admin_theme_file_list/create/update/delete` |
-| 文件空间 API | `api/ninja_api.py` | `admin_file_space_list`、`admin_file_space_read_file`、`admin_theme_file_space_root_update`、`admin_file_space_create_directory`、`admin_file_space_create_file`、`admin_file_space_update`、`admin_file_space_delete`、`admin_file_space_upload` |
-| 课题文档 API | `api/ninja_api.py` | `admin_project_document_list`、`admin_project_document_upload/update/delete` |
-| 路径安全 | `api/ninja_api.py` | `safe_file_space_path`、`theme_file_space_root`、`resolve_file_space_root`、`sanitize_file_name` |
-| 前端页面 | `frontend/src/main.js` | `loadThemeSpace`、`loadProjectThemeSpace`、`loadThemeFiles`、`loadAdminFileSpace`、`openFileSpaceEntry`、`openFileSpaceEditor` |
-| 测试 | `api/tests.py`、`projects/tests.py` | 路径安全、公开过滤、主题文件展示 |
+| 主题数据集说明 API | `api/ninja_api.py` | `admin_theme_file_list/create/update/delete`、`admin_theme_file_detail_pdf_upload` |
+| 课题 PDF API | `api/ninja_api.py` | `admin_project_document_list`、`admin_project_document_upload/update/delete` |
+| 数据集说明 PDF API | `api/ninja_api.py` | `admin_theme_file_detail_pdf_upload` |
+| 路径安全 | `api/ninja_api.py` | `safe_child_path`、`project_document_root`、`theme_file_detail_pdf_root`、`sanitize_file_name` |
+| 前端页面 | `frontend/src/main.js` | `loadProjectThemeDatasets`、`loadThemeFiles`、`saveThemeFile`、`uploadThemeFileDetailPdf`、`uploadProjectDocuments` |
+| 测试 | `api/tests.py`、`projects/tests.py` | PDF 上传、公开过滤、主题数据集说明展示 |
 
 产品规则：
 
-- 主题文件空间是主题级数据资产空间，不是单个课题原始文档仓库。
-- 课题详情中“主题文件空间”展示该课题所属主题的文件域文件或其子集。
-- 单个课题原文、PDF、公开页面属于 `ProjectDocument`。
-- 公开文件空间不得展示草稿/归档课题或本机敏感路径。
+- `Theme` 是主题分类；首页主题、筛选主题和管理端主题列表都来自数据库中的 `Theme`。
+- 不再提供目录浏览、目录上传或服务器数据集存储；管理端不维护目录式文件管理模块。
+- `ThemeFile` 表示一个主题下的数据集说明记录，只保存数据集名称、说明和一份说明 PDF，不保存原始数据集。
+- 主题的数据集说明 PDF 使用 `ThemeFile.detail_pdf_path` 绑定，创建记录时后端自动生成内部 `path`。
+- 单个课题只维护一份主 PDF 详情：`ProjectDocument(document_kind="detail", doc_type="pdf")`。重新上传时替换旧主 PDF。
+- 首页课题卡和课题弹窗可预览课题主 PDF；课题详情不再展示 Markdown 原始文档模块。
+- 公开 `/api/themes/{slug}/datasets/` 只返回启用主题、启用的数据集说明记录，以及公开且未归档的关联课题。
 
 ### 2.8 审计日志、异常、请求 ID、错误反馈
 
@@ -254,9 +259,9 @@
 
 | 角色 | 可做什么 | 不可做什么 |
 | --- | --- | --- |
-| 访客 | 浏览公开课题、公开详情、公开主题文件空间、登录注册 | 收藏、点赞、参与、认领、资助、提交结果、进入管理页 |
+| 访客 | 浏览公开课题、公开详情、主题数据集说明 PDF、登录注册 | 收藏、点赞、参与、认领、资助、提交结果、进入管理页 |
 | 普通用户 | 上传课题、管理自己上传的课题、收藏、点赞、参与、认领、资助、撤回、提交任务结果、维护资料 | 管理他人课题、超过每日上传上限、审批资助、审核任务结果、查看敏感个人信息 |
-| 平台管理员 | 管理全站用户、主题、文件空间、课题、资助审批、任务结果审核、审计日志、密码恢复 | 通过前端创建第二个管理员、审批参与/认领、恢复邮箱找回密码主流程 |
+| 平台管理员 | 管理全站用户、主题、数据集说明 PDF、课题、资助审批、任务结果审核、审计日志、密码恢复 | 通过前端创建第二个管理员、审批参与/认领、恢复邮箱找回密码主流程 |
 
 ### 3.2 普通用户生命周期
 
@@ -352,19 +357,19 @@ stateDiagram-v2
 - 管理员审核任务结果时不默认触发积分奖励。
 - 若将来重新启用积分或细任务，必须先更新本文档和验收标准。
 
-### 3.6 主题、文件空间、课题文档
+### 3.6 主题、数据集说明 PDF、课题 PDF
 
 - `Theme` 是课题所属主题。
-- `ThemeFile` 是主题级文件域资产。
-- `ProjectDocument` 是单个课题的 Markdown、PDF、公开页面等文档。
-- 课题详情可展示主题文件空间和课题原始文档，但二者不要混淆。
+- `ThemeFile` 是主题级数据集说明记录，面向数据集说明 PDF，不存原始数据集目录。
+- `ProjectDocument` 当前主流程只使用 `document_kind="detail"`、`doc_type="pdf"`，表示单个课题主 PDF。
+- 课题详情可展示课题主 PDF 和所属主题的数据集说明 PDF，二者不要混淆。
 
 ### 3.7 审计、异常、日志
 
 系统所有改变数据库或业务状态的操作都应可追溯：
 
 - 登录、退出、注册、强制改密、密码恢复。
-- 用户资料、课题、主题、文件空间、课题文档。
+- 用户资料、课题、主题、数据集说明 PDF、课题 PDF。
 - 收藏、点赞、参与、认领、资助、撤回。
 - 任务结果提交和审核。
 - 批量导入、归档、删除、后台管理操作。
@@ -400,10 +405,10 @@ stateDiagram-v2
 | --- | --- | --- |
 | `GET` | `/api/meta/` | 元数据、阶段、版本 |
 | `GET` | `/api/project-schema/` | 课题字段契约 |
-| `GET` | `/api/projects/` | 公开课题列表 |
+| `GET` | `/api/projects/` | 公开课题列表；登录态返回每个课题的 `viewer_state` |
 | `GET` | `/api/projects/{id}/` | 公开课题详情 |
 | `GET` | `/api/projects/{id}/status-card/` | 课题状态卡 |
-| `GET` | `/api/themes/{slug}/space/` | 公开主题文件空间 |
+| `GET` | `/api/themes/{slug}/datasets/` | 公开主题数据集说明 PDF |
 
 ### 4.3 User Project Write APIs
 
@@ -449,9 +454,9 @@ stateDiagram-v2
 | `GET/POST/PATCH/DELETE` | `/api/admin/projects/`、`/api/admin/projects/{id}/` | 全站课题管理 |
 | `POST` | `/api/admin/projects/bulk-archive/` | 批量归档 |
 | `GET/POST/PATCH/DELETE` | `/api/admin/themes/` | 主题管理 |
-| `GET/POST/PATCH/DELETE` | `/api/admin/theme-files/` | 主题文件记录管理 |
-| `GET/POST/PATCH/DELETE` | `/api/admin/file-space/` 相关路径 | 文件空间管理 |
-| `GET/POST/PATCH/DELETE` | `/api/admin/project-documents/` 相关路径 | 课题文档管理 |
+| `GET/POST/PATCH/DELETE` | `/api/admin/theme-files/` | 主题数据集说明记录管理 |
+| `POST` | `/api/admin/theme-files/{file_id}/detail-pdf/` | 上传数据集说明 PDF |
+| `GET/POST/PATCH/DELETE` | `/api/admin/project-documents/` 相关路径 | 课题主 PDF 管理 |
 | `GET` | `/api/admin/audit-logs/` | 审计日志 |
 
 ### 4.7 Legacy / Compatibility APIs
@@ -561,7 +566,6 @@ stateDiagram-v2
 | --- | --- |
 | `#/` | 课题库首页 |
 | `#/project/{id}` | 课题详情 |
-| `#/space` / `#/space/{slug}` | 文件空间 |
 | `#/dashboard` | 我的空间 |
 | `#/admin` | 管理员工作台 |
 | `#/login` | 登录 |
@@ -724,7 +728,7 @@ rg -n 'TO[D]O|TB[D]|FIX[M]E|待[定]|不确[定]' AGENTS.md
 涉及前端时，至少用浏览器覆盖：
 
 1. 访客打开课题库，搜索和筛选有反馈。
-2. 访客打开课题详情和主题文件空间。
+2. 访客打开课题详情，预览课题主 PDF，查看主题数据集说明 PDF。
 3. 用户登录、收藏、取消收藏。
 4. 用户参与、认领、资助，观察状态反馈。
 5. 用户进入我的空间，查看我的任务、我上传、个人资料。

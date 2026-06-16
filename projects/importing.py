@@ -5,7 +5,6 @@ from django.db.models import Max, Q
 from django.utils import timezone
 from django.utils.text import slugify
 
-from .contracts import DEFAULT_THEME_FILE_SPACE
 from .models import ImportLog, Project, ProjectStage, ProjectTag, Tag, Theme
 
 
@@ -75,10 +74,9 @@ def sync_themes(themes):
         theme.slug = item.get("slug") or theme.slug
         theme.description = item.get("description", "")
         theme.cover_image = item.get("cover_image", "")
-        theme.file_space = {**DEFAULT_THEME_FILE_SPACE, **(item.get("file_space") or {})}
         theme.sort_order = item.get("sort_order", order)
         theme.is_active = item.get("is_active", True)
-        theme.save(update_fields=["slug", "description", "cover_image", "file_space", "sort_order", "is_active", "updated_at"])
+        theme.save(update_fields=["slug", "description", "cover_image", "sort_order", "is_active", "updated_at"])
 
 
 def upsert_project(item, source_label="api-json", allow_create_theme=True, created_by=None):
@@ -163,12 +161,10 @@ def theme_from_item(item, allow_create_theme=True):
         name = theme_value.get("name") or theme_value.get("slug") or "未分类"
         slug = theme_value.get("slug")
         description = theme_value.get("description", "")
-        file_space = theme_value.get("file_space") or {}
     else:
         name = str(theme_value)
         slug = None
         description = ""
-        file_space = {}
     if not name.strip():
         raise ValueError("theme is required")
     theme = None
@@ -183,9 +179,6 @@ def theme_from_item(item, allow_create_theme=True):
     else:
         created = False
     changed = False
-    if created or not theme.file_space:
-        theme.file_space = {**DEFAULT_THEME_FILE_SPACE, **file_space}
-        changed = True
     if slug and theme.slug != slug:
         theme.slug = slug
         changed = True
@@ -193,7 +186,7 @@ def theme_from_item(item, allow_create_theme=True):
         theme.description = description
         changed = True
     if changed:
-        theme.save(update_fields=["slug", "description", "file_space", "updated_at"])
+        theme.save(update_fields=["slug", "description", "updated_at"])
     return theme
 
 

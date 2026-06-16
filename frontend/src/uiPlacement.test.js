@@ -6,19 +6,36 @@ const mainSource = readFileSync(new URL("./main.js", import.meta.url), "utf8");
 const stylesSource = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 const apiSource = readFileSync(new URL("./api.js", import.meta.url), "utf8");
 const indexSource = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
-test("project modal uses an in-modal toast instead of the global page toast", () => {
-  assert.match(mainSource, /<div v-if="state\.toast && !state\.preview\.open" class="toast">/);
-  assert.match(mainSource, /<div v-if="state\.toast" class="toast modal-toast">/);
-  assert.match(stylesSource, /\.project-modal\s*\{[^}]*position:\s*relative;/s);
-  assert.match(stylesSource, /\.modal-toast\s*\{[^}]*position:\s*absolute;/s);
+test("legacy project detail modal state and styles are removed", () => {
+  assert.match(mainSource, /<div v-if="state\.toast" class="toast">/);
+  assert.doesNotMatch(mainSource, /state\.preview/);
+  assert.doesNotMatch(mainSource, /state\.currentProject/);
+  assert.doesNotMatch(mainSource, /openProjectPreview/);
+  assert.doesNotMatch(mainSource, /closeProjectPreview/);
+  assert.doesNotMatch(mainSource, /toggleProjectPreviewSize/);
+  assert.doesNotMatch(mainSource, /class="project-modal/);
+  assert.doesNotMatch(stylesSource, /\.project-modal/);
+  assert.doesNotMatch(stylesSource, /\.project-modal-backdrop/);
 });
 
-test("theme space navigation closes an open project preview modal", () => {
-  assert.match(
-    mainSource,
-    /function selectSpace\(slug\)\s*\{\s*if \(state\.preview\.open\) \{\s*state\.preview\.open = false;\s*state\.preview\.maximized = false;\s*\}\s*navigate\("space", \{ slug \}\);/s
-  );
+test("project pdf actions open in a new window and still support download", () => {
+  assert.doesNotMatch(mainSource, /state\.preview\.pdfMode/);
+  assert.doesNotMatch(mainSource, /openProjectPreview/);
+  assert.doesNotMatch(mainSource, /class="project-pdf-preview"/);
+  assert.doesNotMatch(mainSource, /<iframe[^>]+课题PDF预览/);
+  assert.doesNotMatch(mainSource, /function projectDetailHref/);
+  assert.doesNotMatch(mainSource, /activeView === 'project'/);
+  assert.doesNotMatch(mainSource, /parts\[0\] === "project"/);
+  assert.match(mainSource, /function projectPdfHref\(project\)/);
+  assert.match(mainSource, /class="project-title-link" :href="projectPdfHref\(project\)" target="_blank" rel="noopener"/);
+  assert.match(mainSource, />查看PDF</);
+  assert.match(mainSource, />下载PDF</);
+  assert.match(mainSource, /target="_blank"\s+rel="noopener"/);
+  assert.match(mainSource, /documentHref\(primaryProjectDocument\(project\)\)"\s+download/);
+  assert.doesNotMatch(mainSource, /function selectSpace\(slug\)/);
+  assert.doesNotMatch(mainSource, /navigate\("space"/);
 });
 
 test("route changes close workspace and admin modal overlays", () => {
@@ -57,11 +74,10 @@ test("topbar account actions are consolidated into the profile menu", () => {
   assert.match(mainSource, /@click="logout\(\); closeProfileMenu\(\); \$event\.currentTarget\.blur\(\)"/);
 });
 
-test("project modal and detail header have small-screen overflow guards", () => {
-  assert.match(stylesSource, /\.project-modal\s*\{[\s\S]*?width:\s*min\(1120px,\s*calc\(100vw - 32px\)\);/);
-  assert.match(stylesSource, /\.project-modal-header h2\s*\{[\s\S]*?white-space:\s*normal;[\s\S]*?overflow-wrap:\s*anywhere;/);
-  assert.match(stylesSource, /\.detail-header h1[\s\S]*?\{[\s\S]*?overflow-wrap:\s*anywhere;/);
-  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-modal-backdrop\s*\{[\s\S]*?padding:\s*8px;/);
+test("project cards and headers keep small-screen overflow guards", () => {
+  assert.match(stylesSource, /\.project-title-link\s*\{[\s\S]*?overflow-wrap:\s*anywhere;/);
+  assert.match(stylesSource, /\.section-head h1\s*\{[\s\S]*?overflow-wrap:\s*anywhere;/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.section-head h1\s*\{[\s\S]*?font-size:\s*30px;/);
 });
 
 test("small-screen tab and chip rows wrap instead of hiding content horizontally", () => {
@@ -90,17 +106,45 @@ test("modal overlays lock the page scroll behind dialogs", () => {
   assert.match(stylesSource, /body\.modal-open\s*\{[\s\S]*?overflow:\s*hidden;/);
 });
 
-test("admin file space management exposes a file-manager workflow", () => {
-  assert.match(mainSource, /文件空间管理/);
-  assert.match(mainSource, /state\.admin\.fileManager/);
-  assert.match(mainSource, /handleFileSpaceUpload/);
-  assert.match(mainSource, /webkitdirectory directory multiple/);
-  assert.match(stylesSource, /\.file-manager-layout\s*\{/);
-  assert.match(apiSource, /adminFileSpace/);
-  assert.match(apiSource, /adminUploadFileSpaceFiles/);
+test("admin theme management exposes dataset description pdf workflow", () => {
+  assert.match(mainSource, />主题管理<\/button>/);
+  assert.match(mainSource, /主题配置、首页筛选和数据集说明 PDF 都在这里统一维护。/);
+  assert.match(mainSource, />新增主题</);
+  assert.match(mainSource, /state\.admin\.themeFormOpen/);
+  assert.match(mainSource, /adminThemeDatasetFile\(theme\)/);
+  assert.match(mainSource, /数据集说明 PDF/);
+  assert.match(mainSource, /一个主题只维护一份数据集说明 PDF/);
+  assert.match(mainSource, /uploadThemeFileDetailPdf/);
+  assert.doesNotMatch(mainSource, /新增说明/);
+  assert.doesNotMatch(mainSource, /保存说明/);
+  assert.match(apiSource, /themeDatasets/);
+  assert.match(apiSource, /adminUploadThemeFileDetailPdf/);
+  assert.doesNotMatch(mainSource, /文件空间管理/);
+  assert.doesNotMatch(mainSource, /state\.admin\.fileManager/);
+  assert.doesNotMatch(mainSource, /handleFileSpaceUpload/);
+  assert.doesNotMatch(apiSource, /adminFileSpace/);
+});
+
+test("admin backup restore is exposed as a dedicated management tab", () => {
+  assert.match(mainSource, /state\.admin\.activeTab === 'backup'/);
+  assert.match(mainSource, />备份恢复<\/button>/);
+  assert.match(mainSource, /function exportContentBackup\(\)/);
+  assert.match(mainSource, /function restoreContentBackup\(\)/);
+  assert.match(mainSource, /adminExportContentBackup/);
+  assert.match(mainSource, /adminRestoreContentBackup/);
+  assert.match(mainSource, /用户账号、协作记录和审计日志不会被恢复包覆盖/);
+  assert.match(stylesSource, /\.backup-action-grid\s*\{/);
+  assert.match(apiSource, /content-backup\/export/);
+  assert.match(apiSource, /content-backup\/restore/);
 });
 
 test("homepage search toolbar is lifted and visually emphasized", () => {
+  assert.match(mainSource, /sort:\s*"project_id"/);
+  assert.match(mainSource, /<option value="project_id">编号顺序<\/option>/);
+  assert.match(mainSource, /<option value="newest">最新编号<\/option>/);
+  assert.match(mainSource, /<option value="updated">最近更新<\/option>/);
+  assert.match(mainSource, /state\.filters\.sort === "newest"[\s\S]*?projectTopicSortValue\(b\) - projectTopicSortValue\(a\)/);
+  assert.match(mainSource, /return rows\.sort\(\(a, b\) => projectTopicSortValue\(a\) - projectTopicSortValue\(b\)\);/);
   assert.match(stylesSource, /\.toolbar\s*\{[\s\S]*?margin:\s*-4px 0 22px;[\s\S]*?padding:\s*16px;[\s\S]*?border-radius:\s*12px;/);
   assert.match(stylesSource, /\.toolbar input,\s*\.toolbar select\s*\{[\s\S]*?min-height:\s*46px;[\s\S]*?border-radius:\s*10px;/);
   assert.match(stylesSource, /\.toolbar \.primary-button\s*\{[\s\S]*?min-height:\s*58px;[\s\S]*?border-radius:\s*10px;/);
@@ -113,7 +157,8 @@ test("homepage theme selector uses image-backed topic cards", () => {
   assert.match(mainSource, /class="theme-chip topic-theme-card"/);
   assert.match(mainSource, /homeThemeCards/);
   assert.match(mainSource, /topicThemeCardStyle\(theme\)/);
-  assert.match(mainSource, /全部课题/);
+  assert.doesNotMatch(mainSource, /<span>全部课题<\/span>/);
+  assert.doesNotMatch(mainSource, /topicThemeCardStyle\(\)/);
   assert.match(mainSource, /AntiVEGF/);
   assert.match(mainSource, /AMD/);
   assert.match(mainSource, /阴道镜/);
@@ -121,15 +166,25 @@ test("homepage theme selector uses image-backed topic cards", () => {
   assert.match(mainSource, /AntiVEGF_img\.png/);
   assert.match(mainSource, /ROP\.png/);
   assert.match(mainSource, /Yindaojing\.png/);
+  assert.doesNotMatch(mainSource, /synthetic:\s*true/);
   assert.match(stylesSource, /\.topic-theme-strip\s*\{[\s\S]*?grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(136px,\s*1fr\)\);/);
   assert.match(stylesSource, /\.topic-theme-card\s*\{[\s\S]*?min-height:\s*82px;/);
   assert.match(stylesSource, /\.topic-theme-card\s*\{[\s\S]*?display:\s*flex;[\s\S]*?background-size:\s*cover;/);
 });
 
-test("workspace lifecycle UI exposes user/admin spaces and compact expandable project cards", () => {
+test("workspace lifecycle UI exposes user/admin spaces and always-expanded project cards", () => {
   assert.match(mainSource, /label:\s*"我的空间"/);
   assert.match(mainSource, /workspace-tabs/);
   assert.match(mainSource, />我的任务<\/button>/);
+  assert.match(mainSource, />我的上传<\/button>/);
+  assert.doesNotMatch(mainSource, /function uploadMyProjectDocument\(\)/);
+  assert.match(mainSource, /api\.uploadProjectDocuments/);
+  assert.match(mainSource, /setMyProjectDocumentFile/);
+  assert.match(mainSource, /function uploadProjectDocumentForForm\(form,\s*uploadMethod,\s*options = \{\}\)/);
+  assert.match(mainSource, /uploadProjectDocumentForForm\(state\.myProjectForm,\s*api\.uploadProjectDocuments,[\s\S]*?projectId:\s*savedProject\.id,[\s\S]*?silent:\s*true/);
+  assert.match(mainSource, /可在这里选择 PDF，保存课题时自动上传。/);
+  assert.match(mainSource, /PDF 会随课题一起上传或替换。/);
+  assert.match(apiSource, /project-documents\/upload/);
   assert.doesNotMatch(mainSource, />我的申请<\/button>/);
   assert.doesNotMatch(mainSource, />我的任务结果<\/button>/);
   assert.doesNotMatch(mainSource, />我的贡献<\/button>/);
@@ -140,9 +195,11 @@ test("workspace lifecycle UI exposes user/admin spaces and compact expandable pr
   assert.match(mainSource, /state\.admin\.activeTab === 'audit'/);
   assert.doesNotMatch(mainSource, /state\.admin\.activeTab === 'tasks'/);
   assert.doesNotMatch(mainSource, /state\.admin\.activeTab === 'credits'/);
-  assert.match(mainSource, /toggleProjectExpansion\(project\)/);
   assert.match(mainSource, /projectSummaryText\(project\)/);
-  assert.match(mainSource, /展开摘要和详情/);
+  assert.doesNotMatch(mainSource, /toggleProjectExpansion\(project\)/);
+  assert.doesNotMatch(mainSource, /展开摘要和详情/);
+  assert.match(mainSource, /class="project-expanded-detail"/);
+  assert.match(mainSource, /projectCreatorLabel\(project\)/);
   assert.doesNotMatch(mainSource, /project-status-popover/);
   assert.doesNotMatch(mainSource, /openProjectStatusCard\(project\)/);
   assert.match(stylesSource, /\.workspace-tabs\s*\{/);
@@ -161,47 +218,63 @@ test("project cards keep compact summary UI without hover status styles", () => 
   assert.match(mainSource, /projectStartupText\(project\)/);
   assert.match(mainSource, /interactionButtonActive\('like', project\)/);
   assert.match(mainSource, /interactionButtonActive\('participation', project\)/);
+  assert.match(mainSource, /interactionButtonActive\('lead', project\)/);
   assert.match(mainSource, /interactionButtonActive\('sponsor', project\)/);
+  assert.match(mainSource, />thumb_up<\/span>/);
+  assert.match(mainSource, />star<\/span>/);
+  assert.match(mainSource, />groups<\/span>/);
+  assert.match(mainSource, />supervisor_account<\/span>/);
+  assert.match(mainSource, />volunteer_activism<\/span>/);
   assert.match(mainSource, /@click\.stop="submitLike\(project\)"[\s\S]*?@click\.stop="toggleFollow\(project\)"[\s\S]*?@click\.stop="handleParticipationAction\(project\)"[\s\S]*?@click\.stop="submitLeadClaim\(project\)"[\s\S]*?@click\.stop="submitSponsor\(project\)"/);
   assert.match(mainSource, /followButtonLabel\(project\)/);
+  assert.match(mainSource, /leadClaimButtonLabel\(project\)/);
+  assert.match(mainSource, /认领负责人/);
+  assert.match(mainSource, /已认领负责人/);
+  assert.doesNotMatch(mainSource, />Lead</);
   assert.match(mainSource, /sponsorButtonLabel\(project\)/);
-  assert.match(mainSource, /资助情况/);
-  assert.match(mainSource, /启动情况/);
+  assert.match(mainSource, />招募<\/strong>/);
+  assert.match(mainSource, />启动<\/strong>/);
   assert.match(mainSource, /projectRecruitmentText\(project\)/);
   assert.match(mainSource, /AI博士及以上/);
   assert.match(mainSource, /role\.count }}\/{{ role\.required/);
   assert.match(stylesSource, /\.project-card-top\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;/);
   assert.match(stylesSource, /\.project-card-counts\s*\{/);
+  assert.match(stylesSource, /\.project-card-side\s*\{/);
+  assert.match(stylesSource, /\.project-card-uploader\s*\{/);
   assert.match(stylesSource, /\.project-card-bottom\s*\{/);
+  assert.match(stylesSource, /\.project-card-footer\s*\{[\s\S]*?display:\s*flex;[\s\S]*?justify-content:\s*space-between;/);
   assert.match(stylesSource, /\.project-status-row\s*\{[\s\S]*?grid-template-columns:\s*38px minmax\(0,\s*1fr\);/);
   assert.match(stylesSource, /\.project-role-chip-row\s*\{[\s\S]*?display:\s*flex;/);
   assert.match(stylesSource, /\.project-interaction-actions\s*\{[\s\S]*?display:\s*flex;[\s\S]*?justify-content:\s*flex-start;/);
-  assert.match(stylesSource, /\.project-interaction-actions button\s*\{[\s\S]*?flex:\s*0 0 86px;/);
+  assert.match(stylesSource, /\.project-interaction-actions button\s*\{[\s\S]*?flex:\s*0 0 108px;/);
+  assert.match(stylesSource, /\.interaction-icon\s*\{[\s\S]*?font-variation-settings:\s*"FILL" 0/);
+  assert.match(stylesSource, /\.interaction-button\.interaction-active \.interaction-icon,[\s\S]*?\.follow-button\.active \.interaction-icon\s*\{[\s\S]*?font-variation-settings:\s*"FILL" 1/);
   assert.match(stylesSource, /\.interaction-button\.interaction-active\s*\{/);
   assert.match(stylesSource, /\.project-card-meta span\.ready\s*\{/);
   assert.match(stylesSource, /\.project-startup-status\.ready > span\s*\{/);
   assert.match(stylesSource, /\.project-role-groups span\.ready\s*\{/);
   assert.match(stylesSource, /\.project-expanded-detail\s*\{/);
+  assert.match(stylesSource, /\.project-pdf-actions\s*\{/);
+  assert.match(stylesSource, /\.project-pdf-actions\s*\{[\s\S]*?margin-left:\s*auto;/);
   assert.match(stylesSource, /\.project-meta-row\s*\{/);
   assert.doesNotMatch(stylesSource, /\.project-status-popover\s*\{/);
   assert.doesNotMatch(stylesSource, /\.viewer-status-block\s*\{/);
   assert.doesNotMatch(stylesSource, /\.status-uid-group/);
 });
 
-test("project detail uses a top action bar instead of right side panels", () => {
-  assert.match(mainSource, /class="project-action-bar"/);
-  assert.match(mainSource, /class="detail-stack"/);
-  assert.match(mainSource, /class="content-panel project-team-panel"/);
-  assert.match(mainSource, /目标期刊\/会议/);
+test("legacy duplicated project detail view has been removed", () => {
+  assert.doesNotMatch(mainSource, /class="project-action-bar/);
+  assert.doesNotMatch(mainSource, /class="detail-stack/);
+  assert.doesNotMatch(mainSource, /class="content-panel project-team-panel"/);
+  assert.doesNotMatch(mainSource, /目标期刊\/会议/);
   assert.match(mainSource, /function projectStageValue\(project\)\s*\{\s*return project\?\.stage \|\| "";\s*\}\s*function projectTeamReady/s);
-  assert.match(mainSource, /projectStartupLabel\(state\.currentProject\)/);
-  assert.match(mainSource, /projectFundingLabel\(state\.currentProject\)/);
+  assert.doesNotMatch(mainSource, /state\.currentProject/);
   assert.doesNotMatch(mainSource, /<div class="score-panel">/);
   assert.doesNotMatch(mainSource, /<aside class="side-panel">\s*<h2>组队情况<\/h2>/);
   assert.doesNotMatch(mainSource, /<aside class="side-panel">\s*<h2>课题互动<\/h2>/);
-  assert.match(stylesSource, /\.project-action-bar\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;/);
-  assert.match(stylesSource, /\.detail-stack\s*\{/);
-  assert.match(stylesSource, /\.project-team-panel \.role-list\s*\{/);
+  assert.doesNotMatch(stylesSource, /\.project-action-bar\s*\{/);
+  assert.doesNotMatch(stylesSource, /\.detail-stack\s*\{/);
+  assert.doesNotMatch(stylesSource, /\.project-team-panel \.role-list\s*\{/);
 });
 
 test("audit log table uses readable summaries instead of raw json", () => {
@@ -251,14 +324,24 @@ test("project lifecycle actions are gated by project stage and review status", (
   assert.match(mainSource, /const FOLLOWABLE_STAGE_VALUES = new Set\(\["open_recruiting", "team_building", "active"\]\)/);
   assert.match(mainSource, /const RECRUITING_STAGE_VALUES = new Set\(\["open_recruiting", "team_building"\]\)/);
   assert.match(mainSource, /v-if="shouldShowFollowButton\(project\)"/);
-  assert.match(mainSource, /v-if="shouldShowFollowButton\(state\.currentProject\)"/);
-  assert.match(mainSource, /v-if="canRecruitProject\(state\.currentProject\)"/);
+  assert.doesNotMatch(mainSource, /state\.currentProject/);
   assert.match(mainSource, /当前阶段暂不接受新的参与申请/);
   assert.match(mainSource, /handleParticipationAction\(project\)/);
-  assert.match(mainSource, /handleParticipationAction\(state\.currentProject\)/);
   assert.match(mainSource, /取消点赞/);
   assert.match(mainSource, /取消关注/);
-  assert.match(mainSource, /async function submitSponsor\(project = state\.currentProject\)/);
+  assert.match(mainSource, /function isLeadClaimed\(project\)/);
+  assert.match(mainSource, /claim_types/);
+  assert.match(mainSource, /function canClickLeadClaim\(project\)/);
+  assert.match(mainSource, /claimRequestsByProjectId:\s*\{\}/);
+  assert.match(mainSource, /function withdrawLeadClaim\(project\)/);
+  assert.match(mainSource, /api\.withdrawInteraction\("claim",\s*request\.id/);
+  assert.match(mainSource, /撤回认领/);
+  assert.match(mainSource, /已撤回负责人认领/);
+  assert.match(mainSource, /function markProjectLeadClaimWithdrawn\(project/);
+  assert.match(mainSource, /async function submitSponsor\(project\)/);
+  assert.doesNotMatch(mainSource, /async function submitParticipationRequest\(project\)[\s\S]*?await loadProjects\(\{ reset: true \}\);[\s\S]*?async function handleParticipationAction/);
+  assert.doesNotMatch(mainSource, /async function submitLeadClaim\(project\)[\s\S]*?await loadProjects\(\{ reset: true \}\);[\s\S]*?async function submitSponsor/);
+  assert.doesNotMatch(mainSource, /async function submitSponsor\(project\)[\s\S]*?await loadProjects\(\{ reset: true \}\);[\s\S]*?async function withdrawSponsorRequest/);
   assert.match(mainSource, /api\.withdrawInteraction\("sponsor",\s*request\.id/);
   assert.match(mainSource, /撤回资助/);
   assert.match(mainSource, /function withdrawParticipationRequest\(project\)/);
@@ -289,7 +372,7 @@ test("project cards no longer keep hover status-card state after lifecycle write
   assert.match(mainSource, /async function fetchProjectApprovedInteractions\(project\)[\s\S]*?api\.projectStatusCard\(project\.id\)/);
   assert.match(mainSource, /\["interest",\s*"claim"\]\.includes\(group\.type\)/);
   assert.match(mainSource, /function invalidateProjectStatusCard\(\)\s*\{\s*return null;/);
-  assert.match(mainSource, /invalidateProjectStatusCard\(projectId\)/);
+  assert.doesNotMatch(mainSource, /invalidateProjectStatusCard\(projectId\)/);
   assert.match(mainSource, /invalidateProjectStatusCard\(item\.project\?\.id\)/);
   assert.match(mainSource, /invalidateProjectStatusCard\(project\.id\)/);
 });
@@ -398,16 +481,22 @@ test("admin project list changes stages through the existing project patch api",
 test("workspace overview uses the same clickable card affordance as admin overview", () => {
   assert.match(mainSource, /const workspaceOverviewCards = computed/);
   assert.match(mainSource, /v-for="card in workspaceOverviewCards"/);
+  assert.match(mainSource, /title:\s*"个人资料"/);
   assert.match(mainSource, /class="content-panel admin-overview-card workspace-overview-card"/);
   assert.match(mainSource, /@click="setWorkspaceTab\(card\.tab\)"/);
+  assert.match(stylesSource, /\.workspace-overview-grid\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3,\s*minmax\(150px,\s*1fr\)\);/);
+  assert.match(stylesSource, /@media \(max-width:\s*980px\)\s*\{[\s\S]*?\.workspace-overview-grid\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.workspace-overview-grid\s*\{[\s\S]*?grid-template-columns:\s*1fr;/);
   assert.match(stylesSource, /\.workspace-overview-card\s*\{/);
   assert.match(stylesSource, /\.admin-overview-card:hover\s*\{[\s\S]*?scale\(1\.02\)/);
 });
 
-test("user uploaded projects expose edit only for user-managed stages", () => {
-  assert.match(mainSource, /function canEditMyProject\(project\)[\s\S]*?\["draft",\s*"open_recruiting"\]\.includes\(project\?\.stage\)/);
+test("user uploaded projects can be edited while archived projects stay locked", () => {
+  assert.match(mainSource, /function canEditMyProject\(project\)[\s\S]*?project\?\.stage !== "archived"/);
   assert.match(mainSource, /v-if="canEditMyProject\(project\)"/);
-  assert.match(mainSource, /阶段由管理员维护/);
+  assert.match(mainSource, /function myProjectStageEditable\(project\)[\s\S]*?\["draft",\s*"open_recruiting"\]\.includes\(project\?\.stage\)/);
+  assert.match(mainSource, /lockedStageProjectPayload/);
+  assert.match(mainSource, /保存修改/);
   assert.match(mainSource, /function resetUserProjectState\(\)[\s\S]*?state\.myProjects = \[\];/);
   assert.match(mainSource, /function resetUserProjectState\(\)[\s\S]*?state\.myProjectPagination = \{\};/);
   assert.match(mainSource, /function resetUserProjectState\(\)[\s\S]*?state\.myProjectQuota = \{ daily_limit: 10, used_today: 0, remaining: 10, unlimited: false \};/);
@@ -420,12 +509,12 @@ test("business modals use an explicit z-index scale and close competing overlays
   assert.match(mainSource, /closeMutuallyExclusiveModals\("projectForm"\)/);
   assert.match(mainSource, /closeMutuallyExclusiveModals\("myProjectForm"\)/);
   assert.match(stylesSource, /\.toast\s*\{[\s\S]*?z-index:\s*850;/);
-  assert.match(stylesSource, /\.project-modal-backdrop\s*\{[\s\S]*?z-index:\s*200;/);
+  assert.doesNotMatch(stylesSource, /\.project-modal-backdrop\s*\{/);
   assert.match(stylesSource, /\.project-form-modal\s*\{[\s\S]*?z-index:\s*300;/);
   assert.match(stylesSource, /\.task-result-modal,\s*\.task-detail-modal\s*\{[\s\S]*?z-index:\s*320;/);
   assert.match(stylesSource, /\.confirm-modal-backdrop\s*\{[\s\S]*?z-index:\s*900;/);
-  assert.match(indexSource, /href="\/src\/styles\.css\?v=0\.7\.1"/);
-  assert.match(indexSource, /src="\/src\/main\.js\?v=0\.7\.1"/);
+  assert.match(indexSource, new RegExp(`href="/src/styles\\.css\\?v=${packageJson.version}"`));
+  assert.match(indexSource, new RegExp(`src="/src/main\\.js\\?v=${packageJson.version}"`));
 });
 
 test("legacy approved-project handoff helpers are not returned as product entry points", () => {

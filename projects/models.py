@@ -35,7 +35,6 @@ class Theme(models.Model):
     slug = models.SlugField(max_length=140, unique=True, allow_unicode=True)
     description = models.TextField(blank=True)
     cover_image = models.CharField(max_length=255, blank=True)
-    file_space = models.JSONField(default=dict, blank=True)
     sort_order = models.IntegerField(default=0)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -168,8 +167,13 @@ class ProjectDocument(models.Model):
         HTML = "html", "HTML"
         OTHER = "other", "其他"
 
+    class DocumentKind(models.TextChoices):
+        DETAIL = "detail", "课题主PDF"
+        SUPPLEMENT = "supplement", "补充说明"
+
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="documents")
     doc_type = models.CharField(max_length=20, choices=DocumentType.choices)
+    document_kind = models.CharField(max_length=32, choices=DocumentKind.choices, default=DocumentKind.SUPPLEMENT)
     title = models.CharField(max_length=255, blank=True)
     description = models.TextField(blank=True)
     path = models.CharField(max_length=500)
@@ -203,6 +207,9 @@ class ThemeFile(models.Model):
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     path = models.CharField(max_length=500)
+    detail_pdf_title = models.CharField(max_length=255, blank=True)
+    detail_pdf_path = models.CharField(max_length=500, blank=True)
+    detail_pdf_hash = models.CharField(max_length=64, blank=True)
     sort_order = models.IntegerField(default=0)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)

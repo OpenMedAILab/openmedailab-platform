@@ -141,6 +141,7 @@ def auto_document_items_for_entries(entries):
                 "_json_path": str(json_path),
                 "pdf_path": str(pdf_path),
                 "doc_type": "pdf",
+                "document_kind": "detail",
                 "document_title": "项目详细说明",
                 "description": "完整课题方案 PDF",
             }
@@ -247,6 +248,7 @@ def bind_document(item, dry_run=False):
         return "missing"
 
     doc_type = normalize_document_type(item.get("doc_type") or source_path.suffix.lstrip("."))
+    document_kind = normalize_document_kind(item.get("document_kind"), doc_type)
     title = str(item.get("document_title") or item.get("title") or source_path.stem).strip()[:255]
     description = str(item.get("description") or title or "课题文档").strip()
 
@@ -255,11 +257,15 @@ def bind_document(item, dry_run=False):
     if not dry_run:
         destination = copy_document_if_needed(source_path, destination, content_hash)
         public_path = public_media_path(destination)
+        if document_kind == ProjectDocument.DocumentKind.DETAIL:
+            ProjectDocument.objects.filter(project=project, document_kind=ProjectDocument.DocumentKind.DETAIL).exclude(path=public_path).update(
+                document_kind=ProjectDocument.DocumentKind.SUPPLEMENT
+            )
         ProjectDocument.objects.update_or_create(
             project=project,
             doc_type=doc_type,
             path=public_path,
-            defaults={"title": title, "description": description, "content_hash": content_hash},
+            defaults={"title": title, "description": description, "document_kind": document_kind, "content_hash": content_hash},
         )
     return "bound"
 
@@ -275,6 +281,15 @@ def normalize_document_type(value):
     if text in {"html", "htm"}:
         return ProjectDocument.DocumentType.HTML
     return ProjectDocument.DocumentType.OTHER
+
+
+def normalize_document_kind(value, doc_type):
+    text = str(value or "").strip()
+    if text in ProjectDocument.DocumentKind.values:
+        return text
+    if doc_type == ProjectDocument.DocumentType.PDF:
+        return ProjectDocument.DocumentKind.DETAIL
+    return ProjectDocument.DocumentKind.SUPPLEMENT
 
 
 def document_root():

@@ -21,7 +21,7 @@ ROLE_LABELS = {
 
 BASE_CAPABILITIES = {
     "browse_projects": True,
-    "view_theme_space": True,
+    "view_theme_datasets": True,
     "view_public_documents": True,
     "maintain_profile": False,
     "follow_project": False,

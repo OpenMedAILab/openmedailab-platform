@@ -64,7 +64,6 @@ def theme_payload(theme):
         "slug": theme.slug,
         "description": theme.description,
         "cover_image": theme.cover_image,
-        "file_space": theme.file_space,
         "sort_order": theme.sort_order,
         "is_active": theme.is_active,
     }
@@ -79,6 +78,8 @@ def document_payload(document):
         "id": document.id,
         "doc_type": document.doc_type,
         "doc_type_label": document.get_doc_type_display(),
+        "document_kind": document.document_kind,
+        "document_kind_label": document.get_document_kind_display(),
         "title": document.title,
         "description": document.description,
         "path": document.path,
@@ -92,6 +93,8 @@ def public_document_payload(document):
         "id": document.id,
         "doc_type": document.doc_type,
         "doc_type_label": document.get_doc_type_display(),
+        "document_kind": document.document_kind,
+        "document_kind_label": document.get_document_kind_display(),
         "title": document.title,
         "description": document.description,
         "path": public_document_path(document.path),
@@ -109,11 +112,28 @@ def theme_file_payload(file):
         "title": file.title,
         "description": file.description,
         "path": file.path,
+        "detail_pdf_title": file.detail_pdf_title,
+        "detail_pdf_path": public_document_path(file.detail_pdf_path),
         "sort_order": file.sort_order,
         "is_active": file.is_active,
         "created_at": file.created_at,
         "updated_at": file.updated_at,
     }
+
+
+def project_detail_document_payload(project):
+    documents = list(project.documents.all())
+    for document in documents:
+        if (
+            document.document_kind == document.DocumentKind.DETAIL
+            and document.doc_type == document.DocumentType.PDF
+            and public_document_path(document.path)
+        ):
+            return public_document_payload(document)
+    for document in documents:
+        if document.doc_type == document.DocumentType.PDF and public_document_path(document.path):
+            return public_document_payload(document)
+    return None
 
 
 def project_summary_payload(project):
@@ -141,6 +161,7 @@ def project_summary_payload(project):
         "score_count": getattr(project, "score_count", None),
         "interest_count": getattr(project, "interest_count", None),
         "sponsor_count": getattr(project, "sponsor_count", None),
+        "detail_document": project_detail_document_payload(project),
         "created_at": project.created_at,
         "updated_at": project.updated_at,
     }
@@ -167,14 +188,12 @@ def project_detail_payload(project):
 
 def public_project_detail_payload(project):
     payload = project_summary_payload(project)
-    documents = [
-        public_document_payload(document)
-        for document in project.documents.all()
-        if public_document_path(document.path)
-    ]
+    detail_document = project_detail_document_payload(project)
+    documents = [detail_document] if detail_document else []
     payload.update(
         {
             "team_status": project.team_status,
+            "detail_document": detail_document,
             "documents": documents,
         }
     )
@@ -197,19 +216,13 @@ def public_document_path(path):
     return value
 
 
-def theme_space_payload(theme, projects, files):
+def theme_dataset_payload(theme, projects, files):
     sections = {}
     for file in files:
         sections.setdefault(file.section, []).append(theme_file_payload(file))
-    configured_sections = theme.file_space.get("sections", []) if isinstance(theme.file_space, dict) else []
     ordered_sections = []
-    used_sections = set()
-    for section_name in configured_sections:
-        ordered_sections.append({"name": section_name, "files": sections.get(section_name, [])})
-        used_sections.add(section_name)
     for section_name, section_files in sections.items():
-        if section_name not in used_sections:
-            ordered_sections.append({"name": section_name, "files": section_files})
+        ordered_sections.append({"name": section_name, "files": section_files})
     return {
         "theme": theme_payload(theme),
         "project_count": len(projects),
