@@ -116,6 +116,8 @@ class Project(models.Model):
                     "AI工程师": RoleType.ENGINEER,
                     "工程师": RoleType.ENGINEER,
                 }.get(interest.role, "")
+            if not role_type and interest.role == "其他":
+                role_type = RoleType.UNDERGRAD_OR_BELOW
             if role_type in profile_group_counts:
                 profile_group_counts[role_type] += 1
         role_group_counts = [

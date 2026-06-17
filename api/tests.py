@@ -390,6 +390,18 @@ class ApiTests(TestCase):
         self.assertEqual(status["roles"]["学生"], 1)
         self.assertEqual(status["sponsor_count"], 0)
 
+    def test_team_status_counts_other_interest_as_visible_student_fallback(self):
+        user = User.objects.create_user(username="otherparticipant", email="otherparticipant@example.com", password="StrongPass12345")
+        user.profile.role_type = RoleType.OTHER
+        user.profile.save(update_fields=["role_type", "updated_at"])
+        ProjectInterest.objects.create(user=user, project=self.project, role="其他", status=InteractionStatus.APPROVED)
+
+        status = Project.objects.get(pk=self.project.pk).team_status
+        roles = {item["key"]: item for item in status["required_roles"]}
+        self.assertEqual(status["roles"]["其他"], 1)
+        self.assertEqual(roles["student"]["count"], 1)
+        self.assertTrue(roles["student"]["ready"])
+
     def test_score_does_not_change_project_stage_or_lifecycle_status_card_groups(self):
         user = User.objects.create_user(username="scoreuser", email="scoreuser@example.com", password="StrongPass12345")
         self.client.force_login(user)

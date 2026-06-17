@@ -23,6 +23,48 @@ const SIDEBAR_QR_ENTRIES = [
   { key: "admin-contact", label: "联系管理员", image: "", icon: "support_agent" },
   { key: "community", label: "加入社区", image: "", icon: "group_add" }
 ];
+const FAQ_ENTRIES = [
+  {
+    question: "这个网站是做什么的？",
+    answer: "OpenMedAILab 用来汇集真实临床问题、开放课题和医学 AI 协作需求，让临床、算法、数据和工程同学能围绕同一个课题快速找到合作入口。"
+  },
+  {
+    question: "谁可以浏览和参与课题？",
+    answer: "访客可以浏览公开课题；注册登录后可以收藏、点赞、参与、认领负责人或提交资助意向。不同身份会看到不同的管理和个人空间功能。"
+  },
+  {
+    question: "我如何参与一个课题？",
+    answer: "在首页选择感兴趣的课题，点击“参与”即可加入协作意向。参与会自动通过，并在课题的组队情况中即时反映。"
+  },
+  {
+    question: "认领负责人和普通参与有什么区别？",
+    answer: "参与表示愿意加入课题协作；认领负责人表示愿意承担组织推进职责。两者都会进入组队情况，但负责人会单独计入负责角色。"
+  },
+  {
+    question: "课题是怎么组队的？",
+    answer: "系统会根据课题需要的角色统计参与者和负责人数量。有人参与或认领后，课题可以从开放招募推进到组队中。"
+  },
+  {
+    question: "我可以发布自己的课题吗？",
+    answer: "可以。登录后进入“我的空间”-“我的上传”，填写课题结构化字段并上传课题说明 PDF。普通用户每天最多上传 10 个课题。"
+  },
+  {
+    question: "课题说明 PDF 有什么用？",
+    answer: "课题卡片中的“查看PDF”会在新标签页打开课题说明 PDF，用来承载详细背景、研究设计、数据需求或补充说明。"
+  },
+  {
+    question: "如何资助一个课题？",
+    answer: "在课题卡片点击“资助”提交资助意向。资助意向需要管理员审批，审批通过后会在个人空间和管理端记录状态。"
+  },
+  {
+    question: "主题的数据集说明在哪里看？",
+    answer: "首页选中某个主题后，主题标题如果绑定了数据集说明 PDF，点击标题会在新标签页打开对应说明文件。"
+  },
+  {
+    question: "遇到登录、课题或协作问题怎么办？",
+    answer: "如果管理员上传了联系管理员或社区二维码，会显示在本页底部。扫码后可联系平台管理员或加入社区沟通。"
+  }
+];
 
 const state = reactive({
   booting: true,
@@ -66,7 +108,7 @@ const state = reactive({
   savingMyProject: false,
   deletingMyProjectId: null,
   favoriteProjectIds: [],
-  themeDropdownOpen: false,
+  themeDatasetFilesBySlug: {},
   likedProjectIds: [],
   unlikedProjectIds: [],
   participationProjectIds: [],
@@ -83,11 +125,6 @@ const state = reactive({
   favoritesLoaded: false,
   profileMenuOpen: false,
   releaseModalOpen: false,
-  sidebarQrModal: {
-    open: false,
-    entry: null,
-    imageOk: true
-  },
   confirmDialog: {
     open: false,
     title: "",
@@ -231,7 +268,8 @@ const App = {
     const navItems = computed(() => {
       if (requiresPasswordChange()) return [];
       const items = [
-        { name: "home", label: "首页" }
+        { name: "home", label: "首页" },
+        { name: "faq", label: "常见问答" }
       ];
       if (state.user) {
         items.push({ name: "dashboard", label: "我的空间" });
@@ -241,13 +279,19 @@ const App = {
     });
     const selectedTheme = computed(() => state.meta.themes.find((theme) => theme.slug === state.filters.theme) || null);
     const homeThemeCards = computed(() => topicThemeCards(state.meta.themes));
-    const homeThemeRowThemes = computed(() => homeThemeCards.value.slice(0, 4));
-    const homeThemeDropdownThemes = computed(() => homeThemeCards.value.slice(4));
-    const homeThemeRowColumnCount = computed(() => homeThemeRowThemes.value.length + 2);
-    const selectedThemeHiddenInShortcutRow = computed(() => Boolean(selectedTheme.value && !homeThemeRowThemes.value.some((theme) => theme.slug === selectedTheme.value.slug)));
-    const allThemesTriggerActive = computed(() => state.themeDropdownOpen || selectedThemeHiddenInShortcutRow.value);
+    const homeThemeRowThemes = computed(() => homeThemeCards.value);
+    const homeThemeRowColumnCount = computed(() => homeThemeRowThemes.value.length + 1);
+    const selectedThemeDatasetFile = computed(() => {
+      const slug = selectedTheme.value?.slug;
+      return slug ? state.themeDatasetFilesBySlug[slug] || null : null;
+    });
+    const selectedThemeDatasetPdfHref = computed(() => {
+      const file = selectedThemeDatasetFile.value;
+      return file?.detail_pdf_path ? themeFileDetailPdfHref(file) : "";
+    });
     const platformStats = computed(() => state.meta.platform_stats || { registered_user_count: 0, online_user_count: 0, online_window_seconds: 300 });
     const sidebarQrEntries = computed(() => mergeSidebarQrEntries(state.meta.sidebar_qr_entries || []));
+    const faqQrEntries = computed(() => sidebarQrEntries.value.filter((entry) => entry.has_image && sidebarQrImageSrc(entry)));
     const roleCards = computed(() => roleCardsFor(capabilities.value));
     const favoriteProjects = computed(() => (state.dashboard?.follows || []).map((item) => item.project));
     const myProjectTasks = computed(() => buildMyProjectTasks(state.dashboard));
@@ -288,7 +332,6 @@ const App = {
     let confirmDialogResolver = null;
     const modalOpen = computed(() => Boolean(
       state.releaseModalOpen ||
-      state.sidebarQrModal.open ||
       state.confirmDialog.open ||
       state.admin.themeFormOpen ||
       state.admin.projectFormOpen ||
@@ -325,6 +368,13 @@ const App = {
       () => state.route.fullPath,
       async () => {
         await loadRouteData();
+      }
+    );
+
+    watch(
+      () => state.filters.theme,
+      (slug) => {
+        if (slug) loadSelectedThemeDatasetFile(slug);
       }
     );
 
@@ -1208,16 +1258,27 @@ const App = {
 
     async function selectTheme(slug = "") {
       state.filters.theme = slug;
-      closeThemeDropdown();
+      if (slug) loadSelectedThemeDatasetFile(slug);
       await applyFilters();
     }
 
-    function toggleThemeDropdown() {
-      state.themeDropdownOpen = !state.themeDropdownOpen;
-    }
-
-    function closeThemeDropdown() {
-      state.themeDropdownOpen = false;
+    async function loadSelectedThemeDatasetFile(slug = "") {
+      const normalizedSlug = String(slug || "").trim();
+      if (!normalizedSlug || Object.prototype.hasOwnProperty.call(state.themeDatasetFilesBySlug, normalizedSlug)) return;
+      try {
+        const data = await api.themeDatasets(normalizedSlug);
+        const files = (data.sections || []).flatMap((section) => section.files || []);
+        const file = files.find((item) => item.detail_pdf_path) || null;
+        state.themeDatasetFilesBySlug = {
+          ...state.themeDatasetFilesBySlug,
+          [normalizedSlug]: file
+        };
+      } catch (error) {
+        state.themeDatasetFilesBySlug = {
+          ...state.themeDatasetFilesBySlug,
+          [normalizedSlug]: null
+        };
+      }
     }
 
     async function login() {
@@ -1511,10 +1572,33 @@ const App = {
       return targets;
     }
 
+    async function refreshProjectStatus(project) {
+      const id = project?.id;
+      if (!id) return;
+      try {
+        const data = await api.projectStatusCard(id);
+        const latestProject = data.project || {};
+        const latestViewerState = data.viewer_state || latestProject.viewer_state || null;
+        projectTargets(id, project).forEach((item) => {
+          Object.assign(item, latestProject);
+          if (latestViewerState) {
+            item.viewer_state = latestViewerState;
+          }
+          applyProjectViewerState(item);
+        });
+        if (state.projectProgress.project?.id === id) {
+          Object.assign(state.projectProgress.project, latestProject);
+        }
+        state.projects = sortProjectsForCurrentFilter(state.projects);
+      } catch (error) {
+        // 下一次列表或状态卡加载会重新同步，这里不阻断主操作反馈。
+      }
+    }
+
     async function submitParticipationRequest(project) {
       if (!ensureLogin()) return;
       if (!canRecruitProject(project)) {
-        showToast("当前阶段暂不接受新的参与申请");
+        showToast("当前阶段暂不接受新的参与");
         return;
       }
       if (participationRequestCanWithdraw(project)) {
@@ -1522,7 +1606,7 @@ const App = {
         return;
       }
       if (isParticipationRequested(project)) {
-        showToast("已加入课题协作");
+        showToast("已参与课题协作");
         return;
       }
       const role = participationRoleForCurrentUser();
@@ -1532,13 +1616,14 @@ const App = {
           role,
           available_hours_per_week: Number(state.user?.profile?.available_hours_per_week || 4),
           experience: "",
-          message: "申请参与开放课题协作"
+          message: "参与开放课题协作"
         });
         markProjectInterestSubmitted(project, request, role);
         invalidateProjectStatusCard(project.id);
-        showToast("已加入课题协作");
+        await refreshProjectStatus(project);
+        showToast("已参与课题协作");
       } catch (error) {
-        showToast(error.message || "申请参与失败");
+        showToast(error.message || "参与失败");
       } finally {
         state.submittingParticipationProjectIds = removeId(state.submittingParticipationProjectIds, project.id);
       }
@@ -1556,27 +1641,21 @@ const App = {
       if (!ensureLogin()) return;
       const request = participationRequestForProject(project);
       if (!request?.id || !isActiveParticipationRequest(request)) {
-        showToast("没有可撤回的申请");
+        showToast("没有可取消的参与");
         return;
       }
-      const confirmed = await openConfirmDialog({
-        title: "撤回申请参与",
-        message: `确认撤回「${project.title}」的申请参与吗？`,
-        confirmText: "撤回申请",
-        tone: "danger"
-      });
-      if (!confirmed) return;
       state.withdrawingParticipationProjectIds = addUniqueId(state.withdrawingParticipationProjectIds, project.id);
       try {
-        const withdrawn = await api.withdrawInteraction("interest", request.id, { reason: "用户主动撤回申请参与" });
+        const withdrawn = await api.withdrawInteraction("interest", request.id, { reason: "用户主动取消参与" });
         markProjectInterestWithdrawn(project, withdrawn || request);
         invalidateProjectStatusCard(project.id);
-        showToast("已撤回申请");
+        await refreshProjectStatus(project);
+        showToast("已取消参与");
         if (state.user) {
           await loadFavorites({ force: true });
         }
       } catch (error) {
-        showToast(error.message || "撤回申请失败");
+        showToast(error.message || "取消参与失败");
       } finally {
         state.withdrawingParticipationProjectIds = removeId(state.withdrawingParticipationProjectIds, project.id);
       }
@@ -1598,6 +1677,7 @@ const App = {
         const claim = await api.claim(project.id, { claim_type: "leader", message: "申请担任项目负责人" });
         markProjectLeadClaimed(project, claim);
         invalidateProjectStatusCard(project.id);
+        await refreshProjectStatus(project);
         showToast("负责人认领已通过");
       } catch (error) {
         showToast(error.message || "负责人认领失败");
@@ -1618,6 +1698,7 @@ const App = {
         const withdrawn = await api.withdrawInteraction("claim", request.id, { reason: "用户主动撤回负责人认领" });
         markProjectLeadClaimWithdrawn(project, withdrawn || request);
         invalidateProjectStatusCard(project.id);
+        await refreshProjectStatus(project);
         showToast("已撤回负责人认领");
         if (state.user) {
           await loadFavorites({ force: true });
@@ -1697,7 +1778,8 @@ const App = {
       if (roleType === "doctor") return "医生";
       if (roleType === "engineer") return "AI工程师";
       if (["undergrad_or_below", "master_student", "phd_student"].includes(roleType)) return "学生";
-      return "其他";
+      if (roleType === "phd_or_above") return "大学老师";
+      return "学生";
     }
 
     function markProjectInterestSubmitted(project, request = null, fallbackRole = "") {
@@ -1973,11 +2055,11 @@ const App = {
     }
 
     function participationButtonLabel(project) {
-      if (isWithdrawingParticipation(project)) return "撤回中...";
+      if (isWithdrawingParticipation(project)) return "取消中...";
       if (isSubmittingParticipation(project)) return "提交中...";
-      if (participationRequestCanWithdraw(project)) return "撤回申请";
+      if (participationRequestCanWithdraw(project)) return "取消参与";
       if (!canRecruitProject(project)) return "暂不招募";
-      return "申请参与";
+      return "参与";
     }
 
     function canClickParticipation(project) {
@@ -2213,27 +2295,35 @@ const App = {
 
     async function deactivateTheme(theme) {
       if (!can("manage_themes")) return;
-      await api.adminUpdateTheme(theme.id, { is_active: false });
-      showToast("主题已停用");
-      await loadAdmin();
-      state.meta = await api.meta();
+      const nextActive = !theme.is_active;
+      try {
+        await api.adminUpdateTheme(theme.id, { is_active: nextActive });
+        showToast(nextActive ? "主题已启用" : "主题已停用");
+        await loadAdmin();
+        state.meta = await api.meta();
+      } catch (error) {
+        showToast(error.message || "主题状态更新失败");
+      }
     }
 
     async function deleteTheme(theme) {
       if (!can("manage_themes")) return;
-      showConfirm({
+      const confirmed = await openConfirmDialog({
         title: "确认物理删除主题",
         message: `确认物理删除「${theme.name}」吗？该操作会删除主题和数据集说明 PDF 记录，并让关联课题失去主题分类，不能撤回。`,
         confirmText: "物理删除",
         cancelText: "取消",
-        tone: "danger",
-        onConfirm: async () => {
-          await api.adminDeleteTheme(theme.id);
-          showToast("主题已物理删除");
-          await loadAdmin();
-          state.meta = await api.meta();
-        }
+        tone: "danger"
       });
+      if (!confirmed) return;
+      try {
+        await api.adminDeleteTheme(theme.id);
+        showToast("主题已物理删除");
+        await loadAdmin();
+        state.meta = await api.meta();
+      } catch (error) {
+        showToast(error.message || "主题物理删除失败");
+      }
     }
 
     function newTheme() {
@@ -3176,10 +3266,6 @@ const App = {
       if (!entry) return;
       state.admin.sidebarQrs = replaceSidebarQrEntry(state.admin.sidebarQrs, entry);
       state.meta.sidebar_qr_entries = replaceSidebarQrEntry(state.meta.sidebar_qr_entries, entry);
-      if (state.sidebarQrModal.entry?.key === entry.key) {
-        state.sidebarQrModal.entry = { ...state.sidebarQrModal.entry, ...entry };
-        state.sidebarQrModal.imageOk = true;
-      }
     }
 
     async function setAdminTab(tab) {
@@ -3612,10 +3698,6 @@ const App = {
       if (state.profileMenuOpen) {
         closeProfileMenu();
       }
-      if (state.sidebarQrModal.open) {
-        closeSidebarQrModal();
-      }
-      closeThemeDropdown();
     }
 
     function handleScroll() {
@@ -3651,16 +3733,9 @@ const App = {
         closeReleaseModal();
         return;
       }
-      if (event.key === "Escape" && state.sidebarQrModal.open) {
-        closeSidebarQrModal();
-        return;
-      }
       if (event.key === "Escape" && state.profileMenuOpen) {
         closeProfileMenu();
         return;
-      }
-      if (event.key === "Escape" && state.themeDropdownOpen) {
-        closeThemeDropdown();
       }
     }
 
@@ -3799,24 +3874,6 @@ const App = {
       state.releaseModalOpen = false;
     }
 
-    function openSidebarQrModal(entry) {
-      state.sidebarQrModal = {
-        open: true,
-        entry,
-        imageOk: true
-      };
-    }
-
-    function closeSidebarQrModal() {
-      state.sidebarQrModal.open = false;
-      state.sidebarQrModal.entry = null;
-      state.sidebarQrModal.imageOk = true;
-    }
-
-    function markSidebarQrImageMissing() {
-      state.sidebarQrModal.imageOk = false;
-    }
-
     function toggleReleaseVersion(version) {
       state.expandedReleaseVersions = state.expandedReleaseVersions.includes(version)
         ? state.expandedReleaseVersions.filter((item) => item !== version)
@@ -3853,13 +3910,13 @@ const App = {
       homeThemeCards,
       homeThemeRowColumnCount,
       homeThemeRowThemes,
-      homeThemeDropdownThemes,
-      selectedThemeHiddenInShortcutRow,
-      allThemesTriggerActive,
+      selectedThemeDatasetPdfHref,
       platformStats,
       sidebarQrEntries,
+      faqQrEntries,
       sidebarQrImageSrc,
       sidebarQrAlt,
+      FAQ_ENTRIES,
       roleCards,
       favoriteProjects,
       myProjectTasks,
@@ -3869,7 +3926,6 @@ const App = {
       projectProgressTimelineItems,
       releaseLatest,
       releaseHistoryItems,
-      SIDEBAR_QR_ENTRIES,
       jsonImportJsonFilesInput,
       jsonImportDirectoryInput,
       jsonImportMixedFilesInput,
@@ -3877,8 +3933,6 @@ const App = {
       navigate,
       applyFilters,
       selectTheme,
-      toggleThemeDropdown,
-      closeThemeDropdown,
       topicThemeCardStyle,
       loadMoreProjects,
       loadProjectProgress,
@@ -3906,9 +3960,6 @@ const App = {
       closeProfileMenu,
       openReleaseModal,
       closeReleaseModal,
-      openSidebarQrModal,
-      closeSidebarQrModal,
-      markSidebarQrImageMissing,
       toggleReleaseVersion,
       isReleaseVersionExpanded,
       releaseSectionLabel,
@@ -4070,9 +4121,6 @@ const App = {
       describedBy,
       formSummaryErrors,
       clearFieldError,
-      openSidebarQrModal,
-      closeSidebarQrModal,
-      markSidebarQrImageMissing,
       resolveConfirmDialog
     };
   },
@@ -4095,24 +4143,13 @@ const App = {
             @click="navigate(item.name)"
           >
             <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'home'">library_books</span>
+            <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'faq'">help</span>
             <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'dashboard'">space_dashboard</span>
             <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'favorites'">bookmark</span>
             <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'admin'">settings</span>
             {{ item.label }}
           </button>
         </nav>
-        <div class="sidebar-qr-actions" aria-label="系统入口">
-          <button
-            v-for="entry in sidebarQrEntries"
-            :key="entry.key"
-            class="nav-item sidebar-qr-trigger"
-            type="button"
-            @click="openSidebarQrModal(entry)"
-          >
-            <span class="material-symbols-rounded" style="font-size: 20px;">{{ entry.icon }}</span>
-            {{ entry.label }}
-          </button>
-        </div>
         <div class="account-area">
           <button class="version-button" type="button" @click="openReleaseModal">v{{ state.meta.release?.version || '0.0.0' }}</button>
           <span class="site-micro-stats" aria-label="平台统计">注册 {{ platformStats.registered_user_count || 0 }} · 在线 {{ platformStats.online_user_count || 0 }}</span>
@@ -4153,18 +4190,6 @@ const App = {
 
       <main class="page">
         <div v-if="state.toast" class="toast">{{ state.toast }}</div>
-        <div v-if="state.sidebarQrModal.open" class="sidebar-qr-modal-backdrop" @click.self="closeSidebarQrModal">
-          <section class="sidebar-qr-modal" role="dialog" aria-modal="true" :aria-label="state.sidebarQrModal.entry?.label || '二维码'">
-            <header>
-              <h2>{{ state.sidebarQrModal.entry?.label }}</h2>
-              <button class="ghost-button" type="button" @click="closeSidebarQrModal">关闭</button>
-            </header>
-            <div v-if="state.sidebarQrModal.imageOk && sidebarQrImageSrc(state.sidebarQrModal.entry)" class="sidebar-qr-image-wrap">
-              <img :src="sidebarQrImageSrc(state.sidebarQrModal.entry)" :alt="sidebarQrAlt(state.sidebarQrModal.entry)" @error="markSidebarQrImageMissing" />
-            </div>
-            <div v-else class="sidebar-qr-placeholder">二维码待更新</div>
-          </section>
-        </div>
         <section v-if="state.booting" class="empty-state">
           <div class="loader"></div>
           <h2>正在载入课题库</h2>
@@ -4225,38 +4250,21 @@ const App = {
               >
                 <span>{{ theme.name }}</span>
               </button>
-              <button
-                class="theme-chip topic-theme-card theme-action-card all-themes-trigger"
-                :class="{ active: allThemesTriggerActive }"
-                :style="topicThemeCardStyle()"
-                type="button"
-                aria-haspopup="listbox"
-                :aria-expanded="state.themeDropdownOpen ? 'true' : 'false'"
-                @click="toggleThemeDropdown"
-              >
-                <span>{{ state.themeDropdownOpen ? '收起全部主题' : '展示全部主题' }}</span>
-                <small v-if="selectedThemeHiddenInShortcutRow">{{ selectedTheme.name }}</small>
-              </button>
-            </div>
-            <div v-if="state.themeDropdownOpen" class="theme-dropdown" role="listbox" aria-label="全部主题">
-              <button
-                v-for="theme in homeThemeDropdownThemes"
-                :key="theme.slug"
-                class="theme-chip topic-theme-card theme-dropdown-card"
-                :class="{ active: state.filters.theme === theme.slug }"
-                :style="topicThemeCardStyle(theme)"
-                type="button"
-                role="option"
-                :aria-selected="state.filters.theme === theme.slug ? 'true' : 'false'"
-                @click="selectTheme(theme.slug)"
-              >
-                <span>{{ theme.name }}</span>
-              </button>
             </div>
 
             <div class="section-head">
-              <div v-if="selectedTheme">
-                <h2>{{ selectedTheme.name }}</h2>
+              <div v-if="selectedTheme" class="selected-theme-heading">
+                <h2>
+                  <a
+                    v-if="selectedThemeDatasetPdfHref"
+                    class="theme-dataset-link"
+                    :href="selectedThemeDatasetPdfHref"
+                    target="_blank"
+                    rel="noopener"
+                    title="点击查看该主题的数据集说明文件"
+                  >{{ selectedTheme.name }}</a>
+                  <span v-else>{{ selectedTheme.name }}</span>
+                </h2>
                 <p v-if="selectedTheme.description">{{ selectedTheme.description }}</p>
               </div>
               <div v-else></div>
@@ -4384,6 +4392,42 @@ const App = {
               </button>
               <span v-else>已显示全部匹配课题</span>
             </div>
+          </section>
+
+          <section v-else-if="activeView === 'faq'" class="faq-view">
+            <div class="section-head faq-head">
+              <div>
+                <span class="eyebrow">常见问答</span>
+                <h1>协作前先看这里</h1>
+                <p>这里整理了浏览课题、参与组队、发布课题和资助协作时最常见的问题。</p>
+              </div>
+            </div>
+            <div class="faq-list" aria-label="常见问答列表">
+              <article v-for="(item, index) in FAQ_ENTRIES" :key="item.question" class="content-panel faq-item">
+                <span class="faq-index">{{ String(index + 1).padStart(2, '0') }}</span>
+                <div>
+                  <h2>{{ item.question }}</h2>
+                  <p>{{ item.answer }}</p>
+                </div>
+              </article>
+            </div>
+            <section v-if="faqQrEntries.length" class="faq-qr-section" aria-label="联系与社区二维码">
+              <div class="panel-title-row compact-title-row">
+                <div>
+                  <h2>联系与社区</h2>
+                  <p>扫码联系平台管理员或加入社区沟通。</p>
+                </div>
+              </div>
+              <div class="faq-qr-grid">
+                <article v-for="entry in faqQrEntries" :key="entry.key" class="faq-qr-card">
+                  <header>
+                    <span class="material-symbols-rounded">{{ entry.icon }}</span>
+                    <strong>{{ entry.label }}</strong>
+                  </header>
+                  <img :src="sidebarQrImageSrc(entry)" :alt="sidebarQrAlt(entry)" />
+                </article>
+              </div>
+            </section>
           </section>
 
           <section v-else-if="activeView === 'project'" class="project-progress-page">
@@ -4612,7 +4656,7 @@ const App = {
                 </div>
                 <section v-else class="empty-state favorites-empty">
                   <h2>还没有任务</h2>
-                  <p>申请参与、认领或资助课题后，会在这里看到课题状态和你的任务进展。</p>
+                  <p>参与、认领或资助课题后，会在这里看到课题状态和你的任务进展。</p>
                   <button class="primary-button" type="button" @click="navigate('projects')">去课题库</button>
                 </section>
               </section>
@@ -4950,7 +4994,7 @@ const App = {
                 <div class="panel-title-row">
                   <div>
                     <h2>系统入口</h2>
-                    <p>管理员可上传或更新左侧边栏二维码，访客和普通用户只会看到最新展示结果。</p>
+                    <p>管理员可上传或更新常见问答底部二维码，未上传的二维码不会公开展示。</p>
                   </div>
                   <button class="ghost-button" type="button" :disabled="state.admin.loadingSidebarQrs" @click="loadSidebarQrs">
                     {{ state.admin.loadingSidebarQrs ? '正在刷新...' : '刷新' }}
@@ -5394,7 +5438,7 @@ const App = {
                         <button class="icon-button" type="button" title="置底" @click="moveThemeSort(theme, 'bottom')"><span class="material-symbols-rounded">vertical_align_bottom</span></button>
                         <button class="ghost-button" type="button" @click="editTheme(theme)">编辑</button>
                         <a v-if="adminThemeDatasetFile(theme)?.detail_pdf_path" class="ghost-button" :href="themeFileDetailPdfHref(adminThemeDatasetFile(theme))" download>下载PDF</a>
-                        <button class="ghost-button" type="button" :disabled="!theme.is_active" @click="deactivateTheme(theme)">停用</button>
+                        <button class="ghost-button" type="button" @click="deactivateTheme(theme)">{{ theme.is_active ? '停用' : '启用' }}</button>
                         <button class="ghost-button danger" type="button" @click="deleteTheme(theme)">删除</button>
                       </span>
                     </div>
@@ -6210,7 +6254,7 @@ function parseRoute() {
   if (parts[0] === "project" && parts[1]) {
     return { name: "project", params: { id: parts[1] }, fullPath: location.hash };
   }
-  const known = new Set(["home", "projects", "dashboard", "favorites", "admin", "login", "register", "password-reset", "password-change"]);
+  const known = new Set(["home", "projects", "faq", "dashboard", "favorites", "admin", "login", "register", "password-reset", "password-change"]);
   return { name: known.has(parts[0]) ? parts[0] : "home", params: {}, fullPath: location.hash };
 }
 
@@ -6322,7 +6366,7 @@ function auditActorLabel(entry) {
 function auditTargetLabel(entry) {
   if (!entry) return "-";
   const labels = {
-    ProjectInterest: "申请参与",
+    ProjectInterest: "参与",
     ProjectClaimIntent: "认领意向",
     SponsorIntent: "资助意向",
     ProjectTask: "任务",
@@ -6652,7 +6696,7 @@ function roleCardsFor(capabilities) {
   if (capabilities.statistical_design) cards.push({ title: "统计设计", body: "可参与样本量、终点、统计方案和结果解释。" });
   if (capabilities.funding_support) cards.push({ title: "资源支持", body: "可表达经费、算力、标注预算或专家咨询支持意向。" });
   if (capabilities.manage_projects) cards.push({ title: "内容管理", body: "可维护主题、课题、PDF 文档和 JSON 模板导入。" });
-  if (!cards.length) cards.push({ title: "开放协作", body: "可关注、点赞、申请参与和认领开放课题。" });
+  if (!cards.length) cards.push({ title: "开放协作", body: "可关注、点赞、参与和认领开放课题。" });
   return cards;
 }
 
