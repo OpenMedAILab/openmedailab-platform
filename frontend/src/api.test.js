@@ -118,6 +118,7 @@ test("workspace lifecycle api wrappers are exposed", async () => {
     "unscore",
     "updateMeTaskStatus",
     "createMeContribution",
+    "createMeContributionWithFile",
     "withdrawInteraction",
     "adminOverview",
     "adminInteractions",
@@ -127,7 +128,6 @@ test("workspace lifecycle api wrappers are exposed", async () => {
     "assignAdminTask",
     "updateAdminTaskStatus",
     "adminContributions",
-    "reviewAdminContribution",
     "adminCredits",
     "adminAuditLogs",
     "adminUploadThemeFileDetailPdf",
@@ -151,6 +151,29 @@ test("project lifecycle api exposes backend json import endpoint", async () => {
   assert.equal(typeof api.adminProjects, "function");
   assert.equal(typeof api.adminBulkArchiveProjects, "function");
   assert.equal(typeof api.adminBulkProjectAction, "function");
+});
+
+test("project progress discussion and theme reorder api wrappers are exposed", async () => {
+  globalThis.window = { OPENMEDAILAB_API_BASE: "" };
+  globalThis.location = { port: "5173" };
+  globalThis.fetch = async () => {
+    throw new Error("No network calls expected");
+  };
+
+  const { api } = await import(`./api.js?project-progress-discussions=${Date.now()}`);
+
+  [
+    "projectProgress",
+    "projectDiscussions",
+    "createProjectDiscussion",
+    "updateProjectDiscussion",
+    "deleteProjectDiscussion",
+    "adminProjectDiscussions",
+    "moderateProjectDiscussion",
+    "adminReorderThemes",
+    "sidebarQrs",
+    "adminUploadSidebarQr"
+  ].forEach((method) => assert.equal(typeof api[method], "function", `${method} should be exposed`));
 });
 
 test("project lifecycle api reuses admin project update/delete instead of redundant stage wrappers", async () => {

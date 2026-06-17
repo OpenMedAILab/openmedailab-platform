@@ -52,6 +52,25 @@ export function qualityCheckProjectPayload(payload) {
   return { errors, warnings: [] };
 }
 
+export function normalizeProjectImportFiles(files) {
+  return Array.from(files || []).map((item) => {
+    const sourceFile = item?.file || item;
+    const relativePath = normalizePath(item?.relativePath || item?.webkitRelativePath || sourceFile?.webkitRelativePath || sourceFile?.name || item?.name);
+    const name = normalizePath(item?.name || sourceFile?.name || relativePath.split("/").pop());
+    return {
+      file: sourceFile,
+      name,
+      relativePath,
+      webkitRelativePath: relativePath,
+      text: () => {
+        if (typeof item?.text === "function") return item.text();
+        if (typeof sourceFile?.text === "function") return sourceFile.text();
+        return Promise.resolve("");
+      }
+    };
+  });
+}
+
 export function summarizeProjectImportFiles(files) {
   const allFiles = Array.from(files || []);
   const jsonFiles = allFiles.filter(isJsonFile);
@@ -75,6 +94,10 @@ export function selectedProjectJsonFiles(files) {
 
 export function projectImportFileKey(file) {
   return fileStemKey(file);
+}
+
+export function projectImportUploadFile(file) {
+  return file?.file || file;
 }
 
 export function sortProjectImportRows(rows) {
@@ -178,11 +201,15 @@ function isPdfFile(file) {
 }
 
 function fileName(file) {
-  return String(file?.webkitRelativePath || file?.name || "");
+  return normalizePath(file?.relativePath || file?.webkitRelativePath || file?.name || file?.file?.name || "");
 }
 
 function fileStemKey(file) {
   return fileName(file).replace(/\.[^/.]+$/, "").toLowerCase();
+}
+
+function normalizePath(value) {
+  return String(value || "").replace(/\\/g, "/");
 }
 
 function normalizedRowTopicId(row) {

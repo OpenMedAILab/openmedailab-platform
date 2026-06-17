@@ -59,10 +59,14 @@ MIDDLEWARE = [
     'api.middleware.SimpleCorsMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'api.middleware.LastSeenMiddleware',
     'api.middleware.PasswordChangeRequiredMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+
+OPENMEDAILAB_ONLINE_WINDOW_SECONDS = int(os.getenv("OPENMEDAILAB_ONLINE_WINDOW_SECONDS", "300"))
+OPENMEDAILAB_LAST_SEEN_UPDATE_INTERVAL_SECONDS = int(os.getenv("OPENMEDAILAB_LAST_SEEN_UPDATE_INTERVAL_SECONDS", "60"))
 
 ROOT_URLCONF = 'config.urls'
 

@@ -1,13 +1,13 @@
-import { createApp, computed, onBeforeUnmount, onMounted, reactive, watch } from "vue";
+import { createApp, computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { API_BASE, api, initCsrf } from "./api.js";
 import { isPointInsideProfileHoverZone } from "./profileMenu.js";
-import { parseProjectJsonImport, projectImportFileKey, qualityCheckProjectPayload, selectedProjectJsonFiles, sortProjectImportRows, summarizeProjectImportFiles } from "./projectJsonImport.js";
+import { normalizeProjectImportFiles, parseProjectJsonImport, projectImportFileKey, projectImportUploadFile, qualityCheckProjectPayload, selectedProjectJsonFiles, sortProjectImportRows, summarizeProjectImportFiles } from "./projectJsonImport.js";
 import { latestRelease, releaseHistory, sectionEntries } from "./release.js";
 
 const PAGE_SIZE = 9;
 const ADMIN_PROJECT_PAGE_SIZE = 100;
 const WORKSPACE_TABS = new Set(["overview", "favorites", "interactions", "uploads", "profile"]);
-const ADMIN_TABS = new Set(["overview", "interactions", "contributions", "projects", "themes", "users", "backup", "audit"]);
+const ADMIN_TABS = new Set(["overview", "interactions", "contributions", "projects", "themes", "users", "system", "backup", "audit"]);
 const FOLLOWABLE_STAGE_VALUES = new Set(["open_recruiting", "team_building", "active"]);
 const RECRUITING_STAGE_VALUES = new Set(["open_recruiting", "team_building"]);
 const TASK_MANAGEMENT_STAGE_VALUES = ["team_building", "active", "paused"];
@@ -19,6 +19,10 @@ const RELATION_STATUS_LABELS = {
   rejected: "被拒绝",
   withdrawn: "已撤回"
 };
+const SIDEBAR_QR_ENTRIES = [
+  { key: "admin-contact", label: "联系管理员", image: "", icon: "support_agent" },
+  { key: "community", label: "加入社区", image: "", icon: "group_add" }
+];
 
 const state = reactive({
   booting: true,
@@ -35,7 +39,9 @@ const state = reactive({
     profile_roles: [],
     participation_roles: [],
     claim_types: [],
-    sponsor_types: []
+    sponsor_types: [],
+    sidebar_qr_entries: [],
+    platform_stats: { registered_user_count: 0, online_user_count: 0, online_window_seconds: 300 }
   },
   projects: [],
   pagination: {},
@@ -60,6 +66,7 @@ const state = reactive({
   savingMyProject: false,
   deletingMyProjectId: null,
   favoriteProjectIds: [],
+  themeDropdownOpen: false,
   likedProjectIds: [],
   unlikedProjectIds: [],
   participationProjectIds: [],
@@ -76,6 +83,11 @@ const state = reactive({
   favoritesLoaded: false,
   profileMenuOpen: false,
   releaseModalOpen: false,
+  sidebarQrModal: {
+    open: false,
+    entry: null,
+    imageOk: true
+  },
   confirmDialog: {
     open: false,
     title: "",
@@ -86,10 +98,28 @@ const state = reactive({
   },
   expandedReleaseVersions: [],
   schema: null,
+  projectProgress: {
+    loading: false,
+    project: null,
+    progressText: "",
+    documents: [],
+    timeline: [],
+    discussions: [],
+    discussionPagination: {},
+    discussionForm: { content: "" },
+    replyDrafts: {},
+    submittingDiscussion: false,
+    editingDiscussionId: null,
+    deletingDiscussionId: null,
+    moderatingDiscussionId: null
+  },
   admin: {
     activeTab: "overview",
     overview: null,
     themes: [],
+    themeSortDirty: false,
+    themeSortSaving: false,
+    themeSortBaselineIds: [],
     projects: [],
     projectPagination: {},
     projectFilters: { q: "", theme: "", page: 1, page_size: ADMIN_PROJECT_PAGE_SIZE },
@@ -111,6 +141,9 @@ const state = reactive({
     loadingUsers: false,
     resettingUid: "",
     passwordResetResult: null,
+    sidebarQrs: [],
+    sidebarQrUploads: {},
+    loadingSidebarQrs: false,
     interactions: [],
     interactionPagination: {},
     interactionFilters: { type: "", status: "pending", q: "", page: 1, page_size: 50 },
@@ -123,8 +156,7 @@ const state = reactive({
       loading: false,
       project: null,
       interactions: [],
-      contributions: [],
-      reviewDrafts: {}
+      contributions: []
     },
     tasks: [],
     taskPagination: {},
@@ -209,6 +241,13 @@ const App = {
     });
     const selectedTheme = computed(() => state.meta.themes.find((theme) => theme.slug === state.filters.theme) || null);
     const homeThemeCards = computed(() => topicThemeCards(state.meta.themes));
+    const homeThemeRowThemes = computed(() => homeThemeCards.value.slice(0, 4));
+    const homeThemeDropdownThemes = computed(() => homeThemeCards.value.slice(4));
+    const homeThemeRowColumnCount = computed(() => homeThemeRowThemes.value.length + 2);
+    const selectedThemeHiddenInShortcutRow = computed(() => Boolean(selectedTheme.value && !homeThemeRowThemes.value.some((theme) => theme.slug === selectedTheme.value.slug)));
+    const allThemesTriggerActive = computed(() => state.themeDropdownOpen || selectedThemeHiddenInShortcutRow.value);
+    const platformStats = computed(() => state.meta.platform_stats || { registered_user_count: 0, online_user_count: 0, online_window_seconds: 300 });
+    const sidebarQrEntries = computed(() => mergeSidebarQrEntries(state.meta.sidebar_qr_entries || []));
     const roleCards = computed(() => roleCardsFor(capabilities.value));
     const favoriteProjects = computed(() => (state.dashboard?.follows || []).map((item) => item.project));
     const myProjectTasks = computed(() => buildMyProjectTasks(state.dashboard));
@@ -234,15 +273,22 @@ const App = {
       { title: "任务审批", value: state.admin.overview?.counts?.pending_interactions || 0, tab: "interactions" },
       { title: "任务结果", value: state.admin.overview?.counts?.submitted_contributions || 0, tab: "contributions" },
       { title: "主题管理", value: state.admin.overview?.counts?.themes || 0, tab: "themes" },
+      { title: "系统入口", value: "二维码", tab: "system" },
       { title: "备份恢复", value: "ZIP", tab: "backup" },
       { title: "审计日志", value: state.admin.overview?.counts?.audit_logs || 0, tab: "audit" }
     ]);
+    const projectProgressDocuments = computed(() => state.projectProgress.documents || []);
+    const projectProgressTimelineItems = computed(() => state.projectProgress.timeline || []);
     const releaseLatest = computed(() => latestRelease(state.meta.release));
     const releaseHistoryItems = computed(() => releaseHistory(state.meta.release));
     const profilePointer = { x: 0, y: 0 };
+    const jsonImportJsonFilesInput = ref(null);
+    const jsonImportDirectoryInput = ref(null);
+    const jsonImportMixedFilesInput = ref(null);
     let confirmDialogResolver = null;
     const modalOpen = computed(() => Boolean(
       state.releaseModalOpen ||
+      state.sidebarQrModal.open ||
       state.confirmDialog.open ||
       state.admin.themeFormOpen ||
       state.admin.projectFormOpen ||
@@ -321,6 +367,9 @@ const App = {
       if (state.route.name === "dashboard") {
         await loadDashboard();
       }
+      if (state.route.name === "project") {
+        await loadProjectProgress();
+      }
       if (state.route.name === "favorites") {
         await loadFavorites({ force: true });
       }
@@ -396,6 +445,145 @@ const App = {
       if (!state.hasMoreProjects || state.loadingMore || state.loading) return;
       state.filters.page += 1;
       await loadProjects();
+    }
+
+    async function loadProjectProgress() {
+      const projectId = Number(state.route.params.id);
+      if (!projectId) {
+        navigate("home");
+        return;
+      }
+      state.projectProgress.loading = true;
+      state.loading = true;
+      try {
+        const [progress, discussions] = await Promise.all([
+          api.projectProgress(projectId),
+          api.projectDiscussions(projectId, { page_size: 50 })
+        ]);
+        state.projectProgress.project = progress.project;
+        state.projectProgress.progressText = progress.progress_text || "";
+        state.projectProgress.documents = progress.documents || [];
+        state.projectProgress.timeline = progress.timeline || [];
+        state.projectProgress.discussions = discussions.results || [];
+        state.projectProgress.discussionPagination = discussions.pagination || {};
+        state.projectProgress.replyDrafts = {};
+      } catch (error) {
+        showToast(error.message || "课题进度读取失败");
+        state.projectProgress.project = null;
+        state.projectProgress.documents = [];
+        state.projectProgress.timeline = [];
+        state.projectProgress.discussions = [];
+      } finally {
+        state.projectProgress.loading = false;
+        state.loading = false;
+      }
+    }
+
+    async function loadProjectDiscussions() {
+      const projectId = state.projectProgress.project?.id || Number(state.route.params.id);
+      if (!projectId) return;
+      try {
+        const data = await api.projectDiscussions(projectId, { page_size: 50 });
+        state.projectProgress.discussions = data.results || [];
+        state.projectProgress.discussionPagination = data.pagination || {};
+      } catch (error) {
+        showToast(error.message || "讨论区读取失败");
+      }
+    }
+
+    async function submitProjectDiscussion(parent = null) {
+      const projectId = state.projectProgress.project?.id || Number(state.route.params.id);
+      if (!projectId) return;
+      if (!ensureLogin()) return;
+      const content = parent
+        ? String(state.projectProgress.replyDrafts[parent.id] || "").trim()
+        : String(state.projectProgress.discussionForm.content || "").trim();
+      if (!content) {
+        showToast("请先输入讨论内容");
+        return;
+      }
+      state.projectProgress.submittingDiscussion = true;
+      try {
+        await api.createProjectDiscussion(projectId, {
+          content,
+          parent_id: parent?.id || null
+        });
+        if (parent) {
+          state.projectProgress.replyDrafts[parent.id] = "";
+        } else {
+          state.projectProgress.discussionForm.content = "";
+        }
+        showToast(parent ? "回复已发布" : "讨论已发布");
+        await loadProjectDiscussions();
+      } catch (error) {
+        showToast(error.message || "讨论发布失败");
+      } finally {
+        state.projectProgress.submittingDiscussion = false;
+      }
+    }
+
+    async function updateProjectDiscussion(discussion) {
+      if (!discussion?.id || !canManageDiscussion(discussion)) return;
+      const content = window.prompt("编辑讨论内容", discussion.content || "");
+      if (content === null) return;
+      const normalized = String(content || "").trim();
+      if (!normalized) {
+        showToast("讨论内容不能为空");
+        return;
+      }
+      state.projectProgress.editingDiscussionId = discussion.id;
+      try {
+        await api.updateProjectDiscussion(discussion.id, { content: normalized });
+        showToast("讨论已更新");
+        await loadProjectDiscussions();
+      } catch (error) {
+        showToast(error.message || "讨论更新失败");
+      } finally {
+        state.projectProgress.editingDiscussionId = null;
+      }
+    }
+
+    async function deleteProjectDiscussion(discussion) {
+      if (!discussion?.id || !canManageDiscussion(discussion)) return;
+      const confirmed = await openConfirmDialog({
+        title: "确认删除讨论",
+        message: "删除后这条讨论不会在课题讨论区公开展示。",
+        confirmText: "删除讨论",
+        tone: "danger"
+      });
+      if (!confirmed) return;
+      state.projectProgress.deletingDiscussionId = discussion.id;
+      try {
+        await api.deleteProjectDiscussion(discussion.id);
+        showToast("讨论已删除");
+        await loadProjectDiscussions();
+      } catch (error) {
+        showToast(error.message || "讨论删除失败");
+      } finally {
+        state.projectProgress.deletingDiscussionId = null;
+      }
+    }
+
+    async function moderateProjectDiscussion(discussion, status = "hidden") {
+      if (!discussion?.id || !can("manage_projects")) return;
+      state.projectProgress.moderatingDiscussionId = discussion.id;
+      try {
+        await api.moderateProjectDiscussion(discussion.id, {
+          status,
+          moderation_reason: status === "hidden" ? "管理员隐藏" : ""
+        });
+        showToast(status === "visible" ? "讨论已恢复" : "讨论已隐藏");
+        await loadProjectDiscussions();
+      } catch (error) {
+        showToast(error.message || "讨论处理失败");
+      } finally {
+        state.projectProgress.moderatingDiscussionId = null;
+      }
+    }
+
+    function canManageDiscussion(discussion) {
+      const uid = state.user?.profile?.uid;
+      return Boolean(uid && discussion?.author?.uid === uid) || can("manage_projects");
     }
 
     async function loadDashboard() {
@@ -830,22 +1018,37 @@ const App = {
     async function submitContribution() {
       if (!state.user) return;
       try {
+        const form = state.forms.contribution;
         const payload = {
-          project_id: Number(state.forms.contribution.project_id),
-          task_id: state.forms.contribution.task_id ? Number(state.forms.contribution.task_id) : null,
-          title: state.forms.contribution.title,
-          result_type: state.forms.contribution.result_type || "stage",
-          description: state.forms.contribution.description,
-          file_path: state.forms.contribution.file_path
+          project_id: Number(form.project_id),
+          task_id: form.task_id ? Number(form.task_id) : null,
+          title: form.title,
+          result_type: form.result_type || "stage",
+          description: form.description
         };
         if (!payload.project_id || !payload.title.trim()) {
           showToast("任务结果需要选择课题并填写标题");
           return;
         }
+        if (form.documentFile && !contributionDocumentFileAllowed(form.documentFile)) {
+          showToast("任务结果文档只支持 PDF 或 Markdown");
+          return;
+        }
         state.contributionModal.submitting = true;
-        await api.createMeContribution(payload);
+        if (form.documentFile) {
+          const formData = new FormData();
+          formData.append("project_id", String(payload.project_id));
+          if (payload.task_id) formData.append("task_id", String(payload.task_id));
+          formData.append("title", payload.title);
+          formData.append("result_type", payload.result_type);
+          formData.append("description", payload.description || "");
+          formData.append("file", form.documentFile);
+          await api.createMeContributionWithFile(formData);
+        } else {
+          await api.createMeContribution(payload);
+        }
         closeContributionModal();
-        showToast("任务结果已提交，等待管理员审核");
+        showToast("任务结果已提交");
         await loadDashboard();
       } catch (error) {
         showToast(error.message || "任务结果提交失败");
@@ -854,13 +1057,26 @@ const App = {
       }
     }
 
+    function setContributionFile(event) {
+      const file = event.target.files?.[0] || null;
+      state.forms.contribution.documentFile = file;
+      if (file && !contributionDocumentFileAllowed(file)) {
+        showToast("任务结果文档只支持 PDF 或 Markdown");
+      }
+    }
+
+    function clearContributionFile() {
+      state.forms.contribution.documentFile = null;
+      state.forms.contribution.inputKey += 1;
+    }
+
     async function loadAdmin() {
       if (!can("view_admin_console")) return;
       state.loading = true;
       try {
         const [overview, themes] = await Promise.all([api.adminOverview(), api.adminThemes()]);
         state.admin.overview = overview;
-        state.admin.themes = themes.results;
+        resetThemeSortState(themes.results || []);
         await loadActiveAdminTab();
       } catch (error) {
         showToast(error.message);
@@ -886,6 +1102,7 @@ const App = {
         await loadAdminInteractions({ reset: true });
       }
       if (state.admin.activeTab === "contributions") await loadAdminTaskProjects({ reset: true });
+      if (state.admin.activeTab === "system") await loadSidebarQrs();
       if (state.admin.activeTab === "audit") await loadAdminAuditLogs({ reset: true });
     }
 
@@ -991,7 +1208,16 @@ const App = {
 
     async function selectTheme(slug = "") {
       state.filters.theme = slug;
+      closeThemeDropdown();
       await applyFilters();
+    }
+
+    function toggleThemeDropdown() {
+      state.themeDropdownOpen = !state.themeDropdownOpen;
+    }
+
+    function closeThemeDropdown() {
+      state.themeDropdownOpen = false;
     }
 
     async function login() {
@@ -1912,6 +2138,54 @@ const App = {
       return state.admin.themeFiles.find((file) => file.theme_id === theme.id && file.is_active) || null;
     }
 
+    function resetThemeSortState(themes = []) {
+      state.admin.themes = [...themes];
+      state.admin.themeSortBaselineIds = state.admin.themes.map((theme) => theme.id);
+      state.admin.themeSortDirty = false;
+    }
+
+    function moveThemeSort(theme, direction) {
+      if (!theme?.id || state.admin.themeSortSaving) return;
+      const index = state.admin.themes.findIndex((item) => item.id === theme.id);
+      if (index < 0) return;
+      let targetIndex = index;
+      if (direction === "up") targetIndex = Math.max(0, index - 1);
+      if (direction === "down") targetIndex = Math.min(state.admin.themes.length - 1, index + 1);
+      if (direction === "top") targetIndex = 0;
+      if (direction === "bottom") targetIndex = state.admin.themes.length - 1;
+      if (targetIndex === index) return;
+      const rows = [...state.admin.themes];
+      const [moved] = rows.splice(index, 1);
+      rows.splice(targetIndex, 0, moved);
+      state.admin.themes = rows;
+      state.admin.themeSortDirty = !sameThemeOrder(rows.map((item) => item.id), state.admin.themeSortBaselineIds);
+    }
+
+    function restoreThemeSort() {
+      const rank = new Map(state.admin.themeSortBaselineIds.map((id, index) => [id, index]));
+      state.admin.themes = [...state.admin.themes].sort((a, b) => (rank.get(a.id) ?? 9999) - (rank.get(b.id) ?? 9999));
+      state.admin.themeSortDirty = false;
+    }
+
+    async function saveThemeSort() {
+      if (!can("manage_themes") || !state.admin.themeSortDirty || state.admin.themeSortSaving) return;
+      state.admin.themeSortSaving = true;
+      try {
+        const data = await api.adminReorderThemes({ theme_ids: state.admin.themes.map((theme) => theme.id) });
+        resetThemeSortState(data.themes || state.admin.themes);
+        state.meta = await api.meta();
+        showToast("主题排序已保存");
+      } catch (error) {
+        showToast(error.message || "主题排序保存失败");
+      } finally {
+        state.admin.themeSortSaving = false;
+      }
+    }
+
+    function sameThemeOrder(left = [], right = []) {
+      return left.length === right.length && left.every((id, index) => id === right[index]);
+    }
+
     async function editTheme(theme) {
       if (!can("manage_themes")) return;
       closeMutuallyExclusiveModals("themeForm");
@@ -2050,6 +2324,14 @@ const App = {
       }
     }
 
+    function setProjectProgressDocumentFile(event) {
+      const file = event.target.files?.[0] || null;
+      state.admin.projectForm.progressDocumentUpload.file = file;
+      if (file && !state.admin.projectForm.progressDocumentUpload.title) {
+        state.admin.projectForm.progressDocumentUpload.title = file.name.replace(/\.[^.]+$/, "");
+      }
+    }
+
     function setMyProjectDocumentFile(event) {
       const file = event.target.files?.[0] || null;
       state.myProjectForm.documentUpload.file = file;
@@ -2071,8 +2353,29 @@ const App = {
       });
     }
 
+    async function uploadProjectProgressDocument() {
+      if (!can("manage_projects")) return;
+      await uploadProjectDocumentForForm(state.admin.projectForm, api.adminUploadProjectDocuments, {
+        uploadKey: "progressDocumentUpload",
+        documentKind: "progress",
+        successMessage: "进度 PDF 已上传",
+        defaultDescription: "项目进度文档",
+        afterUpload: async () => {
+          await Promise.all([
+            loadAdminProjects({ reset: true }).catch(() => null),
+            loadProjects({ reset: true }).catch(() => null)
+          ]);
+          if (state.route.name === "project" && Number(state.route.params?.id) === Number(state.admin.projectForm.id)) {
+            await loadProjectProgress(state.admin.projectForm.id).catch(() => null);
+          }
+        }
+      });
+    }
+
     async function uploadProjectDocumentForForm(form, uploadMethod, options = {}) {
-      const upload = form.documentUpload;
+      const uploadKey = options.uploadKey || "documentUpload";
+      const upload = form[uploadKey];
+      const documentKind = options.documentKind || "detail";
       const projectId = options.projectId || form.id;
       if (!projectId) {
         showToast("请先保存课题，再上传文档");
@@ -2090,14 +2393,14 @@ const App = {
       try {
         const formData = new FormData();
         formData.append("project_id", String(projectId));
-        formData.append("document_kind", "detail");
+        formData.append("document_kind", options.documentKind || "detail");
         formData.append("doc_type", "pdf");
         formData.append("title", upload.title.trim());
-        formData.append("description", upload.description.trim() || "课题 PDF 详情");
+        formData.append("description", upload.description.trim() || options.defaultDescription || (documentKind === "progress" ? "项目进度文档" : "课题 PDF 详情"));
         formData.append("files", upload.file);
         const data = await uploadMethod(formData);
         form.documents = data.documents || data.saved || [];
-        form.documentUpload = { ...emptyProjectDocumentUpload(), inputKey: upload.inputKey + 1 };
+        form[uploadKey] = { ...emptyProjectDocumentUpload(documentKind), inputKey: upload.inputKey + 1 };
         if (!options.silent) {
           showToast(options.successMessage || "课题 PDF 已上传");
         }
@@ -2477,7 +2780,6 @@ const App = {
       state.admin.taskProjectDetail.project = project;
       state.admin.taskProjectDetail.interactions = [];
       state.admin.taskProjectDetail.contributions = [];
-      state.admin.taskProjectDetail.reviewDrafts = {};
       try {
         const detail = await api.adminProject(project.id);
         const [interactions, contributions] = await Promise.all([
@@ -2487,9 +2789,6 @@ const App = {
         state.admin.taskProjectDetail.project = detail;
         state.admin.taskProjectDetail.interactions = interactions;
         state.admin.taskProjectDetail.contributions = contributions;
-        state.admin.taskProjectDetail.reviewDrafts = Object.fromEntries(
-          contributions.map((item) => [item.id, { review_comment: item.review_comment || "" }])
-        );
       } catch (error) {
         showToast(error.message || "任务详情读取失败");
       } finally {
@@ -2503,7 +2802,6 @@ const App = {
       state.admin.taskProjectDetail.project = null;
       state.admin.taskProjectDetail.interactions = [];
       state.admin.taskProjectDetail.contributions = [];
-      state.admin.taskProjectDetail.reviewDrafts = {};
     }
 
     async function fetchProjectApprovedInteractions(project) {
@@ -2733,38 +3031,6 @@ const App = {
       }
     }
 
-    async function reviewContribution(contribution, status, options = {}) {
-      try {
-        const draft = state.admin.taskProjectDetail.reviewDrafts[contribution.id] || {};
-        if (options.closeProject) {
-          const confirmed = await openConfirmDialog({
-            title: "通过并结题归档",
-            message: `确认将「${contribution.project?.title || state.admin.taskProjectDetail.project?.title || "该课题"}」结题归档吗？归档后公开课题库不可见，但会保留数据库和审计记录。`,
-            confirmText: "通过并结题",
-            tone: "danger"
-          });
-          if (!confirmed) return;
-        }
-        await api.reviewAdminContribution(contribution.id, {
-          status,
-          review_comment: draft.review_comment || "",
-          grant_reward: false
-        });
-        if (options.closeProject) {
-          await api.adminUpdateProject(contribution.project.id, { stage: "archived", is_public: false });
-        }
-        showToast(options.closeProject ? "任务结果已通过，课题已结题归档" : status === "approved" ? "任务结果已通过" : "任务结果状态已更新");
-        if (state.admin.taskProjectDetail.open && state.admin.taskProjectDetail.project) {
-          await openTaskProjectDetail(state.admin.taskProjectDetail.project);
-        } else {
-          await loadAdminTaskProjects({ reset: true });
-        }
-        await loadProjects({ reset: true }).catch(() => null);
-      } catch (error) {
-        showToast(error.message);
-      }
-    }
-
     async function loadAdminCredits({ reset = false } = {}) {
       if (!can("manage_credits")) return;
       if (reset) state.admin.creditFilters.page = 1;
@@ -2854,6 +3120,68 @@ const App = {
       }
     }
 
+    async function loadSidebarQrs() {
+      state.admin.loadingSidebarQrs = true;
+      try {
+        const data = await api.sidebarQrs();
+        state.admin.sidebarQrs = data.entries || [];
+        state.meta.sidebar_qr_entries = data.entries || [];
+      } catch (error) {
+        showToast(error.message || "二维码配置读取失败");
+      } finally {
+        state.admin.loadingSidebarQrs = false;
+      }
+    }
+
+    function sidebarQrUploadState(key) {
+      if (!state.admin.sidebarQrUploads[key]) {
+        state.admin.sidebarQrUploads[key] = {
+          file: null,
+          inputKey: 0,
+          uploading: false
+        };
+      }
+      return state.admin.sidebarQrUploads[key];
+    }
+
+    function setSidebarQrUploadFile(entry, event) {
+      const upload = sidebarQrUploadState(entry.key);
+      upload.file = event.target.files?.[0] || null;
+    }
+
+    async function uploadSidebarQr(entry) {
+      if (!can("view_admin_console")) return;
+      const upload = sidebarQrUploadState(entry.key);
+      if (!upload.file) {
+        showToast("请选择二维码图片");
+        return;
+      }
+      upload.uploading = true;
+      try {
+        const formData = new FormData();
+        formData.append("file", upload.file);
+        const data = await api.adminUploadSidebarQr(entry.key, formData);
+        syncSidebarQrEntry(data.entry);
+        upload.file = null;
+        upload.inputKey += 1;
+        showToast(`${entry.label}二维码已更新`);
+      } catch (error) {
+        showToast(error.message || "二维码上传失败");
+      } finally {
+        upload.uploading = false;
+      }
+    }
+
+    function syncSidebarQrEntry(entry) {
+      if (!entry) return;
+      state.admin.sidebarQrs = replaceSidebarQrEntry(state.admin.sidebarQrs, entry);
+      state.meta.sidebar_qr_entries = replaceSidebarQrEntry(state.meta.sidebar_qr_entries, entry);
+      if (state.sidebarQrModal.entry?.key === entry.key) {
+        state.sidebarQrModal.entry = { ...state.sidebarQrModal.entry, ...entry };
+        state.sidebarQrModal.imageOk = true;
+      }
+    }
+
     async function setAdminTab(tab) {
       if (!ADMIN_TABS.has(tab)) {
         state.admin.activeTab = "overview";
@@ -2893,8 +3221,66 @@ const App = {
       URL.revokeObjectURL(url);
     }
 
+    async function chooseJsonImportDirectory() {
+      if (state.admin.jsonImport.applying) return;
+      if (typeof window.showDirectoryPicker === "function") {
+        try {
+          const directoryHandle = await window.showDirectoryPicker({ mode: "read" });
+          const directoryFiles = await filesFromDirectoryHandle(directoryHandle);
+          await processJsonImportFiles(directoryFiles);
+          return;
+        } catch (error) {
+          if (error?.name === "AbortError") return;
+        }
+      }
+      const input = jsonImportDirectoryInput.value;
+      if (!directoryInputSupportsFolders(input)) {
+        showToast("当前浏览器不支持目录选择，已改为选择目录内 JSON/PDF 文件");
+        chooseJsonImportMixedFiles();
+        return;
+      }
+      input.value = "";
+      input.click();
+    }
+
+    function directoryInputSupportsFolders(input) {
+      const inputPrototype = typeof HTMLInputElement === "undefined" ? null : HTMLInputElement.prototype;
+      return Boolean(input && ("webkitdirectory" in input || (inputPrototype && "webkitdirectory" in inputPrototype)));
+    }
+
+    function chooseJsonImportMixedFiles() {
+      if (state.admin.jsonImport.applying) return;
+      const input = jsonImportMixedFilesInput.value;
+      if (!input) {
+        showToast("当前浏览器无法打开文件选择器");
+        return;
+      }
+      input.value = "";
+      input.click();
+    }
+
+    function chooseJsonImportJsonFiles() {
+      if (state.admin.jsonImport.applying) return;
+      const input = jsonImportJsonFilesInput.value;
+      if (!input) {
+        showToast("当前浏览器无法打开文件选择器");
+        return;
+      }
+      input.value = "";
+      input.click();
+    }
+
     async function handleJsonFiles(event) {
-      const selectedFiles = Array.from(event.target.files || []);
+      await processJsonImportFiles(event.target.files || []);
+      event.target.value = "";
+    }
+
+    async function processJsonImportFiles(rawFiles) {
+      const selectedFiles = normalizeProjectImportFiles(rawFiles);
+      if (!selectedFiles.length) {
+        showToast("未选择文件或当前浏览器不支持目录选择，请使用选择目录内 JSON/PDF 文件");
+        return;
+      }
       const selection = summarizeProjectImportFiles(selectedFiles);
       const files = selectedProjectJsonFiles(selectedFiles);
       const pdfFilesByKey = new Map(
@@ -2908,7 +3294,6 @@ const App = {
       state.admin.jsonImport.previewOpen = false;
       if (!files.length) {
         showToast("没有找到可导入的课题 JSON");
-        event.target.value = "";
         return;
       }
       const rows = [];
@@ -2921,7 +3306,26 @@ const App = {
       }
       state.admin.jsonImport.rows = sortedRows;
       state.admin.jsonImport.previewOpen = true;
-      event.target.value = "";
+    }
+
+    async function filesFromDirectoryHandle(directoryHandle, parentPath = "") {
+      const files = [];
+      for await (const [name, handle] of directoryHandle.entries()) {
+        const relativePath = parentPath ? `${parentPath}/${name}` : name;
+        if (handle.kind === "directory") {
+          files.push(...(await filesFromDirectoryHandle(handle, relativePath)));
+          continue;
+        }
+        if (handle.kind !== "file") continue;
+        const file = await handle.getFile();
+        files.push({
+          file,
+          name: file.name || name,
+          relativePath,
+          text: () => file.text()
+        });
+      }
+      return files;
     }
 
     async function buildJsonImportRows(file, pdfFilesByKey = new Map()) {
@@ -3065,7 +3469,7 @@ const App = {
         await loadProjects({ reset: true });
         const [meta, themes] = await Promise.all([api.meta(), api.adminThemes()]);
         state.meta = meta;
-        state.admin.themes = themes.results;
+        resetThemeSortState(themes.results || []);
       } catch (error) {
         rows.forEach((row) => {
           row.errors = [...row.errors, error.message || "提交失败"];
@@ -3089,7 +3493,7 @@ const App = {
           formData.append("doc_type", "pdf");
           formData.append("title", "项目详细说明");
           formData.append("description", "完整课题方案 PDF");
-          formData.append("files", row.documentFile);
+          formData.append("files", projectImportUploadFile(row.documentFile));
           await api.adminUploadProjectDocuments(formData);
           stats.bound += 1;
           row.actionLabel = `${row.actionLabel} · PDF已绑定`;
@@ -3129,7 +3533,7 @@ const App = {
       const slug = window.prompt("主题 slug（可留空自动生成）", uniqueSlugHint(confirmedName));
       const description = window.prompt("主题说明", "由 JSON 导入确认创建") || "";
       const theme = await api.adminCreateTheme({ name: confirmedName.trim(), slug: String(slug || "").trim(), description });
-      state.admin.themes = [...state.admin.themes, theme];
+      resetThemeSortState([...state.admin.themes, theme]);
       return theme;
     }
 
@@ -3208,6 +3612,10 @@ const App = {
       if (state.profileMenuOpen) {
         closeProfileMenu();
       }
+      if (state.sidebarQrModal.open) {
+        closeSidebarQrModal();
+      }
+      closeThemeDropdown();
     }
 
     function handleScroll() {
@@ -3243,8 +3651,16 @@ const App = {
         closeReleaseModal();
         return;
       }
+      if (event.key === "Escape" && state.sidebarQrModal.open) {
+        closeSidebarQrModal();
+        return;
+      }
       if (event.key === "Escape" && state.profileMenuOpen) {
         closeProfileMenu();
+        return;
+      }
+      if (event.key === "Escape" && state.themeDropdownOpen) {
+        closeThemeDropdown();
       }
     }
 
@@ -3383,6 +3799,24 @@ const App = {
       state.releaseModalOpen = false;
     }
 
+    function openSidebarQrModal(entry) {
+      state.sidebarQrModal = {
+        open: true,
+        entry,
+        imageOk: true
+      };
+    }
+
+    function closeSidebarQrModal() {
+      state.sidebarQrModal.open = false;
+      state.sidebarQrModal.entry = null;
+      state.sidebarQrModal.imageOk = true;
+    }
+
+    function markSidebarQrImageMissing() {
+      state.sidebarQrModal.imageOk = false;
+    }
+
     function toggleReleaseVersion(version) {
       state.expandedReleaseVersions = state.expandedReleaseVersions.includes(version)
         ? state.expandedReleaseVersions.filter((item) => item !== version)
@@ -3417,19 +3851,43 @@ const App = {
       navItems,
       selectedTheme,
       homeThemeCards,
+      homeThemeRowColumnCount,
+      homeThemeRowThemes,
+      homeThemeDropdownThemes,
+      selectedThemeHiddenInShortcutRow,
+      allThemesTriggerActive,
+      platformStats,
+      sidebarQrEntries,
+      sidebarQrImageSrc,
+      sidebarQrAlt,
       roleCards,
       favoriteProjects,
       myProjectTasks,
       workspaceOverviewCards,
       adminOverviewCards,
+      projectProgressDocuments,
+      projectProgressTimelineItems,
       releaseLatest,
       releaseHistoryItems,
+      SIDEBAR_QR_ENTRIES,
+      jsonImportJsonFilesInput,
+      jsonImportDirectoryInput,
+      jsonImportMixedFilesInput,
       can,
       navigate,
       applyFilters,
       selectTheme,
+      toggleThemeDropdown,
+      closeThemeDropdown,
       topicThemeCardStyle,
       loadMoreProjects,
+      loadProjectProgress,
+      loadProjectDiscussions,
+      submitProjectDiscussion,
+      updateProjectDiscussion,
+      deleteProjectDiscussion,
+      moderateProjectDiscussion,
+      canManageDiscussion,
       login,
       changeRequiredPassword,
       register,
@@ -3448,6 +3906,9 @@ const App = {
       closeProfileMenu,
       openReleaseModal,
       closeReleaseModal,
+      openSidebarQrModal,
+      closeSidebarQrModal,
+      markSidebarQrImageMissing,
       toggleReleaseVersion,
       isReleaseVersionExpanded,
       releaseSectionLabel,
@@ -3492,15 +3953,22 @@ const App = {
       openContributionModal,
       closeContributionModal,
       submitContribution,
+      setContributionFile,
+      clearContributionFile,
       myTaskStatusLabel,
       taskRelationSummary,
       canSubmitProjectTask,
       taskSubmitHint,
       contributionStatusText,
+      contributionFileHref,
+      contributionFileName,
       saveTheme,
       newTheme,
       editTheme,
       closeThemeForm,
+      moveThemeSort,
+      restoreThemeSort,
+      saveThemeSort,
       deactivateTheme,
       deleteTheme,
       adminThemeDatasetFile,
@@ -3509,7 +3977,9 @@ const App = {
       closeProjectForm,
       saveProject,
       setProjectDocumentFile,
+      setProjectProgressDocumentFile,
       uploadProjectDocument,
+      uploadProjectProgressDocument,
       deleteProjectDocument,
       setMyProjectDocumentFile,
       deleteMyProjectDocument,
@@ -3525,6 +3995,10 @@ const App = {
       setThemeFileDetailPdfFile,
       formatFileSize,
       setAdminTab,
+      loadSidebarQrs,
+      sidebarQrUploadState,
+      setSidebarQrUploadFile,
+      uploadSidebarQr,
       searchAdminUsers,
       resetUserPassword,
       copyDefaultPassword,
@@ -3537,7 +4011,6 @@ const App = {
       assignTaskToUid,
       updateTaskStatus,
       loadAdminContributions,
-      reviewContribution,
       loadAdminTaskProjects,
       openTaskProjectDetail,
       closeTaskProjectDetail,
@@ -3555,6 +4028,9 @@ const App = {
       formatAuditTime,
       clearJsonImport,
       downloadJsonTemplate,
+      chooseJsonImportJsonFiles,
+      chooseJsonImportDirectory,
+      chooseJsonImportMixedFiles,
       handleJsonFiles,
       refreshJsonImportRow,
       refreshAllJsonImportRows,
@@ -3573,12 +4049,15 @@ const App = {
       requiredTeamRoles,
       projectFundingLabel,
       projectFundingReady,
+      projectStageTone,
       projectStartupLabel,
       projectStartupText,
       projectStartupReady,
       projectDocuments,
       primaryProjectDocument,
       projectPdfHref,
+      projectProgressDocumentsFor,
+      projectDetailHref,
       hasPrimaryProjectPdf,
       projectCreatorLabel,
       documentDisplayTitle,
@@ -3591,6 +4070,9 @@ const App = {
       describedBy,
       formSummaryErrors,
       clearFieldError,
+      openSidebarQrModal,
+      closeSidebarQrModal,
+      markSidebarQrImageMissing,
       resolveConfirmDialog
     };
   },
@@ -3619,8 +4101,21 @@ const App = {
             {{ item.label }}
           </button>
         </nav>
+        <div class="sidebar-qr-actions" aria-label="系统入口">
+          <button
+            v-for="entry in sidebarQrEntries"
+            :key="entry.key"
+            class="nav-item sidebar-qr-trigger"
+            type="button"
+            @click="openSidebarQrModal(entry)"
+          >
+            <span class="material-symbols-rounded" style="font-size: 20px;">{{ entry.icon }}</span>
+            {{ entry.label }}
+          </button>
+        </div>
         <div class="account-area">
           <button class="version-button" type="button" @click="openReleaseModal">v{{ state.meta.release?.version || '0.0.0' }}</button>
+          <span class="site-micro-stats" aria-label="平台统计">注册 {{ platformStats.registered_user_count || 0 }} · 在线 {{ platformStats.online_user_count || 0 }}</span>
           <div
             v-if="state.user"
             class="profile-menu"
@@ -3658,6 +4153,18 @@ const App = {
 
       <main class="page">
         <div v-if="state.toast" class="toast">{{ state.toast }}</div>
+        <div v-if="state.sidebarQrModal.open" class="sidebar-qr-modal-backdrop" @click.self="closeSidebarQrModal">
+          <section class="sidebar-qr-modal" role="dialog" aria-modal="true" :aria-label="state.sidebarQrModal.entry?.label || '二维码'">
+            <header>
+              <h2>{{ state.sidebarQrModal.entry?.label }}</h2>
+              <button class="ghost-button" type="button" @click="closeSidebarQrModal">关闭</button>
+            </header>
+            <div v-if="state.sidebarQrModal.imageOk && sidebarQrImageSrc(state.sidebarQrModal.entry)" class="sidebar-qr-image-wrap">
+              <img :src="sidebarQrImageSrc(state.sidebarQrModal.entry)" :alt="sidebarQrAlt(state.sidebarQrModal.entry)" @error="markSidebarQrImageMissing" />
+            </div>
+            <div v-else class="sidebar-qr-placeholder">二维码待更新</div>
+          </section>
+        </div>
         <section v-if="state.booting" class="empty-state">
           <div class="loader"></div>
           <h2>正在载入课题库</h2>
@@ -3697,14 +4204,50 @@ const App = {
               <button class="primary-button" type="button" @click="applyFilters"><span class="material-symbols-rounded">filter_list</span> 筛选</button>
             </div>
 
-            <div class="theme-strip topic-theme-strip">
+            <div class="theme-strip topic-theme-strip single-row" :style="{ '--home-theme-columns': homeThemeRowColumnCount }">
               <button
-                v-for="theme in homeThemeCards"
+                class="theme-chip topic-theme-card theme-action-card all-projects-theme-trigger"
+                :class="{ active: !state.filters.theme }"
+                :style="topicThemeCardStyle()"
+                type="button"
+                @click="selectTheme('')"
+              >
+                <span>不限主题</span>
+              </button>
+              <button
+                v-for="theme in homeThemeRowThemes"
                 :key="theme.slug"
                 class="theme-chip topic-theme-card"
                 :class="{ active: state.filters.theme === theme.slug }"
                 :style="topicThemeCardStyle(theme)"
                 type="button"
+                @click="selectTheme(theme.slug)"
+              >
+                <span>{{ theme.name }}</span>
+              </button>
+              <button
+                class="theme-chip topic-theme-card theme-action-card all-themes-trigger"
+                :class="{ active: allThemesTriggerActive }"
+                :style="topicThemeCardStyle()"
+                type="button"
+                aria-haspopup="listbox"
+                :aria-expanded="state.themeDropdownOpen ? 'true' : 'false'"
+                @click="toggleThemeDropdown"
+              >
+                <span>{{ state.themeDropdownOpen ? '收起全部主题' : '展示全部主题' }}</span>
+                <small v-if="selectedThemeHiddenInShortcutRow">{{ selectedTheme.name }}</small>
+              </button>
+            </div>
+            <div v-if="state.themeDropdownOpen" class="theme-dropdown" role="listbox" aria-label="全部主题">
+              <button
+                v-for="theme in homeThemeDropdownThemes"
+                :key="theme.slug"
+                class="theme-chip topic-theme-card theme-dropdown-card"
+                :class="{ active: state.filters.theme === theme.slug }"
+                :style="topicThemeCardStyle(theme)"
+                type="button"
+                role="option"
+                :aria-selected="state.filters.theme === theme.slug ? 'true' : 'false'"
                 @click="selectTheme(theme.slug)"
               >
                 <span>{{ theme.name }}</span>
@@ -3738,8 +4281,8 @@ const App = {
                     <div class="project-card-meta">
                       <span>{{ topicCode(project) }}</span>
                       <span>{{ project.theme?.name || '未分类' }}</span>
-                      <span>{{ project.stage_label }}</span>
-                      <span :class="{ ready: projectFundingReady(project) }">{{ projectFundingLabel(project) }}</span>
+                      <span class="project-stage-chip" :class="projectStageTone(project)">{{ project.stage_label }}</span>
+                      <span class="project-funding-chip" :class="{ funded: projectFundingReady(project) }">{{ projectFundingLabel(project) }}</span>
                     </div>
                     <div class="project-card-side">
                       <dl class="project-card-counts" aria-label="课题互动统计">
@@ -3750,8 +4293,7 @@ const App = {
                     </div>
                   </div>
                   <h3>
-                    <a v-if="hasPrimaryProjectPdf(project)" class="project-title-link" :href="projectPdfHref(project)" target="_blank" rel="noopener">{{ project.title }}</a>
-                    <span v-else class="project-title-link disabled">{{ project.title }}</span>
+                    <a class="project-title-link" :href="projectDetailHref(project)" @click.prevent="navigate('project', { id: project.id })">{{ project.title }}</a>
                   </h3>
                   <div class="project-expanded-detail">
                     <section>
@@ -3775,8 +4317,8 @@ const App = {
                   <div class="project-status-row project-role-groups compact">
                     <strong>组队</strong>
                     <div class="project-role-chip-row">
-                      <span v-for="role in requiredTeamRoles(project.team_status)" :key="role.key" :class="{ ready: role.ready }">
-                        {{ role.label }} {{ role.count }}/{{ role.required }}
+                      <span v-for="role in requiredTeamRoles(project.team_status)" :key="role.key" :class="{ ready: role.ready, overfilled: role.overfilled }">
+                        {{ role.label }} {{ role.count }}/{{ role.required }}{{ role.overfilled ? ' · 超额' : '' }}
                       </span>
                     </div>
                   </div>
@@ -3842,6 +4384,137 @@ const App = {
               </button>
               <span v-else>已显示全部匹配课题</span>
             </div>
+          </section>
+
+          <section v-else-if="activeView === 'project'" class="project-progress-page">
+            <div v-if="state.projectProgress.loading" class="empty-state">
+              <div class="loader"></div>
+              <h2>正在读取课题进度</h2>
+            </div>
+            <template v-else-if="state.projectProgress.project">
+              <div class="section-head project-progress-head">
+                <div>
+                  <span class="eyebrow">{{ topicCode(state.projectProgress.project) }} · {{ state.projectProgress.project.theme?.name || '未分类' }}</span>
+                  <h1>{{ state.projectProgress.project.title }}</h1>
+                  <p>{{ projectSummaryText(state.projectProgress.project) }}</p>
+                </div>
+                <div class="section-head-actions">
+                  <button class="ghost-button" type="button" @click="navigate('home')">返回课题库</button>
+                  <a v-if="hasPrimaryProjectPdf(state.projectProgress.project)" class="ghost-button" :href="projectPdfHref(state.projectProgress.project)" target="_blank" rel="noopener">查看PDF</a>
+                  <a v-if="hasPrimaryProjectPdf(state.projectProgress.project)" class="ghost-button" :href="projectPdfHref(state.projectProgress.project)" download>下载PDF</a>
+                </div>
+              </div>
+
+              <div class="project-progress-layout">
+                <article class="content-panel project-progress-summary">
+                  <div class="project-card-meta">
+                    <span>{{ state.projectProgress.project.stage_label }}</span>
+                    <span>{{ projectFundingLabel(state.projectProgress.project) }}</span>
+                    <span>{{ projectStartupLabel(state.projectProgress.project) }}</span>
+                  </div>
+                  <h2>课题进展</h2>
+                  <p>{{ state.projectProgress.progressText || '暂无公开进度说明。' }}</p>
+                  <div class="project-role-chip-row">
+                    <span v-for="role in requiredTeamRoles(state.projectProgress.project.team_status)" :key="role.key" :class="{ ready: role.ready, overfilled: role.overfilled }">
+                      {{ role.label }} {{ role.count }}/{{ role.required }}{{ role.overfilled ? ' · 超额' : '' }}
+                    </span>
+                  </div>
+                </article>
+
+                <article class="content-panel project-progress-documents">
+                  <div class="panel-title-row compact-title-row">
+                    <div>
+                      <h2>项目进度文档</h2>
+                      <p>这里保留每次上传的项目进度 PDF，主 PDF 不会被覆盖。</p>
+                    </div>
+                  </div>
+                  <div v-if="projectProgressDocuments.length" class="project-document-admin-list">
+                    <article class="project-document-admin-row" v-for="document in projectProgressDocuments" :key="document.id">
+                      <span class="material-symbols-rounded">picture_as_pdf</span>
+                      <div>
+                        <strong>{{ documentDisplayTitle(document) }}</strong>
+                        <small>{{ document.description || '项目进度文档' }}</small>
+                        <small>{{ formatAuditTime(document.created_at) }}</small>
+                      </div>
+                      <a class="ghost-button" :href="documentHref(document)" target="_blank" rel="noopener">查看</a>
+                      <a class="ghost-button" :href="documentHref(document)" download>下载</a>
+                    </article>
+                  </div>
+                  <p v-else class="muted-inline">暂无项目进度文档。</p>
+                </article>
+              </div>
+
+              <article class="content-panel project-progress-timeline">
+                <div class="panel-title-row compact-title-row">
+                  <div>
+                    <h2>进度时间线</h2>
+                    <p>阶段变化、进度说明和进度文档会在这里汇总。</p>
+                  </div>
+                </div>
+                <ol v-if="projectProgressTimelineItems.length" class="timeline-list">
+                  <li v-for="entry in projectProgressTimelineItems" :key="entry.id">
+                    <time>{{ formatAuditTime(entry.occurred_at) }}</time>
+                    <div>
+                      <strong>{{ entry.title }}</strong>
+                      <p>{{ entry.description || entry.entry_type_label }}</p>
+                      <a v-if="entry.document" class="ghost-button" :href="documentHref(entry.document)" target="_blank" rel="noopener">查看文档</a>
+                    </div>
+                  </li>
+                </ol>
+                <p v-else class="muted-inline">暂无公开进度时间线。</p>
+              </article>
+
+              <article class="content-panel project-discussion-section">
+                <div class="panel-title-row compact-title-row">
+                  <div>
+                    <h2>讨论区</h2>
+                    <p>所有登录用户都可以基于本课题讨论任何事情；公开展示只显示 UID。</p>
+                  </div>
+                </div>
+                <form v-if="state.user" class="discussion-form" @submit.prevent="submitProjectDiscussion()">
+                  <textarea v-model="state.projectProgress.discussionForm.content" maxlength="2000" placeholder="写下你的问题、建议或协作信息"></textarea>
+                  <button class="primary-button" type="submit" :disabled="state.projectProgress.submittingDiscussion">
+                    {{ state.projectProgress.submittingDiscussion ? '发布中...' : '发布讨论' }}
+                  </button>
+                </form>
+                <p v-else class="muted-inline">登录后参与讨论</p>
+
+                <div class="project-discussion-list">
+                  <article v-for="discussion in state.projectProgress.discussions" :key="discussion.id" class="project-discussion-item">
+                    <header>
+                      <strong>{{ discussion.author?.uid || '已注销用户' }}</strong>
+                      <time>{{ formatAuditTime(discussion.created_at) }}</time>
+                    </header>
+                    <p>{{ discussion.content }}</p>
+                    <div class="button-row">
+                      <button v-if="canManageDiscussion(discussion)" class="ghost-button" type="button" @click="updateProjectDiscussion(discussion)">编辑</button>
+                      <button v-if="canManageDiscussion(discussion)" class="ghost-button danger" type="button" @click="deleteProjectDiscussion(discussion)">删除</button>
+                      <button v-if="can('manage_projects')" class="ghost-button danger" type="button" @click="moderateProjectDiscussion(discussion, 'hidden')">隐藏</button>
+                    </div>
+                    <div v-if="discussion.replies?.length" class="project-discussion-replies">
+                      <article v-for="reply in discussion.replies" :key="reply.id" class="project-discussion-reply">
+                        <header><strong>{{ reply.author?.uid || '已注销用户' }}</strong><time>{{ formatAuditTime(reply.created_at) }}</time></header>
+                        <p>{{ reply.content }}</p>
+                        <div class="button-row">
+                          <button v-if="canManageDiscussion(reply)" class="ghost-button" type="button" @click="updateProjectDiscussion(reply)">编辑</button>
+                          <button v-if="canManageDiscussion(reply)" class="ghost-button danger" type="button" @click="deleteProjectDiscussion(reply)">删除</button>
+                        </div>
+                      </article>
+                    </div>
+                    <form v-if="state.user" class="discussion-reply-form" @submit.prevent="submitProjectDiscussion(discussion)">
+                      <input v-model="state.projectProgress.replyDrafts[discussion.id]" type="text" maxlength="2000" placeholder="回复这条讨论" />
+                      <button class="ghost-button" type="submit" :disabled="state.projectProgress.submittingDiscussion">回复</button>
+                    </form>
+                  </article>
+                  <p v-if="!state.projectProgress.discussions.length" class="muted-inline">暂无讨论。</p>
+                </div>
+              </article>
+            </template>
+            <section v-else class="empty-state">
+              <h2>课题不可访问</h2>
+              <p>课题可能未公开或已归档。</p>
+              <button class="primary-button" type="button" @click="navigate('home')">返回课题库</button>
+            </section>
           </section>
 
           <section v-else-if="activeView === 'dashboard'" class="dashboard-view">
@@ -4053,8 +4726,8 @@ const App = {
                     <div class="project-card-meta">
                       <span>{{ topicCode(project) }}</span>
                       <span>{{ project.theme?.name || '未分类' }}</span>
-                      <span>{{ project.stage_label }}</span>
-                      <span :class="{ ready: projectFundingReady(project) }">{{ projectFundingLabel(project) }}</span>
+                      <span class="project-stage-chip" :class="projectStageTone(project)">{{ project.stage_label }}</span>
+                      <span class="project-funding-chip" :class="{ funded: projectFundingReady(project) }">{{ projectFundingLabel(project) }}</span>
                     </div>
                     <div class="project-card-side">
                       <dl class="project-card-counts" aria-label="课题互动统计">
@@ -4168,6 +4841,7 @@ const App = {
                 <button type="button" :class="{ active: state.admin.activeTab === 'projects' }" @click="setAdminTab('projects')">课题管理</button>
                 <button type="button" :class="{ active: state.admin.activeTab === 'themes' }" @click="setAdminTab('themes')">主题管理</button>
                 <button type="button" :class="{ active: state.admin.activeTab === 'users' }" @click="setAdminTab('users')">用户管理</button>
+                <button type="button" :class="{ active: state.admin.activeTab === 'system' }" @click="setAdminTab('system')">系统入口</button>
                 <button type="button" :class="{ active: state.admin.activeTab === 'backup' }" @click="setAdminTab('backup')">备份恢复</button>
                 <button type="button" :class="{ active: state.admin.activeTab === 'audit' }" @click="setAdminTab('audit')">审计日志</button>
               </div>
@@ -4242,7 +4916,7 @@ const App = {
 
               <section v-else-if="state.admin.activeTab === 'contributions'" class="content-panel">
                 <div class="panel-title-row">
-                  <div><h2>任务管理</h2><p>按课题查看已获批人员 UID 和任务结果，在详情弹窗中完成审核与结题。</p></div>
+                  <div><h2>任务管理</h2><p>按课题查看已获批人员 UID、提交内容和结果文档。</p></div>
                 </div>
                 <div class="admin-filter-row">
                   <input v-model="state.admin.taskProjectFilters.q" type="search" placeholder="搜索课题、课题编号或摘要" @keyup.enter="loadAdminTaskProjects({ reset: true })" />
@@ -4270,6 +4944,51 @@ const App = {
                 </div>
                 <p v-if="!state.admin.loadingTaskProjects && !state.admin.taskProjects.length">暂无匹配的任务课题。</p>
                 <p v-if="state.admin.loadingTaskProjects">正在读取任务课题...</p>
+              </section>
+
+              <section v-else-if="state.admin.activeTab === 'system'" class="content-panel sidebar-qr-admin-panel">
+                <div class="panel-title-row">
+                  <div>
+                    <h2>系统入口</h2>
+                    <p>管理员可上传或更新左侧边栏二维码，访客和普通用户只会看到最新展示结果。</p>
+                  </div>
+                  <button class="ghost-button" type="button" :disabled="state.admin.loadingSidebarQrs" @click="loadSidebarQrs">
+                    {{ state.admin.loadingSidebarQrs ? '正在刷新...' : '刷新' }}
+                  </button>
+                </div>
+                <div class="sidebar-qr-admin-grid">
+                  <article v-for="entry in sidebarQrEntries" :key="entry.key" class="sidebar-qr-admin-card">
+                    <header>
+                      <span class="material-symbols-rounded">{{ entry.icon }}</span>
+                      <div>
+                        <h3>{{ entry.label }}</h3>
+                        <p>{{ entry.has_image ? '已上传二维码' : '二维码待更新' }}</p>
+                      </div>
+                    </header>
+                    <div v-if="sidebarQrImageSrc(entry)" class="sidebar-qr-admin-preview">
+                      <img :src="sidebarQrImageSrc(entry)" :alt="sidebarQrAlt(entry)" />
+                    </div>
+                    <div v-else class="sidebar-qr-admin-placeholder">二维码待更新</div>
+                    <small v-if="entry.updated_at">更新于 {{ formatAuditTime(entry.updated_at) }}</small>
+                    <label class="file-picker compact-file-picker">
+                      <span>{{ sidebarQrUploadState(entry.key).file ? sidebarQrUploadState(entry.key).file.name : '选择二维码图片' }}</span>
+                      <input
+                        :key="sidebarQrUploadState(entry.key).inputKey"
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
+                        @change="setSidebarQrUploadFile(entry, $event)"
+                      />
+                    </label>
+                    <button
+                      class="primary-button"
+                      type="button"
+                      :disabled="sidebarQrUploadState(entry.key).uploading || !sidebarQrUploadState(entry.key).file"
+                      @click="uploadSidebarQr(entry)"
+                    >
+                      {{ sidebarQrUploadState(entry.key).uploading ? '上传中...' : '上传/更新二维码' }}
+                    </button>
+                  </article>
+                </div>
               </section>
 
               <section v-else-if="state.admin.activeTab === 'audit'" class="content-panel">
@@ -4325,6 +5044,7 @@ const App = {
                   <span>标签 {{ state.admin.backup.result.tags || 0 }}</span>
                   <span>数据集说明 {{ state.admin.backup.result.theme_files || 0 }}</span>
                   <span>课题文档 {{ state.admin.backup.result.project_documents || 0 }}</span>
+                  <span>项目进度 {{ state.admin.backup.result.project_progress_entries || 0 }}</span>
                   <span>文件 {{ state.admin.backup.result.files || 0 }}</span>
                 </div>
               </section>
@@ -4458,21 +5178,21 @@ const App = {
                     <button class="ghost-button" type="button" @click="downloadJsonTemplate">下载 JSON 模板</button>
                   </div>
                   <div class="markdown-import-actions">
-                    <label class="file-picker json-import-picker">
+                    <button class="file-picker json-import-picker" type="button" @click="chooseJsonImportJsonFiles">
                       <span>导入单个课题 JSON</span>
                       <small>可选择一个或多个 .json 文件</small>
-                      <input type="file" accept=".json,application/json" multiple @change="handleJsonFiles" />
-                    </label>
-                    <label class="file-picker json-import-picker">
+                    </button>
+                    <button class="file-picker json-import-picker" type="button" @click="chooseJsonImportDirectory">
                       <span>导入课题目录</span>
                       <small>自动匹配同名 .json 与 .pdf</small>
-                      <input type="file" accept=".json,application/json,.pdf,application/pdf" webkitdirectory directory multiple @change="handleJsonFiles" />
-                    </label>
-                    <label class="file-picker json-import-picker">
-                      <span>选择 JSON/PDF 文件</span>
-                      <small>Linux 文件夹选择不可用时，直接框选目录内文件</small>
-                      <input type="file" accept=".json,application/json,.pdf,application/pdf" multiple @change="handleJsonFiles" />
-                    </label>
+                    </button>
+                    <button class="file-picker json-import-picker" type="button" @click="chooseJsonImportMixedFiles">
+                      <span>选择目录内 JSON/PDF 文件</span>
+                      <small>Linux 文件夹选择不可用时，打开目录后框选 .json 与同名 .pdf 文件</small>
+                    </button>
+                    <input ref="jsonImportJsonFilesInput" class="visually-hidden-file-input" type="file" accept=".json,application/json" multiple @change="handleJsonFiles" />
+                    <input ref="jsonImportMixedFilesInput" class="visually-hidden-file-input" type="file" accept=".json,application/json,.pdf,application/pdf" multiple @change="handleJsonFiles" />
+                    <input ref="jsonImportDirectoryInput" class="visually-hidden-file-input" type="file" accept=".json,application/json,.pdf,application/pdf" webkitdirectory multiple @change="handleJsonFiles" />
                     <button class="primary-button" type="button" :disabled="state.admin.jsonImport.applying || !state.admin.jsonImport.rows.length" @click="openJsonImportPreview">
                       预览并确认
                     </button>
@@ -4586,6 +5306,43 @@ const App = {
                         </template>
                         <p v-else class="muted-inline">请先保存课题草稿，再回到编辑弹窗上传 PDF。</p>
                       </section>
+                      <section class="project-document-manager">
+                        <div class="panel-title-row compact-title-row">
+                          <div>
+                            <h3>项目进度文档</h3>
+                            <p>按日期保留多份进度 PDF，上传后会自动进入课题进度时间线。</p>
+                          </div>
+                          <span v-if="projectProgressDocumentsFor(state.admin.projectForm).length" class="status-chip">{{ projectProgressDocumentsFor(state.admin.projectForm).length }} 份</span>
+                        </div>
+                        <template v-if="state.admin.projectForm.id">
+                          <div v-if="projectProgressDocumentsFor(state.admin.projectForm).length" class="project-document-admin-list">
+                            <article class="project-document-admin-row" v-for="document in projectProgressDocumentsFor(state.admin.projectForm)" :key="document.id">
+                              <span class="material-symbols-rounded">description</span>
+                              <div>
+                                <strong>{{ documentDisplayTitle(document) }}</strong>
+                                <small>{{ document.description || '项目进度文档' }}</small>
+                                <small>{{ document.created_at ? formatAuditTime(document.created_at) : document.path }}</small>
+                              </div>
+                              <a class="ghost-button" :href="documentHref(document)" target="_blank" rel="noopener">查看</a>
+                              <a class="ghost-button" :href="documentHref(document)" download>下载</a>
+                              <button class="ghost-button danger" type="button" @click="deleteProjectDocument(document)">删除</button>
+                            </article>
+                          </div>
+                          <p v-else class="muted-inline">还没有上传项目进度文档。</p>
+                          <div class="project-document-upload">
+                            <label><span>进度标题</span><input v-model="state.admin.projectForm.progressDocumentUpload.title" type="text" placeholder="例如：第 1 周进度" /></label>
+                            <label class="document-description-field"><span>进度说明</span><textarea v-model="state.admin.projectForm.progressDocumentUpload.description" placeholder="可留空，默认使用项目进度文档"></textarea></label>
+                            <label class="file-picker compact-file-picker">
+                              <span>{{ state.admin.projectForm.progressDocumentUpload.file ? state.admin.projectForm.progressDocumentUpload.file.name : '选择进度 PDF' }}</span>
+                              <input :key="state.admin.projectForm.progressDocumentUpload.inputKey" type="file" accept="application/pdf,.pdf" @change="setProjectProgressDocumentFile" />
+                            </label>
+                            <button class="primary-button" type="button" :disabled="state.admin.projectForm.progressDocumentUpload.uploading" @click="uploadProjectProgressDocument">
+                              {{ state.admin.projectForm.progressDocumentUpload.uploading ? '正在上传...' : '上传进度PDF' }}
+                            </button>
+                          </div>
+                        </template>
+                        <p v-else class="muted-inline">请先保存课题草稿，再回到编辑弹窗上传项目进度文档。</p>
+                      </section>
                       <div class="button-row form-actions">
                         <label class="inline-check"><input v-model="state.admin.projectForm.is_public" type="checkbox" /> 公开展示</label>
                         <button class="ghost-button" type="submit">保存草稿</button>
@@ -4604,6 +5361,13 @@ const App = {
                       <p>主题配置、首页筛选和数据集说明 PDF 都在这里统一维护。</p>
                     </div>
                     <button class="primary-button" type="button" @click="newTheme">新增主题</button>
+                  </div>
+                  <div class="theme-sort-actions">
+                    <span>{{ state.admin.themeSortDirty ? '排序未保存' : '排序已同步' }}</span>
+                    <button class="ghost-button" type="button" :disabled="!state.admin.themeSortDirty || state.admin.themeSortSaving" @click="restoreThemeSort">还原排序</button>
+                    <button class="primary-button" type="button" :disabled="!state.admin.themeSortDirty || state.admin.themeSortSaving" @click="saveThemeSort">
+                      {{ state.admin.themeSortSaving ? '保存中...' : '保存排序' }}
+                    </button>
                   </div>
                   <div class="admin-table theme-admin-table">
                     <div class="admin-table-head">
@@ -4624,6 +5388,10 @@ const App = {
                       </span>
                       <span>{{ theme.is_active ? '启用' : '停用' }}</span>
                       <span class="button-row">
+                        <button class="icon-button" type="button" title="上移" @click="moveThemeSort(theme, 'up')"><span class="material-symbols-rounded">keyboard_arrow_up</span></button>
+                        <button class="icon-button" type="button" title="下移" @click="moveThemeSort(theme, 'down')"><span class="material-symbols-rounded">keyboard_arrow_down</span></button>
+                        <button class="icon-button" type="button" title="置顶" @click="moveThemeSort(theme, 'top')"><span class="material-symbols-rounded">vertical_align_top</span></button>
+                        <button class="icon-button" type="button" title="置底" @click="moveThemeSort(theme, 'bottom')"><span class="material-symbols-rounded">vertical_align_bottom</span></button>
                         <button class="ghost-button" type="button" @click="editTheme(theme)">编辑</button>
                         <a v-if="adminThemeDatasetFile(theme)?.detail_pdf_path" class="ghost-button" :href="themeFileDetailPdfHref(adminThemeDatasetFile(theme))" download>下载PDF</a>
                         <button class="ghost-button" type="button" :disabled="!theme.is_active" @click="deactivateTheme(theme)">停用</button>
@@ -5072,7 +5840,14 @@ const App = {
                 </label>
               </div>
               <label><span>说明</span><textarea v-model="state.forms.contribution.description"></textarea></label>
-              <label><span>文件路径或链接</span><input v-model="state.forms.contribution.file_path" type="text" /></label>
+              <div class="project-document-upload contribution-document-upload">
+                <label class="file-picker compact-file-picker">
+                  <span>{{ state.forms.contribution.documentFile ? state.forms.contribution.documentFile.name : '结果文档（PDF/Markdown，可选）' }}</span>
+                  <input :key="state.forms.contribution.inputKey" type="file" accept="application/pdf,.pdf,text/markdown,.md,.markdown" @change="setContributionFile" />
+                </label>
+                <button v-if="state.forms.contribution.documentFile" class="ghost-button" type="button" @click="clearContributionFile">移除文档</button>
+                <small v-if="state.forms.contribution.documentFile">{{ formatFileSize(state.forms.contribution.documentFile.size) }}</small>
+              </div>
               <div class="button-row form-actions">
                 <button class="ghost-button" type="button" @click="closeContributionModal">取消</button>
                 <button class="primary-button" type="submit" :disabled="state.contributionModal.submitting">
@@ -5130,19 +5905,17 @@ const App = {
 
                 <section class="task-detail-section">
                   <h3>已提交结果</h3>
-                  <div v-if="state.admin.taskProjectDetail.contributions.length" class="admin-table contribution-review-table">
-                    <div class="admin-table-head"><span>结果</span><span>提交 UID</span><span>状态</span><span>评语</span><span>操作</span></div>
+                  <div v-if="state.admin.taskProjectDetail.contributions.length" class="admin-table contribution-review-table contribution-result-table">
+                    <div class="admin-table-head"><span>结果</span><span>提交 UID</span><span>状态</span><span>文档</span></div>
                     <div class="admin-table-row" v-for="item in state.admin.taskProjectDetail.contributions" :key="item.id">
-                      <span><strong>{{ item.title }}</strong><small>{{ contributionStatusText(item) }} · {{ item.file_path || item.description || '无文件路径' }}</small></span>
+                      <span><strong>{{ item.title }}</strong><small>{{ contributionStatusText(item) }} · {{ item.description || '暂无说明' }}</small></span>
                       <span>{{ item.user.uid }}</span>
                       <span>{{ item.status_label }}</span>
-                      <span><textarea v-model="state.admin.taskProjectDetail.reviewDrafts[item.id].review_comment" placeholder="填写审核评语"></textarea></span>
-                      <span v-if="item.status === 'submitted'" class="button-row">
-                        <button class="ghost-button" type="button" @click="reviewContribution(item, 'approved')">通过</button>
-                        <button v-if="item.result_type === 'final'" class="ghost-button" type="button" @click="reviewContribution(item, 'approved', { closeProject: true })">通过并结题</button>
-                        <button class="ghost-button danger" type="button" @click="reviewContribution(item, 'rejected')">拒绝</button>
+                      <span>
+                        <a v-if="item.file_path" class="ghost-button" :href="contributionFileHref(item)" target="_blank" rel="noopener">查看文档</a>
+                        <small v-else class="muted-inline">未上传文档</small>
+                        <small v-if="item.file_path">{{ contributionFileName(item) }}</small>
                       </span>
-                      <span v-else class="muted-inline">已审核</span>
                     </div>
                   </div>
                   <p v-else>暂无任务结果记录。</p>
@@ -5213,6 +5986,37 @@ const App = {
     </div>
   `
 };
+
+function mergeSidebarQrEntries(entries = []) {
+  return SIDEBAR_QR_ENTRIES.map((base) => {
+    const saved = entries.find((entry) => entry.key === base.key) || {};
+    return {
+      ...base,
+      ...saved,
+      label: saved.label || base.label,
+      icon: saved.icon || base.icon,
+      image: saved.image || base.image || "",
+      has_image: Boolean(saved.has_image && saved.image)
+    };
+  });
+}
+
+function replaceSidebarQrEntry(entries = [], entry) {
+  const merged = mergeSidebarQrEntries(entries);
+  return merged.map((item) => (item.key === entry.key ? { ...item, ...entry } : item));
+}
+
+function sidebarQrImageSrc(entry) {
+  const image = String(entry?.image || "").trim();
+  if (!image) return "";
+  if (/^https?:\/\//i.test(image)) return image;
+  const normalized = image.startsWith("/") ? image : `/${image}`;
+  return `${API_BASE}${normalized}`;
+}
+
+function sidebarQrAlt(entry) {
+  return `${entry?.label || "系统入口"}二维码`;
+}
 
 function emptyThemeForm() {
   return {
@@ -5303,7 +6107,8 @@ function emptyContributionForm(task = null, project = null) {
     title: task ? `${task.title} 交付` : "",
     result_type: "stage",
     description: "",
-    file_path: ""
+    documentFile: null,
+    inputKey: 0
   };
 }
 
@@ -5336,13 +6141,14 @@ function emptyProjectForm() {
     tags: "",
     is_public: false,
     documents: [],
-    documentUpload: emptyProjectDocumentUpload()
+    documentUpload: emptyProjectDocumentUpload(),
+    progressDocumentUpload: emptyProjectDocumentUpload("progress")
   };
 }
 
-function emptyProjectDocumentUpload() {
+function emptyProjectDocumentUpload(documentKind = "detail") {
   return {
-    document_kind: "detail",
+    document_kind: documentKind,
     doc_type: "pdf",
     title: "",
     description: "",
@@ -5377,7 +6183,8 @@ function projectToForm(project) {
     tags: (project.tags || []).map((tag) => tag.name).join("，"),
     is_public: Boolean(project.is_public),
     documents: project.documents || [],
-    documentUpload: emptyProjectDocumentUpload()
+    documentUpload: emptyProjectDocumentUpload(),
+    progressDocumentUpload: emptyProjectDocumentUpload("progress")
   };
 }
 
@@ -5400,12 +6207,16 @@ function parseRoute() {
   const hash = location.hash.replace(/^#\/?/, "");
   const parts = hash.split("/").filter(Boolean);
   if (!parts.length) return { name: "home", params: {}, fullPath: location.hash || "#/" };
+  if (parts[0] === "project" && parts[1]) {
+    return { name: "project", params: { id: parts[1] }, fullPath: location.hash };
+  }
   const known = new Set(["home", "projects", "dashboard", "favorites", "admin", "login", "register", "password-reset", "password-change"]);
   return { name: known.has(parts[0]) ? parts[0] : "home", params: {}, fullPath: location.hash };
 }
 
 function buildHash(name, params = {}) {
   if (name === "home") return "#/";
+  if (name === "project") return params.id ? `#/project/${params.id}` : "#/";
   return `#/${name}`;
 }
 
@@ -5566,32 +6377,50 @@ function projectRecruitmentText(project) {
 function requiredTeamRoles(teamStatus) {
   const backendRequiredRoles = Array.isArray(teamStatus?.required_roles) ? teamStatus.required_roles : [];
   return DEFAULT_PROJECT_RECRUITMENT_ROLES.map((role) => {
-    const count = projectRoleCount(teamStatus, role, backendRequiredRoles);
+    const matched = matchedRequiredTeamRole(teamStatus, role, backendRequiredRoles);
+    const count = matched ? Number(matched.count || 0) : projectRoleCount(teamStatus, role, backendRequiredRoles);
+    const required = Number(matched?.required || role.required || 1);
+    const overfilled = Boolean(matched?.overfilled) || count > required;
     return {
       ...role,
+      label: matched?.label || role.label,
       count,
-      ready: count >= role.required
+      required,
+      ready: Boolean(matched?.ready) || count >= required,
+      overfilled,
+      status: matched?.status || (overfilled ? "overfilled" : count >= required ? "ready" : "missing")
     };
   });
 }
 
 function projectRoleCount(teamStatus, role, backendRequiredRoles) {
-  const aliases = {
-    doctor: ["doctor", "医生", "医生（医学指导）"],
-    student: ["student", "学生", "学生（实验）"],
-    ai_phd_or_above: ["ai_phd_or_above", "mentor", "大学老师", "博士毕业及以上", "博士毕业及以上（指导）"],
-    leader: ["leader", "Leader", "项目负责人", "Leader（项目负责人）"]
-  }[role.key] || [role.key];
-  const matchedRequiredRole = backendRequiredRoles.find((item) => aliases.includes(item.key) || aliases.includes(item.label));
+  const matchedRequiredRole = matchedRequiredTeamRole(teamStatus, role, backendRequiredRoles);
   if (matchedRequiredRole) return Number(matchedRequiredRole.count || 0);
+  const aliases = roleAliases(role);
   const matchedVisibleGroup = (teamStatus?.visible_role_groups || []).find((item) => aliases.includes(item.role_type) || aliases.includes(item.label));
   if (matchedVisibleGroup) return Number(matchedVisibleGroup.count || 0);
   const matchedRole = roleCountEntries(teamStatus).find(([key]) => aliases.includes(key));
   return matchedRole ? Number(matchedRole[1] || 0) : 0;
 }
 
+function matchedRequiredTeamRole(teamStatus, role, backendRequiredRoles = []) {
+  const roles = backendRequiredRoles.length ? backendRequiredRoles : (Array.isArray(teamStatus?.required_roles) ? teamStatus.required_roles : []);
+  const aliases = roleAliases(role);
+  return roles.find((item) => aliases.includes(item.key) || aliases.includes(item.label));
+}
+
+function roleAliases(role) {
+  const aliases = {
+    doctor: ["doctor", "医生", "医生（医学指导）"],
+    student: ["student", "学生", "学生（实验）"],
+    ai_phd_or_above: ["ai_phd_or_above", "mentor", "大学老师", "博士毕业及以上", "博士毕业及以上（指导）"],
+    leader: ["leader", "Leader", "项目负责人", "Leader（项目负责人）"]
+  }[role.key] || [role.key];
+  return aliases;
+}
+
 function projectSponsorCount(project) {
-  return Number(project?.team_status?.sponsor_count ?? project?.sponsor_count ?? 0);
+  return Number(project?.team_status?.sponsor_count ?? 0);
 }
 
 function projectFundingReady(project) {
@@ -5604,6 +6433,17 @@ function projectFundingLabel(project) {
 
 function projectStageValue(project) {
   return project?.stage || "";
+}
+
+function projectStageTone(project) {
+  return {
+    open_recruiting: "stage-open",
+    team_building: "stage-team-building",
+    active: "stage-active",
+    paused: "stage-paused",
+    archived: "stage-archived",
+    draft: "stage-draft"
+  }[projectStageValue(project)] || "stage-default";
 }
 
 function projectTeamReady(project) {
@@ -5620,7 +6460,7 @@ function projectStartupLabel(project) {
 }
 
 function projectStartupText(project) {
-  if (projectStartupReady(project)) return "最低团队已满足，并已获资助，达到自动启动条件";
+  if (projectStartupReady(project)) return "最低团队已满足，并已获资助，具备管理员推进判断条件";
   const missing = [];
   if (!projectTeamReady(project)) missing.push("成员未达最低要求");
   if (!projectFundingReady(project)) missing.push("待资助");
@@ -5629,6 +6469,10 @@ function projectStartupText(project) {
 
 function projectDocuments(project) {
   return Array.isArray(project?.documents) ? project.documents.filter((document) => document.path) : [];
+}
+
+function projectProgressDocumentsFor(project) {
+  return projectDocuments(project).filter((document) => document.document_kind === "progress");
 }
 
 function primaryProjectDocument(project) {
@@ -5648,6 +6492,10 @@ function projectPdfHref(project) {
   return document?.path ? documentHref(document) : "";
 }
 
+function projectDetailHref(project) {
+  return project?.id ? `#/project/${project.id}` : "#/";
+}
+
 function projectCreatorLabel(project) {
   const uid = project?.created_by?.uid;
   return uid ? `创建者：${uid}` : "创建者：系统导入";
@@ -5662,6 +6510,24 @@ function documentHref(document) {
   if (!path || /^https?:\/\//i.test(path)) return path;
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   return `${API_BASE}${normalizedPath}`;
+}
+
+function contributionFileHref(contribution) {
+  const path = String(contribution?.file_path || "").trim();
+  if (!path || /^https?:\/\//i.test(path)) return path;
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${API_BASE}${normalizedPath}`;
+}
+
+function contributionFileName(contribution) {
+  const path = String(contribution?.file_path || "").trim();
+  if (!path) return "";
+  return path.replace(/[?#].*$/, "").split("/").filter(Boolean).pop() || path;
+}
+
+function contributionDocumentFileAllowed(file) {
+  const name = String(file?.name || "").toLowerCase();
+  return [".pdf", ".md", ".markdown"].some((suffix) => name.endsWith(suffix));
 }
 
 function themeFileDetailPdfHref(file) {

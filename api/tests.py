@@ -3,6 +3,7 @@ import importlib.util
 import io
 import tempfile
 import zipfile
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,12 +12,13 @@ from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.conf import settings
 from django.test import Client, TestCase, override_settings
+from django.utils import timezone
 
 from accounts.models import PLATFORM_ADMIN_UID, RoleType
 from credits.models import Contribution, ContributionStatus, CreditLedger
 from interactions.models import InteractionStatus, ProjectClaimIntent, ProjectFollow, ProjectInterest, ProjectScore, SponsorIntent
 from projects.importing import create_project
-from projects.models import AuditLog, Project, ProjectDocument, ProjectStage, ProjectTask, Tag, Theme, ThemeFile
+from projects.models import AuditLog, Project, ProjectDiscussion, ProjectDocument, ProjectProgressEntry, ProjectStage, ProjectTask, Tag, Theme, ThemeFile
 
 
 class ApiTests(TestCase):
@@ -138,6 +140,137 @@ class ApiTests(TestCase):
         self.assertIn(self.project.topic_id, theme_dataset_ids)
         self.assertNotIn(draft.topic_id, theme_dataset_ids)
         self.assertNotIn(archived.topic_id, theme_dataset_ids)
+
+    def test_meta_includes_platform_stats_without_exposing_user_details(self):
+        recent_user = User.objects.create_user(username="recentonline", email="recent@example.com", password="StrongPass12345")
+        stale_user = User.objects.create_user(username="staleonline", email="stale@example.com", password="StrongPass12345")
+        inactive_user = User.objects.create_user(username="inactiveonline", email="inactive@example.com", password="StrongPass12345", is_active=False)
+        now = timezone.now()
+        recent_user.profile.last_seen_at = now - timedelta(minutes=2)
+        recent_user.profile.save(update_fields=["last_seen_at"])
+        stale_user.profile.last_seen_at = now - timedelta(minutes=8)
+        stale_user.profile.save(update_fields=["last_seen_at"])
+        inactive_user.profile.last_seen_at = now - timedelta(minutes=1)
+        inactive_user.profile.save(update_fields=["last_seen_at"])
+
+        response = self.client.get("/api/meta/")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        stats = data["platform_stats"]
+        self.assertEqual(stats["registered_user_count"], 2)
+        self.assertEqual(stats["online_user_count"], 1)
+        self.assertEqual(stats["online_window_seconds"], 300)
+        serialized = json.dumps(data, ensure_ascii=False)
+        self.assertNotIn("recent@example.com", serialized)
+        self.assertNotIn("last_seen_at", serialized)
+
+    def test_sidebar_qr_codes_are_public_read_admin_uploaded_assets(self):
+        user = User.objects.create_user(username="normalqruser", password="StrongPass12345")
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir) / "media", MEDIA_URL="media/"):
+            public_response = self.client.get("/api/sidebar-qrs/")
+            self.assertEqual(public_response.status_code, 200)
+            public_entries = public_response.json()["data"]["entries"]
+            self.assertEqual([entry["key"] for entry in public_entries], ["admin-contact", "community"])
+            self.assertEqual(public_entries[0]["image"], "")
+            self.assertFalse(public_entries[0]["has_image"])
+
+            anonymous_upload_response = self.client.post(
+                "/api/admin/sidebar-qrs/admin-contact/image/",
+                {"file": SimpleUploadedFile("admin.png", b"\x89PNG\r\n\x1a\nadmin", content_type="image/png")},
+            )
+            self.assertEqual(anonymous_upload_response.status_code, 401)
+
+            self.client.force_login(user)
+            forbidden_response = self.client.post(
+                "/api/admin/sidebar-qrs/admin-contact/image/",
+                {"file": SimpleUploadedFile("admin.png", b"\x89PNG\r\n\x1a\nadmin", content_type="image/png")},
+            )
+            self.assertEqual(forbidden_response.status_code, 403)
+
+            admin = self.login_platform_admin()
+            upload_response = self.client.post(
+                "/api/admin/sidebar-qrs/admin-contact/image/",
+                {"file": SimpleUploadedFile("admin.png", b"\x89PNG\r\n\x1a\nadmin", content_type="image/png")},
+            )
+            self.assertEqual(upload_response.status_code, 201)
+            uploaded_entry = upload_response.json()["data"]["entry"]
+            self.assertEqual(uploaded_entry["key"], "admin-contact")
+            self.assertTrue(uploaded_entry["has_image"])
+            self.assertIn("system-qrcodes/admin-contact.png", uploaded_entry["image"])
+            self.assertTrue((Path(settings.MEDIA_ROOT) / "system-qrcodes" / "admin-contact.png").is_file())
+
+            replacement_response = self.client.post(
+                "/api/admin/sidebar-qrs/admin-contact/image/",
+                {"file": SimpleUploadedFile("admin.webp", b"RIFF\x00\x00\x00\x00WEBPadmin", content_type="image/webp")},
+            )
+            self.assertEqual(replacement_response.status_code, 201)
+            replacement_entry = replacement_response.json()["data"]["entry"]
+            self.assertIn("system-qrcodes/admin-contact.webp", replacement_entry["image"])
+            self.assertFalse((Path(settings.MEDIA_ROOT) / "system-qrcodes" / "admin-contact.png").exists())
+            self.assertTrue((Path(settings.MEDIA_ROOT) / "system-qrcodes" / "admin-contact.webp").is_file())
+
+            meta_response = self.client.get("/api/meta/")
+            self.assertEqual(meta_response.status_code, 200)
+            meta_entry = meta_response.json()["data"]["sidebar_qr_entries"][0]
+            self.assertTrue(meta_entry["has_image"])
+            self.assertIn("system-qrcodes/admin-contact.webp", meta_entry["image"])
+            self.assertTrue(AuditLog.objects.filter(actor=admin, action="platform_qr.upload", target_id="admin-contact").exists())
+
+            bad_type_response = self.client.post(
+                "/api/admin/sidebar-qrs/community/image/",
+                {"file": SimpleUploadedFile("community.txt", b"not-image", content_type="text/plain")},
+            )
+            self.assertEqual(bad_type_response.status_code, 422)
+
+            bad_signature_response = self.client.post(
+                "/api/admin/sidebar-qrs/community/image/",
+                {"file": SimpleUploadedFile("community.png", b"not-a-real-image", content_type="image/png")},
+            )
+            self.assertEqual(bad_signature_response.status_code, 422)
+
+            unknown_response = self.client.post(
+                "/api/admin/sidebar-qrs/unknown/image/",
+                {"file": SimpleUploadedFile("admin.png", b"\x89PNG\r\n\x1a\nadmin", content_type="image/png")},
+            )
+            self.assertEqual(unknown_response.status_code, 404)
+
+    def test_authenticated_request_refreshes_last_seen_but_payloads_do_not_expose_it(self):
+        user = User.objects.create_user(username="heartbeatuser", email="heartbeat@example.com", password="StrongPass12345")
+        old_seen_at = timezone.now() - timedelta(minutes=10)
+        user.profile.last_seen_at = old_seen_at
+        user.profile.save(update_fields=["last_seen_at"])
+
+        self.client.force_login(user)
+        response = self.client.get("/api/me/")
+
+        self.assertEqual(response.status_code, 200)
+        user.profile.refresh_from_db()
+        self.assertGreater(user.profile.last_seen_at, old_seen_at)
+        self.assertNotIn("last_seen_at", json.dumps(response.json()["data"], ensure_ascii=False))
+
+        marker = timezone.now()
+        user.profile.last_seen_at = marker
+        user.profile.save(update_fields=["last_seen_at"])
+        throttled_response = self.client.get("/api/me/")
+        self.assertEqual(throttled_response.status_code, 200)
+        user.profile.refresh_from_db()
+        self.assertEqual(user.profile.last_seen_at, marker)
+
+        self.login_platform_admin()
+        detail_response = self.client.get(f"/api/admin/users/{user.profile.uid}/")
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertNotIn("last_seen_at", json.dumps(detail_response.json()["data"], ensure_ascii=False))
+
+    def test_anonymous_request_does_not_update_last_seen(self):
+        user = User.objects.create_user(username="anonymousheartbeat", email="anonymousheartbeat@example.com", password="StrongPass12345")
+        self.assertIsNone(user.profile.last_seen_at)
+
+        response = self.client.get("/api/meta/")
+
+        self.assertEqual(response.status_code, 200)
+        user.profile.refresh_from_db()
+        self.assertIsNone(user.profile.last_seen_at)
 
     def test_project_list_includes_persisted_viewer_state_for_authenticated_user(self):
         user = User.objects.create_user(username="viewerstate", email="viewerstate@example.com", password="StrongPass12345")
@@ -309,6 +442,7 @@ class ApiTests(TestCase):
         self.assertIn("/api/admin/contributions/{contribution_id}/review/", schema["paths"])
         self.assertIn("/api/admin/audit-logs/", schema["paths"])
         self.assertIn("/api/me/contributions/", schema["paths"])
+        self.assertIn("/api/me/contributions/upload/", schema["paths"])
 
         docs_response = self.client.get("/api/docs")
         self.assertEqual(docs_response.status_code, 200)
@@ -332,7 +466,7 @@ class ApiTests(TestCase):
         self.assertIn("json_template", contract_data)
         self.assertIn("document_kinds", contract_data)
         self.assertEqual([item["value"] for item in contract_data["document_types"]], ["pdf"])
-        self.assertEqual([item["value"] for item in contract_data["document_kinds"]], ["detail"])
+        self.assertEqual([item["value"] for item in contract_data["document_kinds"]], ["detail", "progress"])
         self.assertNotIn("jsonl_template", contract_data)
         self.assertNotIn('"id":1', contract_data["json_template"])
         self.assertIn("250字以内", contract_data["json_template"])
@@ -1309,6 +1443,219 @@ class ApiTests(TestCase):
                 "替换后的主文档",
             )
 
+    def test_team_status_marks_required_roles_as_missing_ready_or_overfilled(self):
+        doctor = User.objects.create_user(username="doctor1", password="StrongPass12345")
+        doctor.profile.role_type = RoleType.DOCTOR
+        doctor.profile.save(update_fields=["role_type", "updated_at"])
+        doctor2 = User.objects.create_user(username="doctor2", password="StrongPass12345")
+        doctor2.profile.role_type = RoleType.DOCTOR
+        doctor2.profile.save(update_fields=["role_type", "updated_at"])
+        student = User.objects.create_user(username="student1", password="StrongPass12345")
+        student.profile.role_type = RoleType.UNDERGRAD_OR_BELOW
+        student.profile.save(update_fields=["role_type", "updated_at"])
+        ProjectInterest.objects.create(project=self.project, user=doctor, role="医生", status=InteractionStatus.APPROVED)
+        ProjectInterest.objects.create(project=self.project, user=doctor2, role="医生", status=InteractionStatus.APPROVED)
+        ProjectInterest.objects.create(project=self.project, user=student, role="学生", status=InteractionStatus.APPROVED)
+
+        roles = {item["key"]: item for item in self.project.team_status["required_roles"]}
+
+        self.assertEqual(roles["doctor"]["required"], 1)
+        self.assertTrue(roles["doctor"]["ready"])
+        self.assertTrue(roles["doctor"]["overfilled"])
+        self.assertEqual(roles["doctor"]["status"], "overfilled")
+        self.assertTrue(roles["student"]["ready"])
+        self.assertFalse(roles["student"]["overfilled"])
+        self.assertEqual(roles["student"]["status"], "ready")
+        self.assertFalse(roles["leader"]["ready"])
+        self.assertFalse(roles["leader"]["overfilled"])
+        self.assertEqual(roles["leader"]["status"], "missing")
+
+    def test_admin_can_reorder_themes_with_audit(self):
+        second = Theme.objects.create(name="ROP", slug="rop", sort_order=20, is_active=False)
+        third = Theme.objects.create(name="AMD", slug="amd", sort_order=30)
+        admin = self.login_platform_admin()
+
+        response = self.patch_json("/api/admin/themes/reorder/", {"theme_ids": [third.id, self.theme.id, second.id]})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["data"]["themes"]
+        self.assertEqual([item["id"] for item in payload], [third.id, self.theme.id, second.id])
+        self.assertEqual([item["sort_order"] for item in payload], [10, 20, 30])
+        self.theme.refresh_from_db()
+        second.refresh_from_db()
+        third.refresh_from_db()
+        self.assertEqual((third.sort_order, self.theme.sort_order, second.sort_order), (10, 20, 30))
+        audit_entry = AuditLog.objects.get(actor=admin, action="theme.reorder")
+        self.assertEqual(audit_entry.after["order"], {str(third.id): 10, str(self.theme.id): 20, str(second.id): 30})
+
+        missing_response = self.patch_json("/api/admin/themes/reorder/", {"theme_ids": [third.id, 99999]})
+        self.assertEqual(missing_response.status_code, 422)
+        self.assertEqual(missing_response.json()["error"]["code"], "validation_error")
+
+    def test_project_progress_api_and_progress_document_upload_keep_history(self):
+        owner = User.objects.create_user(username="progress_owner", password="StrongPass12345")
+        self.project.created_by = owner
+        self.project.project_progress = "已经完成首批数据清洗。"
+        self.project.save(update_fields=["created_by", "project_progress", "updated_at"])
+        admin = self.login_platform_admin()
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir), MEDIA_URL="media/"):
+            detail_response = self.client.post(
+                "/api/admin/project-documents/upload/",
+                {
+                    "project_id": self.project.pk,
+                    "document_kind": "detail",
+                    "title": "主方案",
+                    "files": SimpleUploadedFile("detail.pdf", b"%PDF-1.4\n% Detail\n%%EOF\n", content_type="application/pdf"),
+                },
+            )
+            self.assertEqual(detail_response.status_code, 201)
+            first_progress = self.client.post(
+                "/api/admin/project-documents/upload/",
+                {
+                    "project_id": self.project.pk,
+                    "document_kind": "progress",
+                    "title": "第 1 周进度",
+                    "description": "完成数据清洗",
+                    "files": SimpleUploadedFile("week-1.pdf", b"%PDF-1.4\n% Week1\n%%EOF\n", content_type="application/pdf"),
+                },
+            )
+            second_progress = self.client.post(
+                "/api/admin/project-documents/upload/",
+                {
+                    "project_id": self.project.pk,
+                    "document_kind": "progress",
+                    "title": "第 2 周进度",
+                    "description": "完成初步建模",
+                    "files": SimpleUploadedFile("week-2.pdf", b"%PDF-1.4\n% Week2\n%%EOF\n", content_type="application/pdf"),
+                },
+            )
+
+            self.assertEqual(first_progress.status_code, 201)
+            self.assertEqual(second_progress.status_code, 201)
+            self.assertEqual(ProjectDocument.objects.filter(project=self.project, document_kind=ProjectDocument.DocumentKind.DETAIL).count(), 1)
+            self.assertEqual(ProjectDocument.objects.filter(project=self.project, document_kind=ProjectDocument.DocumentKind.PROGRESS).count(), 2)
+            self.assertEqual(ProjectProgressEntry.objects.filter(project=self.project, entry_type=ProjectProgressEntry.EntryType.DOCUMENT).count(), 2)
+            self.assertTrue(AuditLog.objects.filter(actor=admin, action="project_progress.document_create").exists())
+
+            progress_response = self.client.get(f"/api/projects/{self.project.pk}/progress/")
+            self.assertEqual(progress_response.status_code, 200)
+            payload = progress_response.json()["data"]
+            self.assertEqual(payload["project"]["id"], self.project.id)
+            self.assertEqual(payload["progress_text"], "已经完成首批数据清洗。")
+            self.assertEqual([item["document_kind"] for item in payload["documents"]], ["progress", "progress"])
+            self.assertEqual(payload["timeline"][0]["entry_type"], "document")
+            self.assertNotIn("progress_owner", json.dumps(payload, ensure_ascii=False))
+
+            self.project.stage = ProjectStage.ARCHIVED
+            self.project.save(update_fields=["stage", "updated_at"])
+            archived_response = self.client.get(f"/api/projects/{self.project.pk}/progress/")
+            self.assertEqual(archived_response.status_code, 404)
+
+    def test_project_discussion_lifecycle_permissions_and_privacy(self):
+        author = User.objects.create_user(username="discussion_author", password="StrongPass12345")
+        other = User.objects.create_user(username="discussion_other", password="StrongPass12345")
+        admin = self.login_platform_admin()
+
+        public_list = self.client.get(f"/api/projects/{self.project.pk}/discussions/")
+        self.assertEqual(public_list.status_code, 200)
+        self.assertEqual(public_list.json()["data"]["results"], [])
+
+        self.client.logout()
+        anonymous_write = self.post_json(f"/api/projects/{self.project.pk}/discussions/", {"content": "匿名不应写入"})
+        self.assertEqual(anonymous_write.status_code, 401)
+
+        self.client.force_login(author)
+        create_response = self.post_json(f"/api/projects/{self.project.pk}/discussions/", {"content": "建议先明确纳排标准。"})
+        self.assertEqual(create_response.status_code, 201)
+        discussion_id = create_response.json()["data"]["id"]
+        reply_response = self.post_json(
+            f"/api/projects/{self.project.pk}/discussions/",
+            {"content": "可以放在第一版进度文档里。", "parent_id": discussion_id},
+        )
+        self.assertEqual(reply_response.status_code, 201)
+        nested_reply_response = self.post_json(
+            f"/api/projects/{self.project.pk}/discussions/",
+            {"content": "不允许回复回复。", "parent_id": reply_response.json()["data"]["id"]},
+        )
+        self.assertEqual(nested_reply_response.status_code, 422)
+
+        list_response = self.client.get(f"/api/projects/{self.project.pk}/discussions/")
+        payload = list_response.json()["data"]["results"][0]
+        self.assertEqual(payload["author"]["uid"], author.profile.uid)
+        self.assertEqual(payload["reply_count"], 1)
+        self.assertNotIn("discussion_author", json.dumps(payload, ensure_ascii=False))
+        self.assertNotIn("email", json.dumps(payload, ensure_ascii=False))
+
+        update_response = self.patch_json(f"/api/project-discussions/{discussion_id}/", {"content": "更新后的讨论。"})
+        self.assertEqual(update_response.status_code, 200)
+
+        self.client.force_login(other)
+        forbidden_response = self.patch_json(f"/api/project-discussions/{discussion_id}/", {"content": "不能改别人"})
+        self.assertEqual(forbidden_response.status_code, 403)
+
+        self.client.force_login(admin)
+        moderation_response = self.patch_json(
+            f"/api/admin/project-discussions/{discussion_id}/moderation/",
+            {"status": "hidden", "moderation_reason": "不适合公开"},
+        )
+        self.assertEqual(moderation_response.status_code, 200)
+        hidden_list = self.client.get(f"/api/projects/{self.project.pk}/discussions/")
+        self.assertEqual(hidden_list.json()["data"]["results"], [])
+        self.assertTrue(AuditLog.objects.filter(action="project_discussion.create").exists())
+        self.assertTrue(AuditLog.objects.filter(action="project_discussion.update").exists())
+        self.assertTrue(AuditLog.objects.filter(action="project_discussion.moderate").exists())
+
+    def test_content_backup_includes_progress_documents_and_entries_without_user_fk(self):
+        admin = self.login_platform_admin()
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir) / "media", MEDIA_URL="media/"):
+            media_root = Path(settings.MEDIA_ROOT)
+            progress_pdf = media_root / "project-documents" / "T0001" / "week-1.pdf"
+            progress_pdf.parent.mkdir(parents=True, exist_ok=True)
+            progress_pdf.write_bytes(b"%PDF-1.4\n% Progress\n%%EOF\n")
+            document = ProjectDocument.objects.create(
+                project=self.project,
+                doc_type=ProjectDocument.DocumentType.PDF,
+                document_kind=ProjectDocument.DocumentKind.PROGRESS,
+                title="第 1 周进度",
+                description="完成数据清洗",
+                path="media/project-documents/T0001/week-1.pdf",
+                content_hash="progress-hash",
+                uploaded_by=admin,
+            )
+            ProjectProgressEntry.objects.create(
+                project=self.project,
+                entry_type=ProjectProgressEntry.EntryType.DOCUMENT,
+                title="上传第 1 周进度",
+                description="完成数据清洗",
+                document=document,
+                created_by=admin,
+            )
+
+            export_response = self.client.get("/api/admin/content-backup/export/")
+            self.assertEqual(export_response.status_code, 200)
+            backup_bytes = export_response.content
+            with zipfile.ZipFile(io.BytesIO(backup_bytes)) as archive:
+                manifest = json.loads(archive.read("openmedailab-backup.json").decode("utf-8"))
+                self.assertEqual(manifest["counts"]["project_progress_entries"], 1)
+                self.assertIn("project_progress_entries", manifest)
+                self.assertNotIn("uploaded_by", json.dumps(manifest, ensure_ascii=False))
+                self.assertNotIn("created_by", json.dumps(manifest, ensure_ascii=False))
+
+            ProjectProgressEntry.objects.all().delete()
+            ProjectDocument.objects.all().delete()
+            progress_pdf.unlink()
+            restore_response = self.client.post(
+                "/api/admin/content-backup/restore/",
+                {"file": SimpleUploadedFile("backup.zip", backup_bytes, content_type="application/zip")},
+            )
+            self.assertEqual(restore_response.status_code, 200)
+            self.assertEqual(restore_response.json()["data"]["project_progress_entries"], 1)
+            restored_document = ProjectDocument.objects.get(document_kind=ProjectDocument.DocumentKind.PROGRESS)
+            restored_entry = ProjectProgressEntry.objects.get(project=self.project)
+            self.assertIsNone(restored_document.uploaded_by)
+            self.assertIsNone(restored_entry.created_by)
+            self.assertEqual(restored_entry.document, restored_document)
+
     def test_import_project_bundle_binds_pdf_documents(self):
         with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir) / "media", MEDIA_URL="media/"):
             source_dir = Path(tmpdir) / "source"
@@ -1830,7 +2177,8 @@ class ApiTests(TestCase):
         contribution_id = contribution_response.json()["data"]["id"]
         self.assertEqual(contribution_response.json()["data"]["result_type"], "stage")
         self.assertEqual(contribution_response.json()["data"]["result_type_label"], "阶段性成果")
-        self.assertEqual(ProjectTask.objects.get(pk=task_id).status, ProjectTask.TaskStatus.REVIEW)
+        self.assertEqual(ProjectTask.objects.get(pk=task_id).status, ProjectTask.TaskStatus.DONE)
+        self.assertTrue(AuditLog.objects.filter(action="task.result_submit", target_id=str(task_id)).exists())
 
         self.client.force_login(admin)
         review_response = self.patch_json(
@@ -1925,6 +2273,58 @@ class ApiTests(TestCase):
         self.assertEqual(revision_response.status_code, 422)
         contribution = Contribution.objects.get(pk=contribution_id)
         self.assertEqual(contribution.status, ContributionStatus.SUBMITTED)
+
+    def test_task_result_upload_accepts_markdown_for_admin_view_without_review(self):
+        user = User.objects.create_user(username="uploader", email="uploader@example.com", password="StrongPass12345")
+        ProjectInterest.objects.create(
+            user=user,
+            project=self.project,
+            role="学生",
+            available_hours_per_week=4,
+            status=InteractionStatus.APPROVED,
+        )
+        self.project.stage = ProjectStage.ACTIVE
+        self.project.save(update_fields=["stage", "updated_at"])
+
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir) / "media", MEDIA_URL="media/"):
+            self.client.force_login(user)
+            response = self.client.post(
+                "/api/me/contributions/upload/",
+                {
+                    "project_id": str(self.project.pk),
+                    "title": "阶段结果文档",
+                    "result_type": "stage",
+                    "description": "包含初步标注和字段说明。",
+                    "file": SimpleUploadedFile("result-note.md", b"# Result\n\nready", content_type="text/markdown"),
+                },
+            )
+
+            self.assertEqual(response.status_code, 201)
+            payload = response.json()["data"]
+            self.assertEqual(payload["status"], ContributionStatus.SUBMITTED)
+            self.assertIn("contribution-documents/", payload["file_path"])
+            stored_relative = payload["file_path"].lstrip("/").removeprefix("media/")
+            self.assertTrue((Path(settings.MEDIA_ROOT) / stored_relative).is_file())
+            self.assertEqual(Contribution.objects.get(pk=payload["id"]).reviewer, None)
+            self.assertTrue(AuditLog.objects.filter(action="contribution.submit", target_id=str(payload["id"])).exists())
+
+            self.login_platform_admin()
+            admin_response = self.client.get(f"/api/admin/contributions/?project={self.project.topic_id}")
+            self.assertEqual(admin_response.status_code, 200)
+            self.assertIn(payload["file_path"], json.dumps(admin_response.json()["data"], ensure_ascii=False))
+
+            self.client.force_login(user)
+            rejected_response = self.client.post(
+                "/api/me/contributions/upload/",
+                {
+                    "project_id": str(self.project.pk),
+                    "title": "非法文件",
+                    "result_type": "stage",
+                    "file": SimpleUploadedFile("result.exe", b"nope", content_type="application/octet-stream"),
+                },
+            )
+            self.assertEqual(rejected_response.status_code, 422)
+            self.assertEqual(rejected_response.json()["error"]["code"], "validation_error")
 
     def test_admin_overview_user_detail_credits_and_audit_logs_are_permissioned(self):
         user = User.objects.create_user(username="detailuser", email="detail@example.com", password="StrongPass12345")

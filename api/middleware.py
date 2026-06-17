@@ -1,8 +1,12 @@
 from contextvars import ContextVar
+from datetime import timedelta
 from uuid import uuid4
 
 from django.conf import settings
 from django.http import HttpResponse, JsonResponse
+from django.utils import timezone
+
+from accounts.models import UserProfile
 
 
 CURRENT_REQUEST_ID = ContextVar("openmedailab_request_id", default="")
@@ -67,6 +71,32 @@ class SimpleCorsMiddleware:
             response["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
             response["Vary"] = "Origin"
         return response
+
+
+class LastSeenMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        self.touch_authenticated_user(request)
+        return self.get_response(request)
+
+    def touch_authenticated_user(self, request):
+        if request.method == "OPTIONS":
+            return
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return
+        try:
+            profile = user.profile
+        except UserProfile.DoesNotExist:
+            return
+        now = timezone.now()
+        interval_seconds = getattr(settings, "OPENMEDAILAB_LAST_SEEN_UPDATE_INTERVAL_SECONDS", 60)
+        if profile.last_seen_at and profile.last_seen_at >= now - timedelta(seconds=interval_seconds):
+            return
+        UserProfile.objects.filter(pk=profile.pk).update(last_seen_at=now)
+        profile.last_seen_at = now
 
 
 class PasswordChangeRequiredMiddleware:

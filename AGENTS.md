@@ -1,12 +1,12 @@
 # AGENTS.md - OpenMedAI Lab Agent 开工导航与系统基准文档
 
-更新时间：2026-06-14
+更新时间：2026-06-17
 
 文件位置：项目根目录 `AGENTS.md`
 
 代码基准：以当前仓库代码为准；若本文档与当前代码冲突，必须先核对代码，再同步修正文档。
 
-当前产品版本文件：`VERSION = 0.7.4`
+当前产品版本文件：`VERSION = 0.10.1`
 
 本文档用途：后续任何 agent 在执行任何任务前，必须先读本文档，再按“任务定位索引”打开必要代码文件。目标是避免每次从零通读完整仓库，同时保证生命周期、API、数据库、权限和前端入口不被改乱。
 
@@ -28,14 +28,14 @@
 | 如果任务提到 | 先读本文哪些部分 |
 | --- | --- |
 | 登录、注册、密码、管理员账户 | 2.1、3、4.1、5.1、7.1 |
-| 课题库、课题详情、搜索筛选、状态卡 | 2.2、3.3、4.2、5.2、6.1 |
+| 课题库、课题详情、进度页、讨论区、搜索筛选、状态卡 | 2.2、3.3、4.2、5.2、6.1 |
 | 用户上传课题、编辑课题、每日限制 | 2.3、3.2、3.3、4.3、5.2 |
 | 收藏、参与、认领、资助、撤回 | 2.4、3.4、4.4、5.3 |
 | 我的空间、我的任务、任务结果 | 2.5、3.5、4.5、6.2 |
-| 管理员工作台、任务审批、任务管理 | 2.6、3.5、4.6、6.3 |
-| 主题、数据集说明 PDF、课题 PDF | 2.7、3.6、4.7、5.2 |
+| 管理员工作台、任务审批、任务管理、系统入口、备份恢复 | 2.6、3.5、4.6、6.3 |
+| 主题、主题排序、数据集说明 PDF、课题 PDF、进度 PDF | 2.7、3.6、4.7、5.2 |
 | 审计日志、异常、请求 ID | 2.8、3.7、4.8、5.5 |
-| 弹窗遮挡、响应式、顶部导航、悬浮卡 | 2.9、6、7.3 |
+| 弹窗遮挡、响应式、顶部导航、左侧二维码入口、悬浮卡 | 2.9、6、7.3 |
 | 版本号、更新日志弹窗 | 2.10、8 |
 
 ## 2. 任务定位索引
@@ -46,13 +46,13 @@
 
 | 目的 | 主要文件 | 重点位置 |
 | --- | --- | --- |
-| 用户资料模型、UID、管理员 UID | `accounts/models.py` | `PLATFORM_ADMIN_UID`、`ROLE_UID_PREFIXES`、`UserProfile`、`uid_for_user`、邮箱规范化 |
+| 用户资料模型、UID、管理员 UID、在线统计 | `accounts/models.py` | `PLATFORM_ADMIN_UID`、`ROLE_UID_PREFIXES`、`UserProfile`、`uid_for_user`、邮箱规范化、`last_seen_at` |
 | 注册表单和邮箱唯一性 | `accounts/forms.py` | `RegisterForm`、`UserProfileForm` |
 | 默认密码恢复 | `accounts/services.py` | `get_system_default_password`、`reset_user_to_default_password` |
 | 唯一管理员维护 | `accounts/management/commands/ensure_platform_admin.py` | 固定 `platform_admin`、`ADM00000001`，禁止多个管理员 |
 | 传统 Django 页面 | `accounts/views.py`、`accounts/urls.py` | 目前应跳转 SPA，不作为主产品入口扩展 |
 | 登录/注册/强制改密 API | `api/ninja_api.py` | `register`、`login_view`、`logout_view`、`password_change_required`、`profile_get/profile_patch/profile_put`、`admin_user_reset_password` |
-| 强制改密拦截 | `api/middleware.py` | `PasswordChangeRequiredMiddleware` |
+| 强制改密和在线心跳 | `api/middleware.py` | `PasswordChangeRequiredMiddleware`、`LastSeenMiddleware` |
 | 用户序列化 | `api/serializers.py` | `user_payload`、`uid_only_user_payload`、`profile_payload`、`admin_user_detail_payload` |
 | 前端 API 包装 | `frontend/src/api.js` | `login`、`register`、`changeRequiredPassword`、`profile`、`adminResetUserPassword` |
 | 前端页面逻辑 | `frontend/src/main.js` | 登录、注册、强制改密、资料页、用户管理相关函数 |
@@ -65,27 +65,34 @@
 - 密码恢复不走邮箱；管理员恢复为系统统一默认密码。
 - 用户用默认密码登录后必须先改密并重新登录。
 - 不恢复邮箱验证、邮箱重置密码、自助找回密码。
+- 在线人数按最近 5 分钟内有请求活动的已登录注册用户统计；匿名访客不计入，同一用户多会话只计 1 人。
+- `UserProfile.last_seen_at` 只用于聚合在线统计，不进入用户资料、管理员用户详情、审计摘要或公开 payload。
 
 ### 2.2 公开课题库、课题详情、搜索筛选、状态卡
 
 | 目的 | 主要文件 | 重点位置 |
 | --- | --- | --- |
-| 课题和阶段模型 | `projects/models.py` | `ProjectStage`、`Project`、`ProjectTag`、`ProjectDocument` |
-| 公开课题 API | `api/ninja_api.py` | `project_list`、`project_detail`、`project_status_card`、`theme_datasets` |
+| 课题和阶段模型 | `projects/models.py` | `ProjectStage`、`Project`、`ProjectTag`、`ProjectDocument`、`ProjectProgressEntry`、`ProjectDiscussion` |
+| 公开课题 API | `api/ninja_api.py` | `project_list`、`project_detail`、`project_progress`、`project_status_card`、`project_discussion_list/create/update/delete`、`theme_datasets` |
 | 搜索和可见性辅助 | `api/ninja_api.py` | `project_search_q`、`related_project_search_q`、`viewer_state`、`status_uid_groups_for_project` |
-| 课题序列化 | `api/serializers.py` | `project_summary_payload`、`project_detail_payload`、`public_project_detail_payload`、`theme_dataset_payload` |
-| 前端课题库加载 | `frontend/src/main.js` | `loadProjects`、`projectListRequestParams`、`loadProject`、`openProjectPreview`、`loadProjectThemeDatasets` |
-| 前端状态卡 | `frontend/src/main.js`、`frontend/src/styles.css` | 状态卡渲染、悬浮定位、小屏防遮挡 |
-| 测试 | `api/tests.py`、`frontend/src/uiPlacement.test.js` | 公开过滤、状态卡 UID 分组、响应式 |
+| 课题序列化 | `api/serializers.py` | `project_summary_payload`、`project_detail_payload`、`public_project_detail_payload`、`project_progress_payload`、`discussion_payload`、`theme_dataset_payload` |
+| 前端课题库加载 | `frontend/src/main.js` | `loadProjects`、`projectListRequestParams`、`loadProjectProgress`、`loadProjectDiscussions`、首页主题下拉 |
+| 前端状态卡 | `frontend/src/main.js`、`frontend/src/styles.css` | 状态卡渲染、组队/阶段/资助颜色、悬浮定位、小屏防遮挡 |
+| 测试 | `api/tests.py`、`frontend/src/uiPlacement.test.js` | 公开过滤、状态卡 UID 分组、主题下拉、状态颜色、响应式 |
 
 产品规则：
 
 - 访客和普通公开列表只能看到 `is_public = true` 且阶段为开放招募、组队中、进行中、暂停的课题。
 - 已登录用户读取公开课题列表时，每个课题应带 `viewer_state`，用于从数据库恢复收藏、点赞、参与、认领、资助等按钮状态；已撤回关系不能继续算作当前激活状态。
 - 公开课题列表默认按课题编号 `topic_id` 正序；“最新编号”按 `topic_id` 倒序；“最近更新”才按 `updated_at` 排序，避免编辑课题打乱编号顺序。
-- 草稿和归档不进入公开课题库、公开详情、公开主题空间。
+- 草稿和归档不进入公开课题库、公开详情、公开课题进度页、公开讨论区和公开主题数据集说明。
+- 首页主题入口保持一行且不横向滚动：第一个入口固定为“不限主题”，最后一个入口在关闭时显示“展示全部主题”、展开时显示“收起全部主题”，中间主题沿用首页原快捷主题逻辑展示。
 - 状态卡只展示阶段、我的关系、按收藏/参与/认领/资助分组的 UID。
 - 涉及他人信息时只展示 UID，不展示用户名、邮箱、真实姓名。
+- 课题卡片组队 `0/1`、`1/1`、`2/1 · 超额` 必须保留文字；未满足、刚好满足、超额、进行中阶段、已获资助状态用不同语义颜色区分。
+- 课题标题进入 `#/project/{id}` 独立进度页；主 PDF 仍通过单独查看/下载入口打开。
+- 公开课题进度页只返回公开且未归档课题、公开进度文档、公开进度记录和可见讨论；作者、上传者只展示 UID。
+- 讨论区访客可读，登录用户可写主讨论和回复；作者可编辑/删除自己的讨论，管理员可隐藏/恢复/删除，讨论写操作必须写审计。
 
 ### 2.3 用户上传课题、管理员课题管理、Markdown/JSON 导入
 
@@ -94,12 +101,13 @@
 | 课题字段和上传者 | `projects/models.py` | `Project.created_by`、阶段、公开状态、文档关系 |
 | Markdown/导入解析 | `projects/importing.py`、`projects/contracts.py` | 课题模板字段、导入契约 |
 | 用户课题 API | `api/ninja_api.py` | `me_project_list`、`user_project_create`、`user_project_update`、`user_project_delete` |
+| 用户课题 PDF API | `api/ninja_api.py` | `user_project_document_upload`、`user_project_document_delete`、`require_user_project_document_access` |
 | 管理员课题 API | `api/ninja_api.py` | `admin_project_list`、`admin_project_get`、`admin_project_create`、`admin_project_update`、`admin_project_delete`、`admin_project_bulk_archive`、`admin_project_bulk_action`、`admin_project_import_json` |
 | 课题写入校验 | `api/ninja_api.py` | `ProjectWriteRequest`、`validate_admin_project_payload`、`validate_user_project_payload`、`require_project_owner_or_admin`、`user_project_uploads_today`、`user_can_bypass_project_upload_quota` |
-| 前端用户上传 | `frontend/src/main.js` | `loadMyProjects`、新增/编辑我的课题表单、保存草稿/发布 |
-| 前端管理员课题管理 | `frontend/src/main.js` | `loadAdminProjects`、课题列表、状态下拉、新增/编辑课题弹窗、上传文档 |
-| 前端 API 包装 | `frontend/src/api.js` | `meProjects`、`createProject`、`updateProject`、`deleteProject`、`adminProjects`、`adminCreateProject`、`adminUpdateProject`、`adminDeleteProject` |
-| 测试 | `api/tests.py`、`projects/tests.py`、`frontend/src/projectJsonImport.test.js` | ownership、每日 10 个、草稿发布、导入校验 |
+| 前端用户上传 | `frontend/src/main.js` | `loadMyProjects`、新增/编辑我的课题表单、保存草稿/发布、`setMyProjectDocumentFile`、`deleteMyProjectDocument` |
+| 前端管理员课题管理 | `frontend/src/main.js` | `loadAdminProjects`、课题列表、状态下拉、新增/编辑课题弹窗、上传主 PDF、上传项目进度 PDF |
+| 前端 API 包装 | `frontend/src/api.js` | `meProjects`、`createProject`、`updateProject`、`deleteProject`、`uploadProjectDocuments`、`deleteProjectDocument`、`adminProjects`、`adminCreateProject`、`adminUpdateProject`、`adminDeleteProject` |
+| 测试 | `api/tests.py`、`projects/tests.py`、`frontend/src/projectJsonImport.test.js` | ownership、每日 10 个、草稿发布、课题 PDF、导入校验 |
 
 产品规则：
 
@@ -107,6 +115,7 @@
 - 普通用户只能修改或删除自己上传的课题。
 - 普通用户每天最多上传 10 个课题；管理员不受限制。
 - 用户上传课题默认草稿；用户只允许在草稿和开放招募之间切换。
+- 普通用户可为自己上传的非归档课题上传、替换或删除一份主 PDF；非 owner 不可操作，归档课题只能管理员改。
 - 管理员可以管理全站课题，可推进阶段、暂停、归档。
 - 管理端课题归档和删除必须分开：归档通过 `PATCH /api/admin/projects/{id}/` 设置 `stage=archived,is_public=false`，不需要确认；删除通过 `DELETE /api/admin/projects/{id}/` 物理删除课题，前端必须弹确认。
 - JSON 导入接口当前仍存在于代码中；若任务要求移除或隐藏，必须先确认前端入口、测试和历史数据影响。
@@ -139,7 +148,7 @@
 | 目的 | 主要文件 | 重点位置 |
 | --- | --- | --- |
 | 任务结果模型 | `credits/models.py` | `Contribution`、`ContributionStatus`、`CreditLedger` |
-| 用户任务结果 API | `api/ninja_api.py` | `me_task_list`、`me_contribution_list`、`me_contribution_create` |
+| 用户任务结果 API | `api/ninja_api.py` | `me_task_list`、`me_contribution_list`、`me_contribution_create`、`me_contribution_upload` |
 | 提交资格校验 | `api/ninja_api.py` | `user_has_approved_project_relation`、课题阶段校验 |
 | 序列化 | `api/serializers.py` | `contribution_payload`、`dashboard_payload` |
 | 前端我的空间 | `frontend/src/main.js` | `loadDashboard`、`loadFavorites`、`loadMyProjects`、`openContributionModal`、`submitContribution` |
@@ -151,27 +160,34 @@
 - “我的任务”不是旧 `ProjectTask` 分配任务，而是用户与课题之间的已收藏、已申请、已认领、已资助、已提交结果状态汇总。
 - 用户只有在课题为进行中，且自己有已通过参与或认领关系时，才能提交任务结果。
 - 单纯资助关系不赋予任务结果提交资格。
-- 任务结果审核状态只使用 `pending/approved/rejected` 作为当前主流程。
+- 任务结果提交后即为 `submitted`，不进入管理员审批主流程。
+- 提交结果可只填写说明内容，也可额外上传一份 PDF 或 Markdown 文档；托管文档路径写入 `Contribution.file_path`。
 - 积分和旧任务奖励接口保留兼容，但不作为主流程默认动作。
 
-### 2.6 管理员工作台、任务审批、任务管理、用户管理
+### 2.6 管理员工作台、任务审批、任务管理、系统入口、备份恢复、用户管理
 
 | 目的 | 主要文件 | 重点位置 |
 | --- | --- | --- |
 | 管理员总览 | `api/ninja_api.py` | `admin_overview` |
 | 用户管理 | `api/ninja_api.py`、`api/serializers.py` | `admin_user_list`、`admin_user_detail`、`admin_user_reset_password`、`admin_user_detail_payload` |
 | 资助审批 | `api/ninja_api.py` | `admin_interaction_list`、`admin_interaction_update_status` |
-| 任务管理 | `api/ninja_api.py` | `admin_contribution_list`、`admin_contribution_get`、`admin_contribution_review`、项目详情辅助 |
+| 任务管理 | `api/ninja_api.py` | `admin_contribution_list`、`admin_contribution_get`、项目详情辅助；`admin_contribution_review` 仅作兼容 |
+| 系统入口二维码 | `api/ninja_api.py` | `sidebar_qrs`、`admin_sidebar_qr_upload`、`sidebar_qr_entries_payload`、`sidebar_qr_root` |
+| 内容备份恢复 | `api/ninja_api.py` | `admin_content_backup_export`、`admin_content_backup_restore`、`require_content_backup_capability`、`build_content_backup_manifest`、`restore_content_backup` |
+| 讨论区管理 | `api/ninja_api.py` | `admin_project_discussion_list`、`admin_project_discussion_moderate` |
 | 历史任务接口 | `api/ninja_api.py` | `admin_task_list`、`admin_task_create`、`admin_task_update`、`admin_task_delete`、`admin_task_assign`、`admin_task_status` |
-| 前端管理员页 | `frontend/src/main.js` | `loadAdmin`、`loadActiveAdminTab`、`loadAdminUsers`、`loadAdminInteractions`、`loadAdminTaskProjects`、`openTaskProjectDetail`、`fetchProjectApprovedInteractions`、`fetchProjectContributions`、`loadAdminContributions`、`loadAdminAuditLogs` |
-| 前端 API 包装 | `frontend/src/api.js` | `adminUsers`、`adminResetUserPassword`、`adminInteractions`、`reviewAdminInteraction`、`adminContributions`、`reviewAdminContribution`、`adminAuditLogs` |
-| 测试 | `api/tests.py`、`frontend/src/*.test.js` | 资助审批、UID 展示、管理员排序、任务结果审核 |
+| 前端管理员页 | `frontend/src/main.js` | `loadAdmin`、`loadActiveAdminTab`、`loadAdminUsers`、`loadAdminInteractions`、`loadAdminTaskProjects`、`loadSidebarQrs`、`uploadSidebarQr`、`openTaskProjectDetail`、`fetchProjectApprovedInteractions`、`fetchProjectContributions`、`loadAdminContributions`、`exportContentBackup`、`restoreContentBackup`、`loadAdminAuditLogs`、`moveThemeSort`、`saveThemeSort` |
+| 前端 API 包装 | `frontend/src/api.js` | `adminUsers`、`adminResetUserPassword`、`adminInteractions`、`reviewAdminInteraction`、`adminContributions`、`createMeContributionWithFile`、`sidebarQrs`、`adminUploadSidebarQr`、`adminReorderThemes`、`adminProjectDiscussions`、`moderateProjectDiscussion`、`adminExportContentBackup`、`adminRestoreContentBackup`、`adminAuditLogs` |
+| 测试 | `api/tests.py`、`frontend/src/*.test.js` | 资助审批、UID 展示、管理员排序、任务结果查看与文档上传、备份恢复入口和恢复结果 |
 
 产品规则：
 
 - 管理员不审核参与和认领，只审批资助意向。
-- 管理员“任务管理”按课题查看已参与/已认领 UID、资助 UID 和任务结果。
+- 管理员“任务管理”按课题查看已参与/已认领 UID、资助 UID、任务结果内容和结果文档。
 - 管理员可把课题推进到进行中、暂停、归档。
+- 管理员“系统入口”维护左侧边栏“联系管理员”和“加入社区”二维码；上传只允许图片文件，成功后写入 `platform_qr.upload` 审计。
+- 内容备份恢复要求同时具备 `manage_projects` 和 `manage_themes`，导出/恢复都必须写审计。
+- 备份 ZIP 只覆盖主题、标签、课题、主题数据集说明记录、课题主 PDF、项目进度 PDF、公开进度记录和对应媒体文件；不覆盖用户账号、协作关系、讨论、任务结果、积分和审计日志。
 - 管理员用户管理中，平台管理员固定第一行，其他用户按 UID 稳定排序。
 - 历史 `ProjectTask` 接口仍存在，但不要把“拆任务、分配 UID、任务奖励”恢复成主流程。
 
@@ -179,25 +195,27 @@
 
 | 目的 | 主要文件 | 重点位置 |
 | --- | --- | --- |
-| 数据模型 | `projects/models.py` | `Theme`、`ThemeFile`、`ProjectDocument` |
+| 数据模型 | `projects/models.py` | `Theme`、`ThemeFile`、`ProjectDocument`、`ProjectProgressEntry` |
 | 公开主题数据集说明 | `api/ninja_api.py` | `theme_datasets` |
-| 管理员主题 API | `api/ninja_api.py` | `admin_theme_list/create/update/delete` |
+| 管理员主题 API | `api/ninja_api.py` | `admin_theme_list/create/update/delete`、`admin_theme_reorder` |
 | 主题数据集说明 API | `api/ninja_api.py` | `admin_theme_file_list/create/update/delete`、`admin_theme_file_detail_pdf_upload` |
-| 课题 PDF API | `api/ninja_api.py` | `admin_project_document_list`、`admin_project_document_upload/update/delete` |
+| 课题 PDF API | `api/ninja_api.py` | `admin_project_document_list`、`admin_project_document_upload/update/delete`、`user_project_document_upload/delete`、进度 PDF 上传 |
 | 数据集说明 PDF API | `api/ninja_api.py` | `admin_theme_file_detail_pdf_upload` |
 | 路径安全 | `api/ninja_api.py` | `safe_child_path`、`project_document_root`、`theme_file_detail_pdf_root`、`sanitize_file_name` |
-| 前端页面 | `frontend/src/main.js` | `loadProjectThemeDatasets`、`loadThemeFiles`、`saveThemeFile`、`uploadThemeFileDetailPdf`、`uploadProjectDocuments` |
+| 前端页面 | `frontend/src/main.js` | `loadProjectProgress`、`loadThemeFiles`、`saveThemeFile`、`uploadThemeFileDetailPdf`、`uploadProjectDocuments`、`uploadProjectProgressDocument`、`moveThemeSort`、`saveThemeSort` |
 | 测试 | `api/tests.py`、`projects/tests.py` | PDF 上传、公开过滤、主题数据集说明展示 |
 
 产品规则：
 
 - `Theme` 是主题分类；首页主题、筛选主题和管理端主题列表都来自数据库中的 `Theme`。
+- 管理端主题排序通过 `PATCH /api/admin/themes/reorder/` 批量写入 `sort_order`，必须写审计；前端可上移、下移、置顶、置底并显式保存。
 - 管理端主题停用和删除必须分开：停用通过 `PATCH /api/admin/themes/{id}/` 设置 `is_active=false`，不需要确认；删除通过 `DELETE /api/admin/themes/{id}/` 物理删除主题，前端必须弹确认。删除主题不会删除课题，课题的 `theme` 会置空；该主题下的数据集说明记录和托管 PDF 会被删除。
 - 不再提供目录浏览、目录上传或服务器数据集存储；管理端不维护目录式文件管理模块。
 - `ThemeFile` 表示一个主题下的数据集说明记录，只保存数据集名称、说明和一份说明 PDF，不保存原始数据集。
 - 主题的数据集说明 PDF 使用 `ThemeFile.detail_pdf_path` 绑定，创建记录时后端自动生成内部 `path`。
 - 单个课题只维护一份主 PDF 详情：`ProjectDocument(document_kind="detail", doc_type="pdf")`。重新上传时替换旧主 PDF。
-- 首页课题卡和课题弹窗可预览课题主 PDF；课题详情不再展示 Markdown 原始文档模块。
+- 项目进度 PDF 使用 `ProjectDocument(document_kind="progress", doc_type="pdf")`，管理员上传时保留历史并自动生成 `ProjectProgressEntry(entry_type="document")`；上传主 PDF 不得删除进度 PDF。
+- 首页课题卡通过标题进入独立课题进度页，课题主 PDF 只通过查看/下载入口打开；课题详情不再展示 Markdown 原始文档模块。
 - 公开 `/api/themes/{slug}/datasets/` 只返回启用主题、启用的数据集说明记录，以及公开且未归档的关联课题。
 
 ### 2.8 审计日志、异常、请求 ID、错误反馈
@@ -225,9 +243,9 @@
 
 | 目的 | 主要文件 | 重点位置 |
 | --- | --- | --- |
-| 单页应用主逻辑 | `frontend/src/main.js` | 路由、状态、页面渲染、事件处理、弹窗状态 |
-| 样式 | `frontend/src/styles.css` | 顶部导航、卡片、表格、弹窗、状态卡、小屏媒体查询 |
-| API 包装 | `frontend/src/api.js` | 不要绕过统一 `request` |
+| 单页应用主逻辑 | `frontend/src/main.js` | 路由、状态、页面渲染、事件处理、弹窗状态、`SIDEBAR_QR_ENTRIES`、`sidebarQrEntries`、`uploadSidebarQr` |
+| 样式 | `frontend/src/styles.css` | 顶部导航、卡片、表格、弹窗、状态卡、二维码弹窗、小屏媒体查询 |
+| API 包装 | `frontend/src/api.js` | 不要绕过统一 `request` 或 `requestForm` |
 | UI 测试 | `frontend/src/uiPlacement.test.js`、`frontend/src/profileMenu.test.js`、`frontend/src/release.test.js` | 弹窗层级、个人菜单、版本弹窗 |
 
 产品规则：
@@ -235,7 +253,14 @@
 - 弹窗中的确认按钮不能被下一层业务弹窗遮挡。
 - 确认弹窗、警告弹窗层级应高于新增/编辑/任务结果弹窗。
 - 顶部导航要在窄屏下优雅收缩或横向滚动，不能裁切关键按钮。
+- 顶部低调展示注册用户数和在线人数，只展示聚合数字，不展示用户列表或最近活跃时间。
+- 左侧边栏固定保留“联系管理员”和“加入社区”入口，点击只打开二维码弹窗；二维码由公开 `/api/sidebar-qrs/` 或 `/api/meta/` 返回，缺失时展示“二维码待更新”。
+- 只有管理员可以在管理端“系统入口”上传或更新这两个二维码；普通用户和访客不得拥有上传入口或写接口权限。
+- 二维码上传文件存放在 `MEDIA_ROOT/system-qrcodes/`，不新增数据库模型；上传成功必须写审计，弹窗查看本身不写审计。
+- 二维码弹窗层级低于确认/警告弹窗，高于普通页面内容，关闭后不能丢失当前业务页面状态。
+- 首页主题栏保持单行入口且不横向滚动，第一个入口为“不限主题”，末尾按钮关闭时显示“展示全部主题”、展开时显示“收起全部主题”；下拉只展示第一行以外的启用主题，避免重复展示“不限主题”和首行快捷主题。中间主题沿用首页原快捷主题逻辑，下拉按钮必须与主题卡按钮视觉一致，下拉内容超出时内部滚动。
 - 状态悬浮卡固定最大尺寸，内容超出内部滚动；小屏不要遮挡课题标题。
+- 课题卡片中组队未满足、刚好满足、超额、进行中、已获资助使用不同语义颜色；颜色不能替代文字。
 - 所有按钮点击后必须有明确反馈：toast、按钮状态变化、表格刷新、弹窗关闭或错误提示。
 
 ### 2.10 版本号、更新日志、发布信息
@@ -263,7 +288,7 @@
 | --- | --- | --- |
 | 访客 | 浏览公开课题、公开详情、主题数据集说明 PDF、登录注册 | 收藏、点赞、参与、认领、资助、提交结果、进入管理页 |
 | 普通用户 | 上传课题、管理自己上传的课题、收藏、点赞、参与、认领、资助、撤回、提交任务结果、维护资料 | 管理他人课题、超过每日上传上限、审批资助、审核任务结果、查看敏感个人信息 |
-| 平台管理员 | 管理全站用户、主题、数据集说明 PDF、课题、资助审批、任务结果审核、审计日志、密码恢复 | 通过前端创建第二个管理员、审批参与/认领、恢复邮箱找回密码主流程 |
+| 平台管理员 | 管理全站用户、主题、数据集说明 PDF、课题、资助审批、任务结果查看、审计日志、密码恢复 | 通过前端创建第二个管理员、审批参与/认领、审核任务结果、恢复邮箱找回密码主流程 |
 
 ### 3.2 普通用户生命周期
 
@@ -283,7 +308,6 @@ stateDiagram-v2
   AutoApproved --> Withdrawn: 用户撤回
   SponsorPending --> Withdrawn: 用户撤回
   AutoApproved --> SubmitResult: 课题进行中后提交任务结果
-  SubmitResult --> ResultReviewed: 管理员审核
 ```
 
 关键规则：
@@ -330,7 +354,7 @@ flowchart LR
 - 用户参与或认领自动 approved；是否自动推进到组队中由后端统一逻辑控制，不能前端私自改阶段。
 - 进入进行中由管理员显式操作。
 - 归档是软归档，不物理删除业务历史。
-- 草稿和归档不能出现在公开课题库、公开详情和公开主题空间。
+- 草稿和归档不能出现在公开课题库、公开详情和公开主题数据集说明。
 
 ### 3.4 用户与课题关系生命周期
 
@@ -347,23 +371,25 @@ flowchart LR
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Pending: 用户提交任务结果
-  Pending --> Approved: 管理员通过
-  Pending --> Rejected: 管理员拒绝
+  [*] --> Submitted: 用户提交任务结果
 ```
 
 任务结果规则：
 
 - 当前主流程称为“任务结果”，不是旧的任务拆分。
 - 用户提交结果不需要填写旧 `task_id`。
-- 管理员审核任务结果时不默认触发积分奖励。
+- 用户提交结果后即为已提交，不需要管理员审批。
+- 用户可填写说明内容，也可上传一份 PDF、MD 或 Markdown 结果文档；管理员可在任务管理详情中打开查看。
+- 管理员审核任务结果和积分奖励属于旧兼容接口，不作为主流程入口。
 - 若将来重新启用积分或细任务，必须先更新本文档和验收标准。
 
-### 3.6 主题、数据集说明 PDF、课题 PDF
+### 3.6 主题、数据集说明 PDF、课题 PDF、进度 PDF
 
 - `Theme` 是课题所属主题。
 - `ThemeFile` 是主题级数据集说明记录，面向数据集说明 PDF，不存原始数据集目录。
-- `ProjectDocument` 当前主流程只使用 `document_kind="detail"`、`doc_type="pdf"`，表示单个课题主 PDF。
+- `ProjectDocument(document_kind="detail", doc_type="pdf")` 表示单个课题主 PDF；重新上传会替换旧主 PDF。
+- `ProjectDocument(document_kind="progress", doc_type="pdf")` 表示项目进度 PDF；可保留多份历史文档，不会被主 PDF 替换删除。
+- `ProjectProgressEntry` 表示课题进度时间线；上传进度 PDF 时会生成文档类进度记录。
 - 课题详情可展示课题主 PDF 和所属主题的数据集说明 PDF，二者不要混淆。
 
 ### 3.7 审计、异常、日志
@@ -373,8 +399,9 @@ stateDiagram-v2
 - 登录、退出、注册、强制改密、密码恢复。
 - 用户资料、课题、主题、数据集说明 PDF、课题 PDF。
 - 收藏、点赞、参与、认领、资助、撤回。
-- 任务结果提交和审核。
-- 批量导入、归档、删除、后台管理操作。
+- 任务结果提交和结果文档上传。
+- 系统入口二维码上传或替换。
+- 批量导入、归档、删除、内容备份恢复、后台管理操作。
 
 错误规则：
 
@@ -405,11 +432,15 @@ stateDiagram-v2
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/meta/` | 元数据、阶段、版本 |
+| `GET` | `/api/meta/` | 元数据、阶段、版本、平台聚合统计 |
+| `GET` | `/api/sidebar-qrs/` | 左侧边栏二维码配置；公开读取，缺失图片返回空态 |
 | `GET` | `/api/project-schema/` | 课题字段契约 |
 | `GET` | `/api/projects/` | 公开课题列表；登录态返回每个课题的 `viewer_state` |
 | `GET` | `/api/projects/{id}/` | 公开课题详情 |
+| `GET` | `/api/projects/{id}/progress/` | 公开课题进度页数据，返回进度正文、进度 PDF、时间线 |
 | `GET` | `/api/projects/{id}/status-card/` | 课题状态卡 |
+| `GET/POST` | `/api/projects/{id}/discussions/` | 公开读取讨论；登录用户发起主讨论或回复 |
+| `PATCH/DELETE` | `/api/project-discussions/{id}/` | 作者或管理员编辑、删除讨论 |
 | `GET` | `/api/themes/{slug}/datasets/` | 公开主题数据集说明 PDF |
 
 ### 4.3 User Project Write APIs
@@ -419,6 +450,8 @@ stateDiagram-v2
 | `POST` | `/api/projects/` | 普通用户创建课题 |
 | `PATCH` | `/api/projects/{id}/` | 普通用户编辑自己的课题 |
 | `DELETE` | `/api/projects/{id}/` | 普通用户删除/归档自己的课题 |
+| `POST` | `/api/project-documents/upload/` | 普通用户上传或替换自己课题的主 PDF |
+| `DELETE` | `/api/project-documents/{id}/` | 普通用户删除自己课题的主 PDF |
 
 不要新增 `publishProject`、`pauseProject`、`archiveProject` 等同义 API；阶段变化通过已有 `PATCH` 表达。
 
@@ -441,9 +474,10 @@ stateDiagram-v2
 | --- | --- | --- |
 | `GET` | `/api/me/contributions/` | 我的任务结果 |
 | `POST` | `/api/me/contributions/` | 提交任务结果 |
+| `POST` | `/api/me/contributions/upload/` | 提交任务结果并上传一份 PDF/Markdown 文档 |
 | `GET` | `/api/admin/contributions/` | 管理员查看任务结果 |
 | `GET` | `/api/admin/contributions/{id}/` | 管理员查看结果详情 |
-| `PATCH` | `/api/admin/contributions/{id}/review/` | 管理员审核任务结果 |
+| `PATCH` | `/api/admin/contributions/{id}/review/` | 兼容旧任务审核/积分流程；当前前端主流程不调用 |
 
 ### 4.6 Admin APIs
 
@@ -457,9 +491,14 @@ stateDiagram-v2
 | `POST` | `/api/admin/projects/bulk-archive/` | 批量归档 |
 | `POST` | `/api/admin/projects/bulk-action/` | 批量归档、物理删除、公开/取消公开、设置阶段 |
 | `GET/POST/PATCH/DELETE` | `/api/admin/themes/` | 主题管理；停用用 `PATCH is_active=false`，`DELETE` 为物理删除 |
+| `PATCH` | `/api/admin/themes/reorder/` | 批量保存主题排序 |
 | `GET/POST/PATCH/DELETE` | `/api/admin/theme-files/` | 主题数据集说明记录管理 |
 | `POST` | `/api/admin/theme-files/{file_id}/detail-pdf/` | 上传数据集说明 PDF |
 | `GET/POST/PATCH/DELETE` | `/api/admin/project-documents/` 相关路径 | 课题主 PDF 管理 |
+| `GET/PATCH` | `/api/admin/project-discussions/`、`/api/admin/project-discussions/{id}/moderation/` | 查看和隐藏/恢复/删除课题讨论 |
+| `POST` | `/api/admin/sidebar-qrs/{key}/image/` | 管理员上传或替换左侧边栏二维码 |
+| `GET` | `/api/admin/content-backup/export/` | 导出主题、标签、课题、PDF 元数据和媒体文件备份 |
+| `POST` | `/api/admin/content-backup/restore/` | 恢复内容备份；不覆盖用户、协作关系和审计日志 |
 | `GET` | `/api/admin/audit-logs/` | 审计日志 |
 
 ### 4.7 Legacy / Compatibility APIs
@@ -469,6 +508,7 @@ stateDiagram-v2
 - `/api/admin/tasks/`
 - `/api/me/tasks/`
 - `/api/admin/credits/`
+- `/api/admin/contributions/{id}/review/`
 - 任务分配、旧任务状态、默认任务奖励。
 
 修改原则：
@@ -490,6 +530,7 @@ stateDiagram-v2
 - `role_type`: 用户身份
 - `contact_email` / `email_normalized`: 联系邮箱和唯一性约束
 - `must_change_password`: 默认密码登录后的强制改密标记
+- `last_seen_at`: 最近一次登录用户请求活动时间，仅用于在线人数聚合统计
 - `credit_balance` / `reputation_score`: 保留字段，当前不是主流程核心
 
 管理员固定：
@@ -498,6 +539,12 @@ stateDiagram-v2
 - UID：`ADM00000001`
 - 通过 `ensure_platform_admin` 命令维护。
 
+在线统计：
+
+- `/api/meta/` 的 `platform_stats.registered_user_count` 统计 active user profile。
+- `/api/meta/` 的 `platform_stats.online_user_count` 统计最近 5 分钟活跃的已登录用户。
+- `last_seen_at` 由 `LastSeenMiddleware` 节流更新，不写审计日志，不进入任何用户详情响应。
+
 ### 5.2 课题、主题和文件
 
 主要模型在 `projects/models.py`：
@@ -505,8 +552,10 @@ stateDiagram-v2
 - `Theme`: 主题。
 - `Project`: 课题主体，包含阶段、公开状态、上传者、结构化字段、评分维度。
 - `ProjectTag`: 标签。
-- `ProjectDocument`: 单课题文档。
-- `ThemeFile`: 主题文件域文件。
+- `ProjectDocument`: 单课题文档；当前主流程使用 `document_kind="detail"`、`doc_type="pdf"` 维护一份课题主 PDF，使用 `document_kind="progress"`、`doc_type="pdf"` 保留多份项目进度 PDF。
+- `ProjectProgressEntry`: 课题进度时间线记录，当前用于阶段、文档和说明类进度；公开进度页只展示 `visibility="public"` 的记录。
+- `ProjectDiscussion`: 课题讨论区内容，支持一级回复、作者编辑/删除和管理员隐藏/删除；公开 payload 只展示作者 UID。
+- `ThemeFile`: 主题数据集说明记录；当前主流程通过 `detail_pdf_path` 绑定一份数据集说明 PDF。
 - `ProjectTask`: 历史任务模型，当前非主流程。
 - `AuditLog`: 审计日志。
 
@@ -537,7 +586,9 @@ stateDiagram-v2
 当前产品口径：
 
 - 用户提交的是课题级任务结果。
-- 管理员审核结果，但不默认发积分。
+- 用户提交结果后保持 `submitted`，不需要管理员审批。
+- `Contribution.file_path` 可保存用户上传的结果文档托管路径，当前仅允许 PDF、MD 和 Markdown。
+- 管理员只在任务管理中查看结果内容和打开文档。
 - 旧任务奖励保留接口兼容，不作为新需求默认扩展点。
 
 ### 5.5 审计日志
@@ -593,10 +644,12 @@ stateDiagram-v2
 
 - 总览。
 - 任务审批：只处理资助意向。
-- 任务管理：按课题查看人员 UID 和任务结果。
+- 任务管理：按课题查看人员 UID、任务结果和结果文档。
 - 课题管理。
-- 主题与文件域。
+- 主题管理：维护主题、数据集说明记录和说明 PDF。
 - 用户管理。
+- 系统入口：维护“联系管理员”和“加入社区”二维码。
+- 备份恢复：导出和恢复主题、标签、课题、数据集说明 PDF、课题 PDF。
 - 审计日志。
 
 历史入口原则：
@@ -623,7 +676,7 @@ stateDiagram-v2
 - 课题状态变化：`PATCH /api/admin/projects/{id}/` 或用户自己的 `PATCH /api/projects/{id}/`。
 - 归档：`PATCH` 设置阶段/公开状态或现有软删除接口。
 - 用户关系：现有 follow/interest/claim/sponsor/withdraw。
-- 任务结果：现有 contribution API。
+- 任务结果：现有 contribution API；带文档提交使用 `/api/me/contributions/upload/`。
 
 禁止新增同义接口：
 
@@ -731,15 +784,20 @@ rg -n 'TO[D]O|TB[D]|FIX[M]E|待[定]|不确[定]' AGENTS.md
 涉及前端时，至少用浏览器覆盖：
 
 1. 访客打开课题库，搜索和筛选有反馈。
-2. 访客打开课题详情，预览课题主 PDF，查看主题数据集说明 PDF。
-3. 用户登录、收藏、取消收藏。
-4. 用户参与、认领、资助，观察状态反馈。
-5. 用户进入我的空间，查看我的任务、我上传、个人资料。
-6. 用户提交任务结果。
-7. 管理员登录，进入任务审批、任务管理、课题管理、用户管理、审计日志。
-8. 管理员审批资助、审核任务结果、修改课题阶段。
-9. 管理员恢复用户默认密码，用户强制改密后重新登录。
-10. 小屏检查顶部导航、弹窗、状态卡、表格。
+2. 访客看到顶部聚合注册用户数和在线人数；不得看到用户列表、UID 或最近活跃时间。
+3. 首页主题栏保持一行且不横向滚动，第一项为“不限主题”，末尾点击“展示全部主题”后文案变为“收起全部主题”，下拉只列出第一行以外的主题并支持筛选。
+4. 首页课题卡片检查组队 `0/1`、`1/1`、进行中、已获资助的文字和颜色差异。
+5. 访客打开课题详情，预览课题主 PDF，查看主题数据集说明 PDF。
+6. 用户登录、收藏、取消收藏。
+7. 用户参与、认领、资助，观察状态反馈。
+8. 用户进入我的空间，查看我的任务、我上传、个人资料。
+9. 用户提交任务结果，可同时上传 PDF 或 Markdown 文档。
+10. 管理员登录，进入任务审批、任务管理、课题管理、主题管理、系统入口、备份恢复、用户管理、审计日志。
+11. 管理员审批资助、查看任务结果文档、修改课题阶段。
+12. 管理员导出内容备份；如测试恢复，必须使用测试环境或临时数据。
+13. 管理员恢复用户默认密码，用户强制改密后重新登录。
+14. 管理员上传或替换“联系管理员”“加入社区”二维码后，访客侧边栏弹窗展示最新图片；未上传时展示占位。
+15. 小屏检查顶部导航、主题下拉、弹窗、状态卡、表格。
 
 ### 9.3 关键断言
 
@@ -748,9 +806,18 @@ rg -n 'TO[D]O|TB[D]|FIX[M]E|待[定]|不确[定]' AGENTS.md
 - 资助由管理员审批。
 - 非进行中课题不能提交任务结果。
 - 未参与/未认领用户不能提交任务结果。
+- 任务结果提交后不进入管理员审批；管理员任务管理只能查看内容和文档。
+- 任务结果文档只允许 PDF、MD 和 Markdown，托管路径不能越过媒体目录。
 - 普通用户不能修改他人课题。
 - 普通用户每日上传课题不能超过 10 个。
+- 普通用户只能维护自己非归档课题的一份主 PDF。
+- 内容备份恢复不覆盖用户账号、协作关系、任务结果和审计日志。
+- 在线人数只统计最近 5 分钟活跃的已登录用户，匿名访客不计入。
+- `last_seen_at` 不出现在公开 API、个人资料、管理员用户详情或审计摘要响应中。
+- pending/rejected 资助不能显示为已获资助。
+- 团队满足且已获资助不会自动改变课题阶段。
 - 所有写操作有审计。
+- 二维码只能由管理员上传或更新；公开查看不写审计，上传成功写 `platform_qr.upload` 审计。
 - 所有失败有明确反馈。
 - 涉及人员展示时只展示 UID。
 
@@ -762,6 +829,7 @@ rg -n 'TO[D]O|TB[D]|FIX[M]E|待[定]|不确[定]' AGENTS.md
 | `frontend/src/main.js` 过大 | 中 | 页面、状态、渲染、事件集中 | UI 改动要配套测试；拆分时不改变行为 |
 | 旧 `ProjectTask` 和积分接口仍存在 | 中 | 容易被误用回主流程 | 保留兼容，不新增主入口 |
 | JSON 导入接口仍存在 | 中 | 当前产品更偏课题模板和文档导入，但代码仍有 JSON 导入 | 移除前必须查前端入口、测试和历史数据 |
+| 内容备份恢复影响范围大 | 中 | 恢复会更新主题、标签、课题、数据集说明和课题 PDF | 只在确认环境和备份来源后操作；改动前先跑恢复相关测试 |
 | 传统 Django 账号页面仍存在 | 低到中 | 与 SPA 可能分叉 | 当前应保持跳转 SPA |
 | 登录安全仍是 MVP | 中 | 暂无登录限流、MFA、异常登录风控 | 面向公网前补安全治理 |
 | 静态图片资源可能缺失 | 低 | 本地服务日志曾出现 logo/topic logo 404 | 视觉验收时检查资源路径 |
@@ -783,6 +851,7 @@ rg -n 'TO[D]O|TB[D]|FIX[M]E|待[定]|不确[定]' AGENTS.md
 - 是否避免恢复旧任务拆分和积分主流程？
 - 是否只展示 UID 而非敏感个人信息？
 - 是否补齐权限校验、事务和审计？
+- 是否确认内容备份恢复的范围、权限和审计？
 - 是否补齐明确错误和前端反馈？
 - 是否处理小屏和弹窗层级？
 

@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import AuditLog, ImportLog, Project, ProjectDocument, ProjectTag, ProjectTask, Tag, Theme, ThemeFile
+from .models import AuditLog, ImportLog, Project, ProjectDiscussion, ProjectDocument, ProjectProgressEntry, ProjectTag, ProjectTask, Tag, Theme, ThemeFile
 
 
 class ProjectTagInline(admin.TabularInline):
@@ -111,11 +111,29 @@ class ProjectAdmin(admin.ModelAdmin):
 
 @admin.register(ProjectDocument)
 class ProjectDocumentAdmin(admin.ModelAdmin):
-    list_display = ("project", "doc_type", "title", "description", "path", "created_at")
-    list_filter = ("doc_type",)
+    list_display = ("project", "doc_type", "document_kind", "visibility", "title", "path", "created_at")
+    list_filter = ("doc_type", "document_kind", "visibility")
     search_fields = ("project__title", "path", "title", "description")
-    autocomplete_fields = ("project",)
+    autocomplete_fields = ("project", "uploaded_by")
     readonly_fields = ("created_at",)
+
+
+@admin.register(ProjectProgressEntry)
+class ProjectProgressEntryAdmin(admin.ModelAdmin):
+    list_display = ("project", "entry_type", "visibility", "title", "occurred_at")
+    list_filter = ("entry_type", "visibility")
+    search_fields = ("project__title", "title", "description")
+    autocomplete_fields = ("project", "document", "created_by")
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(ProjectDiscussion)
+class ProjectDiscussionAdmin(admin.ModelAdmin):
+    list_display = ("project", "author", "parent", "status", "created_at")
+    list_filter = ("status",)
+    search_fields = ("project__title", "author__profile__uid", "content")
+    autocomplete_fields = ("project", "author", "parent", "deleted_by", "hidden_by")
+    readonly_fields = ("created_at", "updated_at", "deleted_at", "hidden_at")
 
 
 @admin.register(ThemeFile)
