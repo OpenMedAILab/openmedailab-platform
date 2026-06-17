@@ -84,6 +84,8 @@ def document_payload(document):
         "description": document.description,
         "path": document.path,
         "content_hash": document.content_hash,
+        "uploaded_by": uid_only_user_payload(document.uploaded_by) if getattr(document, "uploaded_by_id", None) else None,
+        "visibility": getattr(document, "visibility", "public"),
         "created_at": document.created_at,
     }
 
@@ -98,6 +100,7 @@ def public_document_payload(document):
         "title": document.title,
         "description": document.description,
         "path": public_document_path(document.path),
+        "visibility": getattr(document, "visibility", "public"),
         "created_at": document.created_at,
     }
 
@@ -197,6 +200,46 @@ def public_project_detail_payload(project):
             "documents": documents,
         }
     )
+    return payload
+
+
+def project_progress_entry_payload(entry):
+    return {
+        "id": entry.id,
+        "entry_type": entry.entry_type,
+        "entry_type_label": entry.get_entry_type_display(),
+        "title": entry.title,
+        "description": entry.description,
+        "occurred_at": entry.occurred_at,
+        "created_by": uid_only_user_payload(entry.created_by) if entry.created_by else None,
+        "visibility": entry.visibility,
+        "document": public_document_payload(entry.document) if entry.document and public_document_path(entry.document.path) else None,
+    }
+
+
+def project_progress_payload(project, documents, timeline):
+    return {
+        "project": public_project_detail_payload(project),
+        "progress_text": project.project_progress,
+        "documents": [public_document_payload(document) for document in documents],
+        "timeline": [project_progress_entry_payload(entry) for entry in timeline],
+    }
+
+
+def discussion_payload(discussion, replies=None):
+    payload = {
+        "id": discussion.id,
+        "project_id": discussion.project_id,
+        "parent_id": discussion.parent_id,
+        "content": discussion.content,
+        "author": uid_only_user_payload(discussion.author) if discussion.author else None,
+        "status": discussion.status,
+        "created_at": discussion.created_at,
+        "updated_at": discussion.updated_at,
+    }
+    if replies is not None:
+        payload["reply_count"] = getattr(discussion, "reply_count", len(replies))
+        payload["replies"] = [discussion_payload(reply) for reply in replies]
     return payload
 
 
@@ -419,11 +462,13 @@ AUDIT_ACTION_LABELS = {
     "task.status": "更新任务状态",
     "task.user_status": "用户更新任务",
     "task.submit_for_review": "任务提交审核",
+    "task.result_submit": "提交任务结果",
     "contribution.submit": "提交任务结果",
     "contribution.review": "审核任务结果",
     "user.reset_password": "恢复默认密码",
     "theme.create": "创建主题",
     "theme.update": "更新主题",
+    "theme.reorder": "调整主题排序",
     "theme.deactivate": "停用主题",
     "theme.delete": "删除主题",
     "theme_file.create": "创建主题文件",
@@ -438,6 +483,17 @@ AUDIT_ACTION_LABELS = {
     "project.bulk_set_public": "批量设置课题公开状态",
     "project.bulk_set_stage": "批量设置课题阶段",
     "project.import_json": "导入课题",
+    "project_document.upload": "上传课题文档",
+    "project_document.update": "更新课题文档",
+    "project_document.delete": "删除课题文档",
+    "project_document.user_upload": "用户上传课题文档",
+    "project_document.user_delete": "用户删除课题文档",
+    "project_progress.document_create": "上传项目进度文档",
+    "project_discussion.create": "发布课题讨论",
+    "project_discussion.update": "更新课题讨论",
+    "project_discussion.delete": "删除课题讨论",
+    "project_discussion.moderate": "管理课题讨论",
+    "platform_qr.upload": "更新系统二维码",
 }
 
 

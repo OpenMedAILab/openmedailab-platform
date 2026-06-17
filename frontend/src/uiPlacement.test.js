@@ -20,22 +20,77 @@ test("legacy project detail modal state and styles are removed", () => {
   assert.doesNotMatch(stylesSource, /\.project-modal-backdrop/);
 });
 
-test("project pdf actions open in a new window and still support download", () => {
+test("project title opens progress page while pdf actions still open documents", () => {
   assert.doesNotMatch(mainSource, /state\.preview\.pdfMode/);
   assert.doesNotMatch(mainSource, /openProjectPreview/);
   assert.doesNotMatch(mainSource, /class="project-pdf-preview"/);
   assert.doesNotMatch(mainSource, /<iframe[^>]+课题PDF预览/);
-  assert.doesNotMatch(mainSource, /function projectDetailHref/);
-  assert.doesNotMatch(mainSource, /activeView === 'project'/);
-  assert.doesNotMatch(mainSource, /parts\[0\] === "project"/);
+  assert.match(mainSource, /function projectDetailHref\(project\)/);
+  assert.match(mainSource, /activeView === 'project'/);
+  assert.match(mainSource, /parts\[0\] === "project"/);
+  assert.match(mainSource, /api\.projectProgress/);
   assert.match(mainSource, /function projectPdfHref\(project\)/);
-  assert.match(mainSource, /class="project-title-link" :href="projectPdfHref\(project\)" target="_blank" rel="noopener"/);
+  assert.match(mainSource, /class="project-title-link" :href="projectDetailHref\(project\)"/);
   assert.match(mainSource, />查看PDF</);
   assert.match(mainSource, />下载PDF</);
   assert.match(mainSource, /target="_blank"\s+rel="noopener"/);
   assert.match(mainSource, /documentHref\(primaryProjectDocument\(project\)\)"\s+download/);
   assert.doesNotMatch(mainSource, /function selectSpace\(slug\)/);
   assert.doesNotMatch(mainSource, /navigate\("space"/);
+});
+
+test("admin project form exposes progress document upload separately from the main pdf", () => {
+  assert.match(mainSource, /async function uploadProjectProgressDocument\(\)/);
+  assert.match(mainSource, /documentKind:\s*"progress"/);
+  assert.match(mainSource, /state\.admin\.projectForm\.progressDocumentUpload/);
+  assert.match(mainSource, /项目进度文档/);
+  assert.match(mainSource, /上传进度PDF/);
+  assert.match(mainSource, /document_kind",\s*options\.documentKind \|\| "detail"/);
+});
+
+test("planned recruitment theme progress discussion and sidebar features are wired", () => {
+  assert.match(mainSource, /overfilled/);
+  assert.match(mainSource, /· 超额/);
+  assert.match(stylesSource, /\.project-role-chip-row span\.overfilled\s*\{/);
+
+  assert.match(apiSource, /adminReorderThemes/);
+  assert.match(apiSource, /\/api\/admin\/themes\/reorder\//);
+  assert.match(mainSource, /themeSortDirty/);
+  assert.match(mainSource, /moveThemeSort/);
+  assert.match(mainSource, /saveThemeSort/);
+  assert.match(mainSource, /排序未保存/);
+  assert.match(stylesSource, /\.theme-sort-actions\s*\{/);
+
+  assert.match(apiSource, /projectProgress/);
+  assert.match(apiSource, /projectDiscussions/);
+  assert.match(apiSource, /createProjectDiscussion/);
+  assert.match(apiSource, /moderateProjectDiscussion/);
+  assert.match(mainSource, /projectProgressDocuments/);
+  assert.match(mainSource, /projectProgressTimelineItems/);
+  assert.match(mainSource, /project-discussion-section/);
+  assert.match(mainSource, /登录后参与讨论/);
+  assert.match(stylesSource, /\.project-progress-page\s*\{/);
+  assert.match(stylesSource, /\.project-discussion-item\s*\{/);
+
+  assert.match(mainSource, /SIDEBAR_QR_ENTRIES/);
+  assert.match(mainSource, /联系管理员/);
+  assert.match(mainSource, /加入社区/);
+  assert.match(mainSource, /sidebarQrModal/);
+  assert.match(mainSource, /sidebarQrEntries/);
+  assert.match(mainSource, /sidebarQrImageSrc/);
+  assert.match(mainSource, /二维码待更新/);
+  assert.match(mainSource, /state\.sidebarQrModal\.open/);
+  assert.match(apiSource, /sidebarQrs/);
+  assert.match(apiSource, /adminUploadSidebarQr/);
+  assert.match(mainSource, /state\.admin\.activeTab === 'system'/);
+  assert.match(mainSource, /系统入口/);
+  assert.match(mainSource, /管理员可上传或更新左侧边栏二维码/);
+  assert.match(mainSource, /uploadSidebarQr/);
+  assert.match(mainSource, /setSidebarQrUploadFile/);
+  assert.match(stylesSource, /\.sidebar-qr-admin-grid\s*\{/);
+  assert.match(stylesSource, /\.sidebar-qr-modal-backdrop\s*\{[\s\S]*?z-index:\s*260;/);
+  assert.match(stylesSource, /\.sidebar-qr-modal\s*\{[\s\S]*?z-index:\s*261;/);
+  assert.match(stylesSource, /\.confirm-modal-backdrop\s*\{[\s\S]*?z-index:\s*900;/);
 });
 
 test("route changes close workspace and admin modal overlays", () => {
@@ -64,7 +119,7 @@ test("desktop layout uses a left sidebar and mobile restores the top navigation"
   assert.match(stylesSource, /@media \(max-width:\s*1040px\)\s*\{[\s\S]*?\.topbar\s*\{[\s\S]*?display:\s*grid;[\s\S]*?grid-template-columns:\s*1fr;/);
   assert.match(stylesSource, /@media \(max-width:\s*1040px\)\s*\{[\s\S]*?\.main-nav,\s*\.account-area\s*\{[\s\S]*?flex-direction:\s*row;[\s\S]*?justify-content:\s*center;/);
   assert.doesNotMatch(stylesSource, /@media \(max-width:\s*1480px\)/);
-  assert.doesNotMatch(stylesSource, /@media \(max-width:\s*980px\)\s*\{[\s\S]*?\.main-nav,\s*\.account-area\s*\{[\s\S]*?overflow-x:\s*auto;/);
+  assert.doesNotMatch(stylesSource, /@media \(max-width:\s*980px\)\s*\{\s*\.main-nav,\s*\.account-area\s*\{[^}]*overflow-x:\s*auto;/);
 });
 
 test("topbar account actions are consolidated into the profile menu", () => {
@@ -158,14 +213,37 @@ test("homepage search toolbar is lifted and visually emphasized", () => {
 });
 
 test("homepage theme selector uses image-backed topic cards", () => {
-  assert.doesNotMatch(mainSource, />全部主题</);
+  assert.match(mainSource, /class="theme-chip topic-theme-card theme-action-card all-projects-theme-trigger"/);
+  assert.match(mainSource, />不限主题</);
   assert.match(mainSource, /不限主题/);
-  assert.match(mainSource, /class="theme-strip topic-theme-strip"/);
+  assert.match(mainSource, /state\.themeDropdownOpen/);
+  assert.match(mainSource, /homeThemeRowColumnCount/);
+  assert.match(mainSource, /homeThemeRowThemes/);
+  assert.match(mainSource, /homeThemeDropdownThemes/);
+  assert.match(mainSource, /toggleThemeDropdown/);
+  assert.match(mainSource, /closeThemeDropdown/);
+  assert.match(mainSource, /aria-haspopup="listbox"/);
+  assert.match(mainSource, /:aria-expanded="state\.themeDropdownOpen \? 'true' : 'false'"/);
+  assert.match(mainSource, /state\.themeDropdownOpen \? '收起全部主题' : '展示全部主题'/);
+  assert.match(mainSource, /class="theme-dropdown"/);
+  assert.match(mainSource, /role="listbox"/);
+  assert.match(mainSource, /class="theme-chip topic-theme-card theme-dropdown-card"/);
+  assert.doesNotMatch(mainSource, /class="theme-dropdown-item"/);
+  assert.match(mainSource, /class="theme-strip topic-theme-strip single-row"/);
+  assert.match(mainSource, /:style="\{ '--home-theme-columns': homeThemeRowColumnCount \}"/);
   assert.match(mainSource, /class="theme-chip topic-theme-card"/);
+  assert.match(mainSource, /class="theme-chip topic-theme-card theme-action-card all-themes-trigger"/);
   assert.match(mainSource, /homeThemeCards/);
+  assert.match(mainSource, /FEATURED_TOPIC_THEMES/);
+  assert.match(mainSource, /topicThemeMatchesPreset/);
+  assert.match(mainSource, /homeThemeCards\.value\.slice\(0,\s*4\)/);
+  assert.match(mainSource, /homeThemeDropdownThemes\s*=\s*computed\(\(\)\s*=>\s*homeThemeCards\.value\.slice\(4\)\)/);
+  assert.match(mainSource, /v-for="theme in homeThemeDropdownThemes"/);
+  assert.doesNotMatch(mainSource, /class="theme-chip topic-theme-card theme-action-card theme-dropdown-card"[\s\S]*?<span>不限主题<\/span>/);
+  assert.doesNotMatch(mainSource, /sortThemesByInitial/);
   assert.match(mainSource, /topicThemeCardStyle\(theme\)/);
+  assert.match(mainSource, /topicThemeCardStyle\(\)/);
   assert.doesNotMatch(mainSource, /<span>全部课题<\/span>/);
-  assert.doesNotMatch(mainSource, /topicThemeCardStyle\(\)/);
   assert.match(mainSource, /AntiVEGF/);
   assert.match(mainSource, /AMD/);
   assert.match(mainSource, /阴道镜/);
@@ -174,9 +252,25 @@ test("homepage theme selector uses image-backed topic cards", () => {
   assert.match(mainSource, /ROP\.png/);
   assert.match(mainSource, /Yindaojing\.png/);
   assert.doesNotMatch(mainSource, /synthetic:\s*true/);
-  assert.match(stylesSource, /\.topic-theme-strip\s*\{[\s\S]*?grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(136px,\s*1fr\)\);/);
+  assert.match(stylesSource, /\.topic-theme-strip\.single-row\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*repeat\(var\(--home-theme-columns\),\s*minmax\(0,\s*1fr\)\);[^}]*overflow:\s*visible;/);
+  assert.doesNotMatch(stylesSource, /\.topic-theme-strip\.single-row\s*\{[^}]*overflow-x:\s*auto;/);
   assert.match(stylesSource, /\.topic-theme-card\s*\{[\s\S]*?min-height:\s*82px;/);
   assert.match(stylesSource, /\.topic-theme-card\s*\{[\s\S]*?display:\s*flex;[\s\S]*?background-size:\s*cover;/);
+  assert.match(stylesSource, /\.theme-action-card\s*\{[\s\S]*?align-items:\s*center;[\s\S]*?justify-content:\s*center;/);
+  assert.match(stylesSource, /\.theme-dropdown \.topic-theme-card\s*\{[\s\S]*?min-height:\s*58px;[\s\S]*?padding:\s*12px;/);
+  assert.match(stylesSource, /\.theme-dropdown-card\s*\{[\s\S]*?width:\s*100%;/);
+  assert.match(stylesSource, /\.theme-dropdown\s*\{[\s\S]*?max-height:[\s\S]*?overflow-y:\s*auto;/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.topic-theme-strip\.single-row\s*\{[\s\S]*?grid-template-columns:\s*repeat\(var\(--home-theme-columns\),\s*minmax\(0,\s*1fr\)\);/);
+});
+
+test("topbar exposes only aggregate platform stats", () => {
+  assert.match(mainSource, /platform_stats:\s*\{[\s\S]*?registered_user_count:\s*0,[\s\S]*?online_user_count:\s*0,[\s\S]*?online_window_seconds:\s*300/);
+  assert.match(mainSource, /platformStats/);
+  assert.match(mainSource, /class="site-micro-stats"/);
+  assert.match(mainSource, /注册 \{\{ platformStats\.registered_user_count \|\| 0 \}\}/);
+  assert.match(mainSource, /在线 \{\{ platformStats\.online_user_count \|\| 0 \}\}/);
+  assert.match(stylesSource, /\.site-micro-stats\s*\{[\s\S]*?font-size:\s*12px;[\s\S]*?white-space:\s*nowrap;/);
+  assert.doesNotMatch(mainSource, /last_seen_at/);
 });
 
 test("workspace lifecycle UI exposes user/admin spaces and always-expanded project cards", () => {
@@ -222,6 +316,10 @@ test("project cards keep compact summary UI without hover status styles", () => 
   assert.match(mainSource, /class="project-status-row"/);
   assert.match(mainSource, /project-role-chip-row/);
   assert.match(mainSource, /projectFundingLabel\(project\)/);
+  assert.match(mainSource, /projectStageTone\(project\)/);
+  assert.match(mainSource, /class="project-stage-chip"/);
+  assert.match(mainSource, /class="project-funding-chip"/);
+  assert.match(mainSource, /team_status\?\.sponsor_count/);
   assert.match(mainSource, /projectStartupText\(project\)/);
   assert.match(mainSource, /interactionButtonActive\('like', project\)/);
   assert.match(mainSource, /interactionButtonActive\('participation', project\)/);
@@ -260,6 +358,8 @@ test("project cards keep compact summary UI without hover status styles", () => 
   assert.match(stylesSource, /\.project-card-meta span\.ready\s*\{/);
   assert.match(stylesSource, /\.project-startup-status\.ready > span\s*\{/);
   assert.match(stylesSource, /\.project-role-groups span\.ready\s*\{/);
+  assert.match(stylesSource, /\.project-stage-chip\.stage-active\s*\{/);
+  assert.match(stylesSource, /\.project-funding-chip\.funded\s*\{/);
   assert.match(stylesSource, /\.project-expanded-detail\s*\{/);
   assert.match(stylesSource, /\.project-pdf-actions\s*\{/);
   assert.match(stylesSource, /\.project-pdf-actions\s*\{[\s\S]*?margin-left:\s*auto;/);
@@ -274,7 +374,7 @@ test("legacy duplicated project detail view has been removed", () => {
   assert.doesNotMatch(mainSource, /class="detail-stack/);
   assert.doesNotMatch(mainSource, /class="content-panel project-team-panel"/);
   assert.doesNotMatch(mainSource, /目标期刊\/会议/);
-  assert.match(mainSource, /function projectStageValue\(project\)\s*\{\s*return project\?\.stage \|\| "";\s*\}\s*function projectTeamReady/s);
+  assert.match(mainSource, /function projectStageValue\(project\)\s*\{\s*return project\?\.stage \|\| "";\s*\}\s*function projectStageTone\(project\)[\s\S]*?function projectTeamReady/s);
   assert.doesNotMatch(mainSource, /state\.currentProject/);
   assert.doesNotMatch(mainSource, /<div class="score-panel">/);
   assert.doesNotMatch(mainSource, /<aside class="side-panel">\s*<h2>组队情况<\/h2>/);
@@ -393,7 +493,6 @@ test("task management reuses existing project patch flows for stage changes", ()
   assert.match(mainSource, /const payload = \{ stage \};[\s\S]*?if \(stage === "archived"\) \{[\s\S]*?payload\.is_public = false;/);
   assert.match(mainSource, /api\.adminUpdateProject\(project\.id,\s*payload\)/);
   assert.doesNotMatch(mainSource, /is_public:\s*stage !== "archived"/);
-  assert.match(mainSource, /api\.adminUpdateProject\(contribution\.project\.id,\s*\{ stage:\s*"archived",\s*is_public:\s*false \}\)/);
   assert.doesNotMatch(apiSource, /\b(publishProject|startProject|pauseProject|archiveProject)\b/);
 });
 
@@ -409,13 +508,19 @@ test("project cards no longer keep hover status-card state after lifecycle write
   assert.match(mainSource, /invalidateProjectStatusCard\(project\.id\)/);
 });
 
-test("task result review hides legacy task reward and revision actions", () => {
+test("task result submission supports documents without admin review actions", () => {
   assert.match(mainSource, />任务管理<\/button>/);
   assert.match(mainSource, /<h2>任务管理<\/h2>/);
-  assert.match(mainSource, /v-if="item\.status === 'submitted'"/);
-  assert.match(mainSource, />已审核<\/span>/);
-  assert.match(mainSource, /reviewContribution\(item,\s*'approved'\)/);
-  assert.match(mainSource, /reviewContribution\(item,\s*'rejected'\)/);
+  assert.match(apiSource, /createMeContributionWithFile:\s*\(formData\)\s*=>\s*requestForm\("\/api\/me\/contributions\/upload\/",\s*formData\)/);
+  assert.match(mainSource, /function setContributionFile\(event\)/);
+  assert.match(mainSource, /api\.createMeContributionWithFile\(formData\)/);
+  assert.match(mainSource, /结果文档（PDF\/Markdown，可选）/);
+  assert.match(mainSource, /function contributionFileHref\(contribution\)/);
+  assert.match(mainSource, />查看文档<\/a>/);
+  assert.doesNotMatch(mainSource, /v-if="item\.status === 'submitted'"/);
+  assert.doesNotMatch(mainSource, /填写审核评语/);
+  assert.doesNotMatch(mainSource, /reviewContribution\(item,\s*'approved'\)/);
+  assert.doesNotMatch(mainSource, /reviewContribution\(item,\s*'rejected'\)/);
   assert.doesNotMatch(mainSource, /通过并奖励/);
   assert.doesNotMatch(mainSource, /reviewContribution\(item,\s*'needs_revision'/);
   assert.doesNotMatch(mainSource, />需修改<\/button>/);
@@ -437,9 +542,22 @@ test("admin project lifecycle exposes json import with confirmation preview", ()
   assert.match(mainSource, /downloadJsonTemplate/);
   assert.match(mainSource, /handleJsonFiles/);
   assert.match(mainSource, /导入课题目录/);
-  assert.match(mainSource, /选择 JSON\/PDF 文件/);
+  assert.match(mainSource, /chooseJsonImportDirectory/);
+  assert.match(mainSource, /chooseJsonImportMixedFiles/);
+  assert.match(mainSource, /directoryInputSupportsFolders/);
+  assert.match(mainSource, /webkitdirectory" in input/);
+  assert.match(mainSource, /已改为选择目录内 JSON\/PDF 文件/);
+  assert.match(mainSource, /showDirectoryPicker/);
+  assert.match(mainSource, /jsonImportJsonFilesInput/);
+  assert.match(mainSource, /jsonImportDirectoryInput/);
+  assert.match(mainSource, /jsonImportMixedFilesInput/);
+  assert.match(mainSource, /ref="jsonImportJsonFilesInput"[\s\S]*?accept="\.json,application\/json"/);
+  assert.match(mainSource, /选择目录内 JSON\/PDF 文件/);
   assert.match(mainSource, /Linux 文件夹选择不可用时/);
-  assert.match(mainSource, /webkitdirectory directory multiple/);
+  assert.match(mainSource, /visually-hidden-file-input/);
+  assert.doesNotMatch(mainSource, /webkitdirectory directory multiple/);
+  assert.doesNotMatch(stylesSource, /\.json-import-picker input\s*\{[\s\S]*?inset:\s*0;[\s\S]*?opacity:\s*0;/);
+  assert.match(stylesSource, /\.visually-hidden-file-input\s*\{/);
   assert.match(mainSource, /clearJsonImport/);
   assert.match(mainSource, /state\.schema\.json_template/);
   assert.match(mainSource, /字段契约与 JSON 模板/);

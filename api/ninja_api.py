@@ -3,7 +3,7 @@ import io
 import json
 import re
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Optional
@@ -19,6 +19,7 @@ from django.http import Http404, HttpResponse
 from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.utils.text import slugify
 from ninja import NinjaAPI, Schema
 from ninja.errors import HttpError, ValidationError
@@ -55,7 +56,9 @@ from projects.models import (
     RECRUITING_PROJECT_STAGES,
     AuditLog,
     Project,
+    ProjectDiscussion,
     ProjectDocument,
+    ProjectProgressEntry,
     ProjectStage,
     ProjectTask,
     Tag,
@@ -74,10 +77,12 @@ from .serializers import (
     credit_ledger_payload,
     dashboard_payload,
     document_payload,
+    discussion_payload,
     admin_project_summary_payload,
     follow_payload,
     interest_payload,
     project_detail_payload,
+    project_progress_payload,
     public_project_detail_payload,
     project_summary_payload,
     score_payload,
@@ -112,6 +117,14 @@ AUDIT_TARGET_ID_MAX_LENGTH = 120
 AUDIT_SOURCE_MAX_LENGTH = 80
 AUDIT_STATUS_MAX_LENGTH = 32
 AUDIT_ERROR_CODE_MAX_LENGTH = 120
+SIDEBAR_QR_DEFINITIONS = [
+    {"key": "admin-contact", "label": "联系管理员", "icon": "support_agent"},
+    {"key": "community", "label": "加入社区", "icon": "group_add"},
+]
+SIDEBAR_QR_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp"]
+SIDEBAR_QR_MAX_BYTES = 2 * 1024 * 1024
+CONTRIBUTION_DOCUMENT_EXTENSIONS = {".pdf", ".md", ".markdown"}
+CONTRIBUTION_DOCUMENT_MAX_BYTES = 10 * 1024 * 1024
 
 
 class Envelope(Schema):
@@ -196,6 +209,10 @@ class ThemeWriteRequest(Schema):
     is_active: Optional[bool] = True
 
 
+class ThemeReorderRequest(Schema):
+    theme_ids: list[int]
+
+
 class ProjectWriteRequest(Schema):
     id: Optional[Any] = None
     topic_id: Optional[Any] = None
@@ -237,6 +254,16 @@ class ProjectDocumentWriteRequest(Schema):
     title: Optional[str] = None
     description: Optional[str] = None
     path: Optional[str] = None
+
+
+class ProjectDiscussionWriteRequest(Schema):
+    content: str
+    parent_id: Optional[int] = None
+
+
+class ProjectDiscussionModerationRequest(Schema):
+    status: str
+    moderation_reason: Optional[str] = ""
 
 
 class ThemeFileWriteRequest(Schema):
@@ -349,6 +376,37 @@ def csrf(request):
     return ok({"csrf_token": get_token(request)})
 
 
+def platform_stats_payload():
+    online_window_seconds = getattr(settings, "OPENMEDAILAB_ONLINE_WINDOW_SECONDS", 300)
+    online_since = timezone.now() - timedelta(seconds=online_window_seconds)
+    return {
+        "registered_user_count": UserProfile.objects.filter(user__is_active=True).count(),
+        "online_user_count": UserProfile.objects.filter(user__is_active=True, last_seen_at__gte=online_since).count(),
+        "online_window_seconds": online_window_seconds,
+    }
+
+
+def sidebar_qr_entries_payload():
+    return [sidebar_qr_entry_payload(item) for item in SIDEBAR_QR_DEFINITIONS]
+
+
+def sidebar_qr_entry_payload(definition):
+    path = sidebar_qr_existing_file(definition["key"])
+    image = ""
+    updated_at = None
+    if path:
+        image = f"{public_media_path(path)}?v={int(path.stat().st_mtime)}"
+        updated_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.get_current_timezone()).isoformat()
+    return {
+        "key": definition["key"],
+        "label": definition["label"],
+        "icon": definition["icon"],
+        "image": image,
+        "has_image": bool(path),
+        "updated_at": updated_at,
+    }
+
+
 @api.get("/meta/", response={200: Envelope}, tags=["System"], auth=None)
 def meta(request):
     return ok(
@@ -360,9 +418,16 @@ def meta(request):
             "participation_roles": choice_payload(ParticipationRole.choices),
             "claim_types": choice_payload(ClaimType.choices),
             "sponsor_types": choice_payload(SponsorType.choices),
+            "platform_stats": platform_stats_payload(),
+            "sidebar_qr_entries": sidebar_qr_entries_payload(),
             "release": release_payload(),
         }
     )
+
+
+@api.get("/sidebar-qrs/", response={200: Envelope}, tags=["System"], auth=None)
+def sidebar_qrs(request):
+    return ok({"entries": sidebar_qr_entries_payload()})
 
 
 @api.get("/rbac/", response={200: Envelope}, tags=["System"], auth=None)
@@ -379,7 +444,12 @@ def project_schema(request):
             "template_version": "v1",
             "stage_values": choice_payload(ProjectStage.choices),
             "document_types": choice_payload([(ProjectDocument.DocumentType.PDF, ProjectDocument.DocumentType.PDF.label)]),
-            "document_kinds": choice_payload([(ProjectDocument.DocumentKind.DETAIL, ProjectDocument.DocumentKind.DETAIL.label)]),
+            "document_kinds": choice_payload(
+                [
+                    (ProjectDocument.DocumentKind.DETAIL, ProjectDocument.DocumentKind.DETAIL.label),
+                    (ProjectDocument.DocumentKind.PROGRESS, ProjectDocument.DocumentKind.PROGRESS.label),
+                ]
+            ),
             "theme_file_types": choice_payload([(ThemeFile.FileType.DATASET_META, ThemeFile.FileType.DATASET_META.label)]),
         }
     )
@@ -685,6 +755,17 @@ def project_detail(request, project_id: int):
     return ok(data)
 
 
+@api.get("/projects/{project_id}/progress/", response={200: Envelope, 404: ErrorEnvelope}, tags=["Projects"], auth=None)
+def project_progress(request, project_id: int):
+    project = get_visible_project_for_project_page(request, project_id)
+    if not project:
+        raise Http404("Project not found.")
+    include_private = can_view_project_private_content(request.user, project)
+    documents = project_progress_documents_queryset(project, include_private)
+    timeline = project_progress_entries_queryset(project, include_private)
+    return ok(project_progress_payload(project, documents, timeline))
+
+
 @api.get("/projects/{project_id}/status-card/", response={200: Envelope, 404: ErrorEnvelope}, tags=["Projects"], auth=None)
 def project_status_card(request, project_id: int):
     if request.user.is_authenticated and has_capability(request.user, "manage_projects"):
@@ -724,6 +805,87 @@ def project_status_card(request, project_id: int):
             },
         }
     )
+
+
+@api.get("/projects/{project_id}/discussions/", response={200: Envelope, 404: ErrorEnvelope}, tags=["Projects"], auth=None)
+def project_discussion_list(request, project_id: int, page: int = 1, page_size: int = 20, sort: str = "newest"):
+    project = get_public_project_for_discussions(project_id)
+    discussions = ProjectDiscussion.objects.filter(project=project, parent__isnull=True, status=ProjectDiscussion.Status.VISIBLE).select_related("author", "author__profile")
+    discussions = discussions.order_by("created_at", "id") if sort == "oldest" else discussions.order_by("-created_at", "-id")
+    page_size = max(1, min(page_size, 50))
+    paginator = Paginator(discussions, page_size)
+    page_obj = paginator.get_page(page)
+    roots = list(page_obj.object_list)
+    replies_by_parent = visible_replies_by_parent(roots)
+    return ok(
+        {
+            "results": [discussion_payload(item, replies_by_parent.get(item.id, [])) for item in roots],
+            "pagination": {
+                "page": page_obj.number,
+                "page_size": page_size,
+                "total_pages": paginator.num_pages,
+                "total_count": paginator.count,
+                "has_next": page_obj.has_next(),
+                "has_previous": page_obj.has_previous(),
+            },
+        }
+    )
+
+
+@api.post("/projects/{project_id}/discussions/", response={201: Envelope, 401: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Projects"])
+def project_discussion_create(request, project_id: int, payload: ProjectDiscussionWriteRequest):
+    auth_error = require_login(request)
+    if auth_error:
+        return auth_error
+    project = get_public_project_for_discussions(project_id)
+    content, error = validate_discussion_content(payload.content)
+    if error:
+        return error
+    parent = None
+    if payload.parent_id:
+        parent = get_object_or_404(ProjectDiscussion, pk=payload.parent_id, project=project, status=ProjectDiscussion.Status.VISIBLE)
+        if parent.parent_id:
+            return fail("Replies can only target top-level discussions.", status=422, code="validation_error")
+    discussion = ProjectDiscussion.objects.create(project=project, author=request.user, parent=parent, content=content)
+    audit(request.user, "project_discussion.create", "ProjectDiscussion", discussion.id, after=discussion_audit_snapshot(discussion))
+    return 201, ok(discussion_payload(discussion))
+
+
+@api.patch("/project-discussions/{discussion_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Projects"])
+def project_discussion_update(request, discussion_id: int, payload: ProjectDiscussionWriteRequest):
+    auth_error = require_login(request)
+    if auth_error:
+        return auth_error
+    discussion = get_object_or_404(ProjectDiscussion.objects.select_related("project", "author", "author__profile"), pk=discussion_id)
+    if not can_manage_discussion(request.user, discussion):
+        return fail("Permission denied.", status=403, code="permission_denied")
+    if discussion.status != ProjectDiscussion.Status.VISIBLE:
+        return fail("Discussion is not editable.", status=422, code="validation_error")
+    content, error = validate_discussion_content(payload.content)
+    if error:
+        return error
+    before = discussion_audit_snapshot(discussion)
+    discussion.content = content
+    discussion.save(update_fields=["content", "updated_at"])
+    audit(request.user, "project_discussion.update", "ProjectDiscussion", discussion.id, before=before, after=discussion_audit_snapshot(discussion))
+    return ok(discussion_payload(discussion))
+
+
+@api.delete("/project-discussions/{discussion_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope}, tags=["Projects"])
+def project_discussion_delete(request, discussion_id: int):
+    auth_error = require_login(request)
+    if auth_error:
+        return auth_error
+    discussion = get_object_or_404(ProjectDiscussion.objects.select_related("project", "author", "author__profile"), pk=discussion_id)
+    if not can_manage_discussion(request.user, discussion):
+        return fail("Permission denied.", status=403, code="permission_denied")
+    before = discussion_audit_snapshot(discussion)
+    discussion.status = ProjectDiscussion.Status.DELETED
+    discussion.deleted_at = timezone.now()
+    discussion.deleted_by = request.user
+    discussion.save(update_fields=["status", "deleted_at", "deleted_by", "updated_at"])
+    audit(request.user, "project_discussion.delete", "ProjectDiscussion", discussion.id, before=before, after=discussion_audit_snapshot(discussion))
+    return ok({"id": discussion.id, "deleted": True})
 
 
 @api.post("/projects/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Projects"])
@@ -1192,38 +1354,53 @@ def me_contribution_create(request, payload: ContributionWriteRequest):
     auth_error = require_login(request)
     if auth_error:
         return auth_error
-    title = payload.title.strip()
-    if not title:
-        return fail("Contribution title is required.", status=422, code="validation_error")
-    result_type = payload.result_type or Contribution.ResultType.STAGE
-    if result_type not in Contribution.ResultType.values:
-        return fail("Invalid contribution result type.", status=422, code="validation_error")
-    project = get_object_or_404(Project.objects.select_related("theme"), pk=payload.project_id, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
-    if project.stage != ProjectStage.ACTIVE:
-        return fail("Project is not active.", status=422, code="project_not_active")
-    if not user_has_approved_project_relation(request.user, project):
-        return fail("Only approved participants can submit task results.", status=403, code="interaction_not_approved")
-    task = None
-    if payload.task_id:
-        task = get_object_or_404(ProjectTask.objects.select_related("project", "project__theme", "assignee"), pk=payload.task_id, assignee=request.user)
-        if task.project_id != project.id:
-            return fail("Task does not belong to this project.", status=422, code="validation_error")
-    with transaction.atomic():
-        contribution = Contribution.objects.create(
-            user=request.user,
-            project=project,
-            task=task,
-            title=title,
-            result_type=result_type,
-            description=payload.description or "",
-            file_path=payload.file_path or "",
-        )
-        if task and task.status != ProjectTask.TaskStatus.REVIEW:
-            before = task_payload(task)
-            task.status = ProjectTask.TaskStatus.REVIEW
-            task.save(update_fields=["status", "updated_at"])
-            audit(request.user, "task.submit_for_review", "ProjectTask", task.pk, before=before, after=task_payload(task))
-        audit(request.user, "contribution.submit", "Contribution", contribution.pk, after=contribution_payload(contribution))
+    context, error = contribution_submission_context(
+        request,
+        project_id=payload.project_id,
+        title=payload.title,
+        result_type=payload.result_type,
+        task_id=payload.task_id,
+    )
+    if error:
+        return error
+    contribution = create_contribution_submission(
+        request,
+        context,
+        description=payload.description or "",
+        file_path=payload.file_path or "",
+    )
+    return 201, ok(contribution_payload(contribution))
+
+
+@api.post("/me/contributions/upload/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Me"])
+def me_contribution_upload(request):
+    auth_error = require_login(request)
+    if auth_error:
+        return auth_error
+    context, error = contribution_submission_context(
+        request,
+        project_id=request.POST.get("project_id"),
+        title=request.POST.get("title"),
+        result_type=request.POST.get("result_type"),
+        task_id=request.POST.get("task_id"),
+    )
+    if error:
+        return error
+    files = request.FILES.getlist("file")
+    if not files:
+        return fail("No result document uploaded.", status=422, code="validation_error")
+    if len(files) != 1:
+        return fail("Only one result document can be uploaded at a time.", status=422, code="validation_error")
+    file_path, content_hash, error = save_contribution_document(files[0], context["project"], request.user)
+    if error:
+        return error
+    contribution = create_contribution_submission(
+        request,
+        context,
+        description=request.POST.get("description") or "",
+        file_path=file_path,
+        after_extra={"document_hash": content_hash},
+    )
     return 201, ok(contribution_payload(contribution))
 
 
@@ -1481,6 +1658,87 @@ def admin_audit_log_list(request, actor: str = "", action: str = "", target_type
     return ok(paginated_queryset(entries, page, page_size, audit_log_payload, max_page_size=100))
 
 
+@api.get("/admin/project-discussions/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Admin"])
+def admin_project_discussion_list(request, project_id: Optional[int] = None, author_uid: str = "", status: str = "", page: int = 1, page_size: int = 50):
+    auth_error = require_capability(request, "manage_projects")
+    if auth_error:
+        return auth_error
+    discussions = ProjectDiscussion.objects.select_related("project", "author", "author__profile", "parent").order_by("-created_at", "-id")
+    if project_id:
+        discussions = discussions.filter(project_id=project_id)
+    if author_uid.strip():
+        discussions = discussions.filter(author__profile__uid__icontains=author_uid.strip())
+    if status.strip():
+        discussions = discussions.filter(status=status.strip())
+    return ok(paginated_queryset(discussions, page, page_size, discussion_payload, max_page_size=100))
+
+
+@api.patch("/admin/project-discussions/{discussion_id}/moderation/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_project_discussion_moderate(request, discussion_id: int, payload: ProjectDiscussionModerationRequest):
+    auth_error = require_capability(request, "manage_projects")
+    if auth_error:
+        return auth_error
+    discussion = get_object_or_404(ProjectDiscussion.objects.select_related("project", "author", "author__profile"), pk=discussion_id)
+    status = str(payload.status or "").strip()
+    if status not in ProjectDiscussion.Status.values:
+        return fail("Discussion status is invalid.", status=422, code="validation_error")
+    before = discussion_audit_snapshot(discussion)
+    discussion.status = status
+    discussion.moderation_reason = str(payload.moderation_reason or "").strip()
+    if status == ProjectDiscussion.Status.HIDDEN:
+        discussion.hidden_at = timezone.now()
+        discussion.hidden_by = request.user
+    elif status == ProjectDiscussion.Status.DELETED:
+        discussion.deleted_at = timezone.now()
+        discussion.deleted_by = request.user
+    elif status == ProjectDiscussion.Status.VISIBLE:
+        discussion.hidden_at = None
+        discussion.hidden_by = None
+    discussion.save(update_fields=["status", "moderation_reason", "hidden_at", "hidden_by", "deleted_at", "deleted_by", "updated_at"])
+    audit(request.user, "project_discussion.moderate", "ProjectDiscussion", discussion.id, before=before, after=discussion_audit_snapshot(discussion))
+    return ok(discussion_payload(discussion))
+
+
+@api.post(
+    "/admin/sidebar-qrs/{key}/image/",
+    response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope},
+    tags=["Admin"],
+)
+def admin_sidebar_qr_upload(request, key: str):
+    auth_error = require_capability(request, "view_admin_console")
+    if auth_error:
+        return auth_error
+    definition = sidebar_qr_definition(key)
+    if not definition:
+        raise Http404("Sidebar QR entry not found.")
+    files = request.FILES.getlist("file")
+    if not files:
+        return fail("No QR image uploaded.", status=422, code="validation_error")
+    if len(files) != 1:
+        return fail("Only one QR image can be uploaded at a time.", status=422, code="validation_error")
+    uploaded = files[0]
+    suffix = Path(sanitize_file_name(uploaded.name)).suffix.lower()
+    if suffix not in SIDEBAR_QR_EXTENSIONS:
+        return fail("二维码只支持 PNG、JPG 或 WebP 图片。", status=422, code="validation_error")
+    if getattr(uploaded, "size", 0) > SIDEBAR_QR_MAX_BYTES:
+        return fail("二维码图片不能超过 2MB。", status=422, code="validation_error")
+    if uploaded.content_type and not str(uploaded.content_type).lower().startswith("image/"):
+        return fail("二维码只支持图片文件。", status=422, code="validation_error")
+    if not uploaded_file_has_allowed_image_signature(uploaded, suffix):
+        return fail("二维码图片格式无法识别。", status=422, code="validation_error")
+    root = sidebar_qr_root()
+    root.mkdir(parents=True, exist_ok=True)
+    destination = safe_child_path(root, f"{key}{suffix}", root, expect_parent=True)
+    before = sidebar_qr_entry_payload(definition)
+    for old_file in sidebar_qr_files_for_key(key):
+        if old_file != destination and old_file.is_file():
+            old_file.unlink()
+    content_hash = write_uploaded_file_with_hash(uploaded, destination)
+    after = sidebar_qr_entry_payload(definition)
+    audit(request.user, "platform_qr.upload", "PlatformQRCode", key, before=before, after={**after, "content_hash": content_hash})
+    return 201, ok({"entry": after})
+
+
 @api.get("/admin/themes/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Admin"])
 def admin_theme_list(request):
     auth_error = require_capability(request, "manage_themes")
@@ -1488,6 +1746,31 @@ def admin_theme_list(request):
         return auth_error
     themes = Theme.objects.order_by("sort_order", "name")
     return ok({"results": [theme_payload(theme) for theme in themes]})
+
+
+@api.patch("/admin/themes/reorder/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_theme_reorder(request, payload: ThemeReorderRequest):
+    auth_error = require_capability(request, "manage_themes")
+    if auth_error:
+        return auth_error
+    theme_ids = [int(item) for item in payload.theme_ids or []]
+    if not theme_ids:
+        return fail("theme_ids is required.", status=422, code="validation_error")
+    if len(set(theme_ids)) != len(theme_ids):
+        return fail("theme_ids must be unique.", status=422, code="validation_error")
+    themes_by_id = {theme.id: theme for theme in Theme.objects.filter(id__in=theme_ids)}
+    if set(themes_by_id) != set(theme_ids):
+        return fail("Theme ids contain unknown items.", status=422, code="validation_error")
+    before = {str(theme.id): theme.sort_order for theme in Theme.objects.filter(id__in=theme_ids)}
+    with transaction.atomic():
+        for index, theme_id in enumerate(theme_ids, start=1):
+            theme = themes_by_id[theme_id]
+            theme.sort_order = index * 10
+            theme.save(update_fields=["sort_order", "updated_at"])
+    reordered = list(Theme.objects.filter(id__in=theme_ids).order_by("sort_order", "name"))
+    after = {str(theme.id): theme.sort_order for theme in reordered}
+    audit(request.user, "theme.reorder", "Theme", "bulk", before={"order": before}, after={"order": after})
+    return ok({"themes": [theme_payload(theme) for theme in reordered]})
 
 
 @api.post("/admin/themes/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
@@ -2166,14 +2449,14 @@ def user_project_document_upload(request):
 
 def save_project_detail_pdf(request, project, audit_action):
     document_kind = normalize_project_document_kind(request.POST.get("document_kind"))
-    if document_kind != ProjectDocument.DocumentKind.DETAIL:
-        return fail("Only project detail PDF is supported.", status=422, code="validation_error")
+    if document_kind not in {ProjectDocument.DocumentKind.DETAIL, ProjectDocument.DocumentKind.PROGRESS}:
+        return fail("Only project detail or progress PDF is supported.", status=422, code="validation_error")
     description = (request.POST.get("description") or "").strip()
     files = request.FILES.getlist("files")
     if not files:
         return fail("No files uploaded.", status=422, code="validation_error")
     if len(files) != 1:
-        return fail("Project detail PDF accepts exactly one file.", status=422, code="validation_error")
+        return fail("Project PDF upload accepts exactly one file.", status=422, code="validation_error")
 
     title = (request.POST.get("title") or "").strip()
     root = project_document_root()
@@ -2186,23 +2469,36 @@ def save_project_detail_pdf(request, project, audit_action):
         if not file_name:
             return fail("file name is invalid.", status=422, code="validation_error")
         if Path(file_name).suffix.lower() != ".pdf":
-            return fail("Project detail document must be a PDF.", status=422, code="validation_error")
+            return fail("Project document must be a PDF.", status=422, code="validation_error")
         destination = unique_project_document_destination(directory, file_name)
         content_hash = write_uploaded_file_with_hash(uploaded, destination)
-        old_detail_documents = list(ProjectDocument.objects.filter(project=project, document_kind=ProjectDocument.DocumentKind.DETAIL))
+        old_detail_documents = list(ProjectDocument.objects.filter(project=project, document_kind=ProjectDocument.DocumentKind.DETAIL)) if document_kind == ProjectDocument.DocumentKind.DETAIL else []
         document = ProjectDocument.objects.create(
             project=project,
             doc_type=ProjectDocument.DocumentType.PDF,
-            document_kind=ProjectDocument.DocumentKind.DETAIL,
+            document_kind=document_kind,
             title=title or Path(file_name).stem,
-            description=description or "课题 PDF 详情",
+            description=description or ("课题 PDF 详情" if document_kind == ProjectDocument.DocumentKind.DETAIL else "项目进度文档"),
             path=public_media_path(destination),
             content_hash=content_hash,
+            uploaded_by=request.user if request.user.is_authenticated else None,
+            visibility=ProjectDocument.Visibility.PUBLIC,
         )
         for old_document in old_detail_documents:
             before_path = old_document.path
             old_document.delete()
             maybe_delete_managed_project_document_file(before_path)
+        if document_kind == ProjectDocument.DocumentKind.PROGRESS:
+            ProjectProgressEntry.objects.create(
+                project=project,
+                entry_type=ProjectProgressEntry.EntryType.DOCUMENT,
+                title=f"上传{document.title}",
+                description=document.description,
+                document=document,
+                created_by=request.user if request.user.is_authenticated else None,
+                visibility=ProjectProgressEntry.Visibility.PUBLIC,
+            )
+            audit(request.user, "project_progress.document_create", "ProjectDocument", document.id, after=document_payload(document))
         saved.append(document_payload(document))
     audit(request.user, audit_action, "Project", project.id, after={"count": len(saved), "documents": saved})
     return 201, ok({"project_id": project.id, "saved": saved, "documents": [document_payload(document) for document in project_documents_for(project)]})
@@ -2563,9 +2859,28 @@ def build_content_backup_manifest():
             "description": item.description,
             "path": item.path,
             "content_hash": item.content_hash,
+            "visibility": item.visibility,
         }
         attach_backup_file(payload, "path", files)
         project_documents.append(payload)
+
+    project_progress_entries = []
+    progress_entries = (
+        ProjectProgressEntry.objects.select_related("project", "document")
+        .order_by("project__topic_id", "occurred_at", "id")
+    )
+    for item in progress_entries:
+        project_progress_entries.append(
+            {
+                "project_topic_id": item.project.topic_id,
+                "entry_type": item.entry_type,
+                "title": item.title,
+                "description": item.description,
+                "occurred_at": timezone.localtime(item.occurred_at).isoformat() if item.occurred_at else "",
+                "document_path": item.document.path if item.document else "",
+                "visibility": item.visibility,
+            }
+        )
 
     manifest = {
         "kind": "openmedailab-content-backup",
@@ -2578,6 +2893,7 @@ def build_content_backup_manifest():
             "theme_files": len(theme_files),
             "projects": len(projects),
             "project_documents": len(project_documents),
+            "project_progress_entries": len(project_progress_entries),
             "files": len(files),
         },
         "themes": themes,
@@ -2585,6 +2901,7 @@ def build_content_backup_manifest():
         "theme_files": theme_files,
         "projects": projects,
         "project_documents": project_documents,
+        "project_progress_entries": project_progress_entries,
     }
     return manifest, files
 
@@ -2611,12 +2928,14 @@ def restore_content_backup(raw_zip):
             project_count = restore_backup_projects(manifest.get("projects", []))
             theme_file_count = restore_backup_theme_files(archive, manifest.get("theme_files", []), restored_files)
             document_count = restore_backup_project_documents(archive, manifest.get("project_documents", []), restored_files)
+            progress_entry_count = restore_backup_project_progress_entries(manifest.get("project_progress_entries", []))
     return {
         "themes": theme_count,
         "tags": tag_count,
         "projects": project_count,
         "theme_files": theme_file_count,
         "project_documents": document_count,
+        "project_progress_entries": progress_entry_count,
         "files": len(restored_files),
     }
 
@@ -2750,9 +3069,43 @@ def restore_backup_project_documents(archive, items, restored_files):
         document.title = str(item.get("title") or "").strip()[:255]
         document.description = str(item.get("description") or "")
         document.content_hash = item.get("content_hash") or restored_files.get(item.get("backup_file"), "")
+        visibility = str(item.get("visibility") or ProjectDocument.Visibility.PUBLIC)
+        document.visibility = visibility if visibility in ProjectDocument.Visibility.values else ProjectDocument.Visibility.PUBLIC
         document.save()
         if document.document_kind == ProjectDocument.DocumentKind.DETAIL:
             ProjectDocument.objects.filter(project=project, document_kind=ProjectDocument.DocumentKind.DETAIL).exclude(pk=document.pk).delete()
+        count += 1
+    return count
+
+
+def restore_backup_project_progress_entries(items):
+    count = 0
+    for item in items:
+        topic_id = backup_int(item.get("project_topic_id"), "课题进度记录引用的课题编号不合法。")
+        project = Project.objects.filter(topic_id=topic_id).first()
+        if not project:
+            raise ValueError("课题进度记录引用了不存在的课题。")
+        document_path = public_document_path_for_admin(item.get("document_path") or "")
+        document = ProjectDocument.objects.filter(project=project, path=document_path).first() if document_path else None
+        entry_type = str(item.get("entry_type") or ProjectProgressEntry.EntryType.NOTE)
+        if entry_type not in ProjectProgressEntry.EntryType.values:
+            entry_type = ProjectProgressEntry.EntryType.NOTE
+        visibility = str(item.get("visibility") or ProjectProgressEntry.Visibility.PUBLIC)
+        if visibility not in ProjectProgressEntry.Visibility.values:
+            visibility = ProjectProgressEntry.Visibility.PUBLIC
+        occurred_at = backup_datetime(item.get("occurred_at")) or timezone.now()
+        ProjectProgressEntry.objects.update_or_create(
+            project=project,
+            entry_type=entry_type,
+            title=str(item.get("title") or "").strip()[:255] or "项目进度",
+            occurred_at=occurred_at,
+            document=document,
+            defaults={
+                "description": item.get("description") or "",
+                "visibility": visibility,
+                "created_by": None,
+            },
+        )
         count += 1
     return count
 
@@ -2818,6 +3171,15 @@ def backup_int(value, message):
     return parsed
 
 
+def backup_datetime(value):
+    parsed = parse_datetime(str(value or "").strip())
+    if not parsed:
+        return None
+    if timezone.is_naive(parsed):
+        return timezone.make_aware(parsed, timezone.get_current_timezone())
+    return parsed
+
+
 def require_user_project_document_access(request, project, action):
     if has_capability(request.user, "manage_projects"):
         return None
@@ -2862,6 +3224,92 @@ def require_project_owner_or_admin(request, project, action):
         error_message="Permission denied.",
     )
     return fail("Permission denied.", status=403, code="permission_denied")
+
+
+def contribution_submission_context(request, project_id, title, result_type=None, task_id=None):
+    title = str(title or "").strip()
+    if not title:
+        return None, fail("Contribution title is required.", status=422, code="validation_error")
+    try:
+        project_pk = int(project_id)
+    except (TypeError, ValueError):
+        return None, fail("Project is required.", status=422, code="validation_error")
+    normalized_result_type = result_type or Contribution.ResultType.STAGE
+    if normalized_result_type not in Contribution.ResultType.values:
+        return None, fail("Invalid contribution result type.", status=422, code="validation_error")
+    project = get_object_or_404(
+        Project.objects.select_related("theme"),
+        pk=project_pk,
+        is_public=True,
+        stage__in=PUBLIC_PROJECT_STAGES,
+    )
+    if project.stage != ProjectStage.ACTIVE:
+        return None, fail("Project is not active.", status=422, code="project_not_active")
+    if not user_has_approved_project_relation(request.user, project):
+        return None, fail("Only approved participants can submit task results.", status=403, code="interaction_not_approved")
+    task = None
+    if task_id:
+        try:
+            task_pk = int(task_id)
+        except (TypeError, ValueError):
+            return None, fail("Task is invalid.", status=422, code="validation_error")
+        task = get_object_or_404(
+            ProjectTask.objects.select_related("project", "project__theme", "assignee"),
+            pk=task_pk,
+            assignee=request.user,
+        )
+        if task.project_id != project.id:
+            return None, fail("Task does not belong to this project.", status=422, code="validation_error")
+    return {"project": project, "task": task, "title": title, "result_type": normalized_result_type}, None
+
+
+def create_contribution_submission(request, context, description="", file_path="", after_extra=None):
+    project = context["project"]
+    task = context["task"]
+    with transaction.atomic():
+        contribution = Contribution.objects.create(
+            user=request.user,
+            project=project,
+            task=task,
+            title=context["title"],
+            result_type=context["result_type"],
+            description=description or "",
+            file_path=file_path or "",
+        )
+        if task and task.status != ProjectTask.TaskStatus.DONE:
+            before = task_payload(task)
+            task.status = ProjectTask.TaskStatus.DONE
+            task.save(update_fields=["status", "updated_at"])
+            audit(request.user, "task.result_submit", "ProjectTask", task.pk, before=before, after=task_payload(task))
+        after = contribution_payload(contribution)
+        if after_extra:
+            after = {**after, **after_extra}
+        audit(request.user, "contribution.submit", "Contribution", contribution.pk, after=after)
+    return contribution
+
+
+def save_contribution_document(uploaded, project, user):
+    file_name = sanitize_file_name(uploaded.name)
+    if not file_name:
+        return "", "", fail("file name is invalid.", status=422, code="validation_error")
+    suffix = Path(file_name).suffix.lower()
+    if suffix not in CONTRIBUTION_DOCUMENT_EXTENSIONS:
+        return "", "", fail("任务结果文档只支持 PDF 或 Markdown。", status=422, code="validation_error")
+    if getattr(uploaded, "size", 0) > CONTRIBUTION_DOCUMENT_MAX_BYTES:
+        return "", "", fail("任务结果文档不能超过 10MB。", status=422, code="validation_error")
+    if suffix == ".pdf" and not uploaded_file_has_pdf_signature(uploaded):
+        return "", "", fail("PDF 文件格式无法识别。", status=422, code="validation_error")
+    root = contribution_document_root()
+    try:
+        raw_user_uid = user.profile.uid
+    except UserProfile.DoesNotExist:
+        raw_user_uid = f"user-{user.id}"
+    user_uid = sanitize_file_name(raw_user_uid) or f"user-{user.id}"
+    directory = safe_child_path(root, f"{project.topic_code}/{user_uid}", root, expect_parent=False)
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = unique_contribution_document_destination(directory, file_name)
+    content_hash = write_uploaded_file_with_hash(uploaded, destination)
+    return public_media_path(destination), content_hash, None
 
 
 def choice_payload(choices):
@@ -3041,6 +3489,89 @@ def user_has_approved_project_relation(user, project):
         ProjectInterest.objects.filter(**filters).exists()
         or ProjectClaimIntent.objects.filter(**filters).exists()
     )
+
+
+def get_visible_project_for_project_page(request, project_id):
+    queryset = project_stat_annotations(
+        Project.objects.filter(is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
+        .select_related("theme", "created_by", "created_by__profile")
+        .prefetch_related("tags", "documents")
+    )
+    return queryset.filter(pk=project_id).first()
+
+
+def can_view_project_private_content(user, project):
+    if not getattr(user, "is_authenticated", False):
+        return False
+    return bool(has_capability(user, "manage_projects") or project.created_by_id == user.id)
+
+
+def project_progress_documents_queryset(project, include_private=False):
+    documents = project.documents.filter(
+        doc_type=ProjectDocument.DocumentType.PDF,
+        document_kind=ProjectDocument.DocumentKind.PROGRESS,
+    )
+    if not include_private:
+        documents = documents.filter(visibility=ProjectDocument.Visibility.PUBLIC)
+    return documents.select_related("uploaded_by", "uploaded_by__profile").order_by("-created_at", "-id")
+
+
+def project_progress_entries_queryset(project, include_private=False):
+    entries = project.progress_entries.select_related("document", "created_by", "created_by__profile")
+    if not include_private:
+        entries = entries.filter(visibility=ProjectProgressEntry.Visibility.PUBLIC)
+    return entries.order_by("-occurred_at", "-id")
+
+
+def get_public_project_for_discussions(project_id):
+    return get_object_or_404(
+        Project.objects.filter(is_public=True, stage__in=PUBLIC_PROJECT_STAGES),
+        pk=project_id,
+    )
+
+
+def visible_replies_by_parent(roots):
+    root_ids = [item.id for item in roots]
+    if not root_ids:
+        return {}
+    replies = (
+        ProjectDiscussion.objects.filter(parent_id__in=root_ids, status=ProjectDiscussion.Status.VISIBLE)
+        .select_related("author", "author__profile")
+        .order_by("created_at", "id")
+    )
+    grouped = {}
+    for reply in replies:
+        grouped.setdefault(reply.parent_id, []).append(reply)
+    return grouped
+
+
+def validate_discussion_content(content):
+    text = str(content or "").strip()
+    if not text:
+        return "", fail("Discussion content is required.", status=422, code="validation_error")
+    if len(text) > 2000:
+        return "", fail("Discussion content must be within 2000 characters.", status=422, code="validation_error")
+    return text, None
+
+
+def can_manage_discussion(user, discussion):
+    if not getattr(user, "is_authenticated", False):
+        return False
+    return bool(has_capability(user, "manage_projects") or discussion.author_id == user.id)
+
+
+def discussion_audit_snapshot(discussion):
+    content = str(discussion.content or "")
+    return {
+        "id": discussion.id,
+        "project_id": discussion.project_id,
+        "parent_id": discussion.parent_id,
+        "author": uid_only_user_payload(discussion.author) if discussion.author else None,
+        "status": discussion.status,
+        "moderation_reason": discussion.moderation_reason,
+        "content_excerpt": content[:120],
+        "content_length": len(content),
+    }
 
 
 def interaction_kinds(type_filter=""):
@@ -3391,6 +3922,10 @@ def project_document_root():
     return (Path(settings.MEDIA_ROOT) / "project-documents").expanduser().resolve()
 
 
+def contribution_document_root():
+    return (Path(settings.MEDIA_ROOT) / "contribution-documents").expanduser().resolve()
+
+
 def unique_project_document_destination(directory, file_name):
     suffix = Path(file_name).suffix
     stem = Path(file_name).stem or "document"
@@ -3405,6 +3940,20 @@ def unique_project_document_destination(directory, file_name):
     return candidate
 
 
+def unique_contribution_document_destination(directory, file_name):
+    suffix = Path(file_name).suffix
+    stem = Path(file_name).stem or "document"
+    candidate = (directory / file_name).resolve()
+    index = 2
+    while candidate.exists():
+        candidate = (directory / f"{stem}-{index}{suffix}").resolve()
+        index += 1
+    root = contribution_document_root()
+    if candidate.parent != root and root not in candidate.parent.parents:
+        raise ValueError("文件路径不能超出任务结果文档目录。")
+    return candidate
+
+
 def write_uploaded_file_with_hash(uploaded, destination):
     destination.parent.mkdir(parents=True, exist_ok=True)
     hasher = hashlib.sha256()
@@ -3413,6 +3962,38 @@ def write_uploaded_file_with_hash(uploaded, destination):
             hasher.update(chunk)
             output.write(chunk)
     return hasher.hexdigest()
+
+
+def uploaded_file_has_pdf_signature(uploaded):
+    try:
+        position = uploaded.tell()
+    except (AttributeError, OSError):
+        position = 0
+    header = uploaded.read(5)
+    try:
+        uploaded.seek(position)
+    except (AttributeError, OSError):
+        pass
+    return header == b"%PDF-"
+
+
+def uploaded_file_has_allowed_image_signature(uploaded, suffix):
+    try:
+        position = uploaded.tell()
+    except (AttributeError, OSError):
+        position = 0
+    header = uploaded.read(16)
+    try:
+        uploaded.seek(position)
+    except (AttributeError, OSError):
+        pass
+    if suffix == ".png":
+        return header.startswith(b"\x89PNG\r\n\x1a\n")
+    if suffix in {".jpg", ".jpeg"}:
+        return header.startswith(b"\xff\xd8\xff")
+    if suffix == ".webp":
+        return header.startswith(b"RIFF") and header[8:12] == b"WEBP"
+    return False
 
 
 def public_document_path_for_admin(path):
@@ -3514,6 +4095,27 @@ def public_media_path(path):
         return f"{settings.MEDIA_URL.rstrip('/')}/{path.resolve().relative_to(media_root).as_posix()}"
     except ValueError:
         return str(path)
+
+
+def sidebar_qr_root():
+    return (Path(settings.MEDIA_ROOT) / "system-qrcodes").expanduser().resolve()
+
+
+def sidebar_qr_definition(key):
+    normalized = str(key or "").strip()
+    return next((item for item in SIDEBAR_QR_DEFINITIONS if item["key"] == normalized), None)
+
+
+def sidebar_qr_files_for_key(key):
+    root = sidebar_qr_root()
+    return [root / f"{key}{extension}" for extension in SIDEBAR_QR_EXTENSIONS]
+
+
+def sidebar_qr_existing_file(key):
+    for candidate in sidebar_qr_files_for_key(key):
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def unique_dataset_description_path(theme, title):

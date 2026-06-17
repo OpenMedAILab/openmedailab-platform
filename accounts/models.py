@@ -102,6 +102,7 @@ class UserProfile(models.Model):
     bio = models.TextField(blank=True)
     credit_balance = models.IntegerField(default=100)
     reputation_score = models.IntegerField(default=0)
+    last_seen_at = models.DateTimeField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

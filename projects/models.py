@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 
 class ProjectStage(models.TextChoices):
@@ -131,15 +132,29 @@ class Project(models.Model):
         student_count = max(student_profile_count, role_counts.get("学生", 0))
         doctor_count = max(profile_group_counts.get(RoleType.DOCTOR, 0), role_counts.get("医生", 0))
         mentor_count = max(profile_group_counts.get(RoleType.PHD_OR_ABOVE, 0), role_counts.get("大学老师", 0))
+        def required_role(key, label, count, required=1):
+            overfilled = count > required
+            ready = count >= required
+            status = "overfilled" if overfilled else "ready" if ready else "missing"
+            return {
+                "key": key,
+                "label": label,
+                "count": count,
+                "required": required,
+                "ready": ready,
+                "overfilled": overfilled,
+                "status": status,
+            }
+
         return {
             "roles": role_counts,
             "role_groups": role_group_counts,
             "visible_role_groups": [item for item in role_group_counts if item["count"] > 0],
             "required_roles": [
-                {"key": "doctor", "label": "医生（医学指导）", "count": doctor_count, "ready": doctor_count >= 1},
-                {"key": "student", "label": "学生（实验）", "count": student_count, "ready": student_count >= 1},
-                {"key": "mentor", "label": "博士毕业及以上（指导）", "count": mentor_count, "ready": mentor_count >= 1},
-                {"key": "leader", "label": "Leader（项目负责人）", "count": leader_count, "ready": leader_count >= 1},
+                required_role("doctor", "医生（医学指导）", doctor_count),
+                required_role("student", "学生（实验）", student_count),
+                required_role("mentor", "博士毕业及以上（指导）", mentor_count),
+                required_role("leader", "Leader（项目负责人）", leader_count),
             ],
             "leader_count": leader_count,
             "sponsor_count": sponsor_count,
@@ -161,6 +176,10 @@ class ProjectTag(models.Model):
 
 
 class ProjectDocument(models.Model):
+    class Visibility(models.TextChoices):
+        PUBLIC = "public", "公开"
+        OWNER_ADMIN = "owner_admin", "课题所有者和管理员"
+
     class DocumentType(models.TextChoices):
         MARKDOWN = "markdown", "Markdown"
         PDF = "pdf", "PDF"
@@ -170,6 +189,7 @@ class ProjectDocument(models.Model):
     class DocumentKind(models.TextChoices):
         DETAIL = "detail", "课题主PDF"
         SUPPLEMENT = "supplement", "补充说明"
+        PROGRESS = "progress", "项目进度文档"
 
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="documents")
     doc_type = models.CharField(max_length=20, choices=DocumentType.choices)
@@ -178,6 +198,8 @@ class ProjectDocument(models.Model):
     description = models.TextField(blank=True)
     path = models.CharField(max_length=500)
     content_hash = models.CharField(max_length=64, blank=True)
+    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="uploaded_project_documents")
+    visibility = models.CharField(max_length=32, choices=Visibility.choices, default=Visibility.PUBLIC)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -188,6 +210,70 @@ class ProjectDocument(models.Model):
 
     def __str__(self):
         return self.title or self.path
+
+
+class ProjectProgressEntry(models.Model):
+    class EntryType(models.TextChoices):
+        STAGE = "stage", "阶段变化"
+        DOCUMENT = "document", "文档"
+        NOTE = "note", "说明"
+
+    class Visibility(models.TextChoices):
+        PUBLIC = "public", "公开"
+        OWNER_ADMIN = "owner_admin", "课题所有者和管理员"
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="progress_entries")
+    entry_type = models.CharField(max_length=32, choices=EntryType.choices, default=EntryType.NOTE)
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    occurred_at = models.DateTimeField(default=timezone.now)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="project_progress_entries")
+    document = models.ForeignKey(ProjectDocument, on_delete=models.SET_NULL, null=True, blank=True, related_name="progress_entries")
+    visibility = models.CharField(max_length=32, choices=Visibility.choices, default=Visibility.PUBLIC)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-occurred_at", "-id"]
+        indexes = [
+            models.Index(fields=["project", "-occurred_at"]),
+            models.Index(fields=["entry_type"]),
+            models.Index(fields=["visibility"]),
+        ]
+
+    def __str__(self):
+        return self.title
+
+
+class ProjectDiscussion(models.Model):
+    class Status(models.TextChoices):
+        VISIBLE = "visible", "可见"
+        HIDDEN = "hidden", "已隐藏"
+        DELETED = "deleted", "已删除"
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="discussions")
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="project_discussions")
+    parent = models.ForeignKey("self", on_delete=models.CASCADE, null=True, blank=True, related_name="replies")
+    content = models.TextField()
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.VISIBLE)
+    moderation_reason = models.TextField(blank=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="deleted_project_discussions")
+    hidden_at = models.DateTimeField(null=True, blank=True)
+    hidden_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="hidden_project_discussions")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["project", "status", "-created_at"]),
+            models.Index(fields=["parent", "status", "created_at"]),
+            models.Index(fields=["author", "status"]),
+        ]
+
+    def __str__(self):
+        return f"{self.project_id}:{self.author_id}:{self.status}"
 
 
 class ThemeFile(models.Model):

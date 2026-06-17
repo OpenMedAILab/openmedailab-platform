@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, join, relative } from "node:path";
 import { test } from "node:test";
 
-import { parseProjectJsonImport, projectImportFileKey, qualityCheckProjectPayload, selectedProjectJsonFiles, sortProjectImportRows, summarizeProjectImportFiles } from "./projectJsonImport.js";
+import { normalizeProjectImportFiles, parseProjectJsonImport, projectImportFileKey, projectImportUploadFile, qualityCheckProjectPayload, selectedProjectJsonFiles, sortProjectImportRows, summarizeProjectImportFiles } from "./projectJsonImport.js";
 
 test("parseProjectJsonImport maps json array records to strict project payloads", () => {
   const text = JSON.stringify([
@@ -113,6 +113,42 @@ test("summarizeProjectImportFiles counts only project json and matching pdf file
     ignoredFileCount: 3
   });
   assert.deepEqual(jsonFiles.map((file) => file.name), ["001_topic.json", "002_topic.json", "metadata.json"]);
+});
+
+test("project import file keys prefer relative paths for duplicate filenames", () => {
+  const files = [
+    { name: "topic.json", relativePath: "alpha/topic.json" },
+    { name: "topic.pdf", relativePath: "alpha/topic.pdf" },
+    { name: "topic.json", relativePath: "beta/topic.json" },
+    { name: "topic.pdf", relativePath: "beta/topic.pdf" }
+  ];
+
+  const jsonFiles = selectedProjectJsonFiles(files);
+  const pdfKeys = new Set(files.filter((file) => file.name.endsWith(".pdf")).map(projectImportFileKey));
+
+  assert.deepEqual(jsonFiles.map(projectImportFileKey), ["alpha/topic", "beta/topic"]);
+  assert.deepEqual([...pdfKeys].sort(), ["alpha/topic", "beta/topic"]);
+});
+
+test("showDirectoryPicker file wrappers keep relative paths and unwrap upload files", async () => {
+  const jsonFile = { name: "topic.json", text: async () => JSON.stringify(actualDirectoryProjectPayload()) };
+  const pdfFile = { name: "topic.pdf", text: async () => "%PDF-1.4\n% matching pdf\n%%EOF\n" };
+  const files = normalizeProjectImportFiles([
+    { file: jsonFile, name: "topic.json", relativePath: "nested/topic.json" },
+    { file: pdfFile, name: "topic.pdf", relativePath: "nested/topic.pdf" }
+  ]);
+  const jsonFiles = selectedProjectJsonFiles(files);
+  const pdfFilesByKey = new Map(
+    files
+      .filter((file) => String(file.name || "").toLowerCase().endsWith(".pdf"))
+      .map((file) => [projectImportFileKey(file), file])
+  );
+  const matchedPdf = pdfFilesByKey.get(projectImportFileKey(jsonFiles[0]));
+
+  assert.deepEqual(files.map(projectImportFileKey), ["nested/topic", "nested/topic"]);
+  assert.equal(await jsonFiles[0].text(), await jsonFile.text());
+  assert.equal(matchedPdf.relativePath, "nested/topic.pdf");
+  assert.equal(projectImportUploadFile(matchedPdf), pdfFile);
 });
 
 test("actual directory selection matches project json with same-name pdf", async () => {
