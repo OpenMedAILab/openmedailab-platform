@@ -94,7 +94,7 @@
 | 课题字段和上传者 | `projects/models.py` | `Project.created_by`、阶段、公开状态、文档关系 |
 | Markdown/导入解析 | `projects/importing.py`、`projects/contracts.py` | 课题模板字段、导入契约 |
 | 用户课题 API | `api/ninja_api.py` | `me_project_list`、`user_project_create`、`user_project_update`、`user_project_delete` |
-| 管理员课题 API | `api/ninja_api.py` | `admin_project_list`、`admin_project_get`、`admin_project_create`、`admin_project_update`、`admin_project_delete`、`admin_project_bulk_archive`、`admin_project_import_json` |
+| 管理员课题 API | `api/ninja_api.py` | `admin_project_list`、`admin_project_get`、`admin_project_create`、`admin_project_update`、`admin_project_delete`、`admin_project_bulk_archive`、`admin_project_bulk_action`、`admin_project_import_json` |
 | 课题写入校验 | `api/ninja_api.py` | `ProjectWriteRequest`、`validate_admin_project_payload`、`validate_user_project_payload`、`require_project_owner_or_admin`、`user_project_uploads_today`、`user_can_bypass_project_upload_quota` |
 | 前端用户上传 | `frontend/src/main.js` | `loadMyProjects`、新增/编辑我的课题表单、保存草稿/发布 |
 | 前端管理员课题管理 | `frontend/src/main.js` | `loadAdminProjects`、课题列表、状态下拉、新增/编辑课题弹窗、上传文档 |
@@ -108,6 +108,7 @@
 - 普通用户每天最多上传 10 个课题；管理员不受限制。
 - 用户上传课题默认草稿；用户只允许在草稿和开放招募之间切换。
 - 管理员可以管理全站课题，可推进阶段、暂停、归档。
+- 管理端课题归档和删除必须分开：归档通过 `PATCH /api/admin/projects/{id}/` 设置 `stage=archived,is_public=false`，不需要确认；删除通过 `DELETE /api/admin/projects/{id}/` 物理删除课题，前端必须弹确认。
 - JSON 导入接口当前仍存在于代码中；若任务要求移除或隐藏，必须先确认前端入口、测试和历史数据影响。
 - 导入/批量操作必须展示成功数、失败数和失败原因。
 
@@ -191,6 +192,7 @@
 产品规则：
 
 - `Theme` 是主题分类；首页主题、筛选主题和管理端主题列表都来自数据库中的 `Theme`。
+- 管理端主题停用和删除必须分开：停用通过 `PATCH /api/admin/themes/{id}/` 设置 `is_active=false`，不需要确认；删除通过 `DELETE /api/admin/themes/{id}/` 物理删除主题，前端必须弹确认。删除主题不会删除课题，课题的 `theme` 会置空；该主题下的数据集说明记录和托管 PDF 会被删除。
 - 不再提供目录浏览、目录上传或服务器数据集存储；管理端不维护目录式文件管理模块。
 - `ThemeFile` 表示一个主题下的数据集说明记录，只保存数据集名称、说明和一份说明 PDF，不保存原始数据集。
 - 主题的数据集说明 PDF 使用 `ThemeFile.detail_pdf_path` 绑定，创建记录时后端自动生成内部 `path`。
@@ -451,9 +453,10 @@ stateDiagram-v2
 | `GET` | `/api/admin/users/` | 用户管理 |
 | `POST` | `/api/admin/users/{uid}/reset-password/` | 恢复默认密码 |
 | `GET/PATCH` | `/api/admin/interactions/`、`/api/admin/interactions/{type}/{id}/status/` | 资助审批 |
-| `GET/POST/PATCH/DELETE` | `/api/admin/projects/`、`/api/admin/projects/{id}/` | 全站课题管理 |
+| `GET/POST/PATCH/DELETE` | `/api/admin/projects/`、`/api/admin/projects/{id}/` | 全站课题管理；`DELETE` 为物理删除 |
 | `POST` | `/api/admin/projects/bulk-archive/` | 批量归档 |
-| `GET/POST/PATCH/DELETE` | `/api/admin/themes/` | 主题管理 |
+| `POST` | `/api/admin/projects/bulk-action/` | 批量归档、物理删除、公开/取消公开、设置阶段 |
+| `GET/POST/PATCH/DELETE` | `/api/admin/themes/` | 主题管理；停用用 `PATCH is_active=false`，`DELETE` 为物理删除 |
 | `GET/POST/PATCH/DELETE` | `/api/admin/theme-files/` | 主题数据集说明记录管理 |
 | `POST` | `/api/admin/theme-files/{file_id}/detail-pdf/` | 上传数据集说明 PDF |
 | `GET/POST/PATCH/DELETE` | `/api/admin/project-documents/` 相关路径 | 课题主 PDF 管理 |

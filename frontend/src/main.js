@@ -97,6 +97,8 @@ const state = reactive({
     updatingProjectStageId: null,
     selectedProjectIds: [],
     bulkArchivingProjects: false,
+    bulkProjectActionSubmitting: false,
+    bulkProjectStage: "open_recruiting",
     projectFormOpen: false,
     projectForm: emptyProjectForm(),
     themeFormOpen: false,
@@ -1937,10 +1939,27 @@ const App = {
 
     async function deactivateTheme(theme) {
       if (!can("manage_themes")) return;
-      await api.adminDeleteTheme(theme.id);
+      await api.adminUpdateTheme(theme.id, { is_active: false });
       showToast("主题已停用");
       await loadAdmin();
       state.meta = await api.meta();
+    }
+
+    async function deleteTheme(theme) {
+      if (!can("manage_themes")) return;
+      showConfirm({
+        title: "确认物理删除主题",
+        message: `确认物理删除「${theme.name}」吗？该操作会删除主题和数据集说明 PDF 记录，并让关联课题失去主题分类，不能撤回。`,
+        confirmText: "物理删除",
+        cancelText: "取消",
+        tone: "danger",
+        onConfirm: async () => {
+          await api.adminDeleteTheme(theme.id);
+          showToast("主题已物理删除");
+          await loadAdmin();
+          state.meta = await api.meta();
+        }
+      });
     }
 
     function newTheme() {
@@ -2169,46 +2188,99 @@ const App = {
     }
 
     async function bulkArchiveSelectedProjects() {
-      if (!can("manage_projects") || !state.admin.selectedProjectIds.length || state.admin.bulkArchivingProjects) return;
-      const ids = [...state.admin.selectedProjectIds];
+      await bulkUpdateSelectedProjects({ action: "archive", successVerb: "归档", failureMessage: "批量归档课题失败" });
+    }
+
+    async function bulkPublishSelectedProjects(isPublic) {
+      await bulkUpdateSelectedProjects({
+        action: "set_public",
+        is_public: Boolean(isPublic),
+        successVerb: isPublic ? "公开" : "取消公开",
+        failureMessage: isPublic ? "批量公开课题失败" : "批量取消公开课题失败"
+      });
+    }
+
+    async function bulkSetSelectedProjectStage() {
+      await bulkUpdateSelectedProjects({
+        action: "set_stage",
+        stage: state.admin.bulkProjectStage,
+        successVerb: "设置阶段",
+        failureMessage: "批量设置课题阶段失败"
+      });
+    }
+
+    async function bulkDeleteSelectedProjects() {
+      if (!can("manage_projects") || !state.admin.selectedProjectIds.length || state.admin.bulkProjectActionSubmitting) return;
+      const count = state.admin.selectedProjectIds.length;
       const confirmed = await openConfirmDialog({
-        title: "确认批量删除课题",
-        message: `确认删除已选的 ${ids.length} 个课题吗？系统会批量归档停用，不会物理删除历史数据。`,
-        confirmText: "批量删除",
+        title: "确认批量物理删除课题",
+        message: `确认物理删除选中的 ${count} 个课题吗？该操作会删除课题、互动关系、任务结果和课题 PDF 记录，不能撤回。`,
+        confirmText: "批量物理删除",
         tone: "danger"
       });
       if (!confirmed) return;
-      state.admin.bulkArchivingProjects = true;
+      await bulkUpdateSelectedProjects({ action: "delete", successVerb: "删除", failureMessage: "批量物理删除课题失败" });
+    }
+
+    async function bulkUpdateSelectedProjects(options) {
+      if (!can("manage_projects") || !state.admin.selectedProjectIds.length || state.admin.bulkProjectActionSubmitting) return;
+      const ids = [...state.admin.selectedProjectIds];
+      state.admin.bulkArchivingProjects = options.action === "archive";
+      state.admin.bulkProjectActionSubmitting = true;
       try {
-        const result = await api.adminBulkArchiveProjects({ ids });
-        const archivedCount = result.archived_count || 0;
+        const result = await api.adminBulkProjectAction({
+          ids,
+          action: options.action,
+          stage: options.stage,
+          is_public: options.is_public
+        });
+        const affectedCount = result.affected_count || 0;
         const missingCount = result.missing_ids?.length || 0;
         state.admin.selectedProjectIds = [];
-        showToast(missingCount ? `已删除 ${archivedCount} 个课题，${missingCount} 个课题不存在或已不可用` : `已删除 ${archivedCount} 个课题`);
+        showToast(
+          missingCount
+            ? `已${options.successVerb} ${affectedCount} 个课题，${missingCount} 个课题不存在或已不可用`
+            : `已${options.successVerb} ${affectedCount} 个课题`
+        );
         await loadAdminProjects({ reset: true });
         await loadProjects({ reset: true });
       } catch (error) {
-        showToast(error.message || "批量删除课题失败");
+        showToast(error.message || options.failureMessage || "批量操作课题失败");
       } finally {
+        state.admin.bulkProjectActionSubmitting = false;
         state.admin.bulkArchivingProjects = false;
       }
     }
 
     async function archiveProject(project) {
       if (!can("manage_projects")) return;
+      if (!project?.id || project.stage === "archived") return;
+      try {
+        await api.adminUpdateProject(project.id, { stage: "archived", is_public: false });
+        showToast("课题已归档");
+        await loadAdminProjects({ reset: true });
+        await loadProjects({ reset: true });
+      } catch (error) {
+        showToast(error.message || "课题归档失败");
+      }
+    }
+
+    async function deleteAdminProject(project) {
+      if (!can("manage_projects")) return;
       const confirmed = await openConfirmDialog({
-        title: "确认归档课题",
-        message: `确认删除课题「${project.title}」吗？系统会做归档停用，不会物理删除历史数据。`,
-        confirmText: "归档课题"
+        title: "确认物理删除课题",
+        message: `确认物理删除「${project.title}」吗？该操作会删除课题、互动关系、任务结果和课题 PDF 记录，不能撤回。`,
+        confirmText: "物理删除",
+        tone: "danger"
       });
       if (!confirmed) return;
       try {
         await api.adminDeleteProject(project.id);
-        showToast("课题已删除并归档");
+        showToast("课题已物理删除");
         await loadAdminProjects({ reset: true });
         await loadProjects({ reset: true });
       } catch (error) {
-        showToast(error.message);
+        showToast(error.message || "课题物理删除失败");
       }
     }
 
@@ -3430,6 +3502,7 @@ const App = {
       editTheme,
       closeThemeForm,
       deactivateTheme,
+      deleteTheme,
       adminThemeDatasetFile,
       newProject,
       editProject,
@@ -3445,6 +3518,9 @@ const App = {
       toggleAdminProjectSelection,
       toggleVisibleAdminProjectsSelection,
       bulkArchiveSelectedProjects,
+      bulkPublishSelectedProjects,
+      bulkSetSelectedProjectStage,
+      bulkDeleteSelectedProjects,
       prepareTaskForProject,
       setThemeFileDetailPdfFile,
       formatFileSize,
@@ -3486,6 +3562,7 @@ const App = {
       closeJsonImportPreview,
       applyJsonImport,
       archiveProject,
+      deleteAdminProject,
       searchAdminProjects,
       displayScore,
       topicCode,
@@ -4080,7 +4157,7 @@ const App = {
                 <div>
                   <span class="eyebrow">管理</span>
                   <h1>内容管理工作台</h1>
-                  <p>主题、课题字段、PDF 文档和导入结果都由后端 API 写入数据库。停用操作保留审计记录，不做物理删除。</p>
+                  <p>主题、课题字段、PDF 文档和导入结果都由后端 API 写入数据库。归档保留数据，删除会物理移除课题。</p>
                 </div>
               </div>
 
@@ -4259,16 +4336,54 @@ const App = {
                       <h2>课题管理</h2>
                       <p>共 {{ state.admin.projectPagination.total_count || 0 }} 个课题，当前显示 {{ state.admin.projects.length }} 个。</p>
                     </div>
+                    <button class="primary-button" type="button" @click="newProject">新增课题</button>
+                  </div>
+                  <div class="admin-project-toolbar">
+                    <div class="bulk-selection-status">
+                      <strong>批量操作</strong>
+                      <span>已选 {{ state.admin.selectedProjectIds.length }} 项</span>
+                    </div>
                     <div class="button-row admin-bulk-actions">
+                      <button
+                        class="ghost-button"
+                        type="button"
+                        :disabled="!state.admin.selectedProjectIds.length || state.admin.bulkProjectActionSubmitting"
+                        @click="bulkArchiveSelectedProjects"
+                      >
+                        {{ state.admin.bulkArchivingProjects ? '正在归档...' : '批量归档(' + state.admin.selectedProjectIds.length + ')' }}
+                      </button>
+                      <button
+                        class="ghost-button"
+                        type="button"
+                        :disabled="!state.admin.selectedProjectIds.length || state.admin.bulkProjectActionSubmitting"
+                        @click="bulkPublishSelectedProjects(true)"
+                      >批量公开</button>
+                      <button
+                        class="ghost-button"
+                        type="button"
+                        :disabled="!state.admin.selectedProjectIds.length || state.admin.bulkProjectActionSubmitting"
+                        @click="bulkPublishSelectedProjects(false)"
+                      >取消公开</button>
+                      <select
+                        class="admin-stage-select"
+                        v-model="state.admin.bulkProjectStage"
+                        :disabled="state.admin.bulkProjectActionSubmitting"
+                        aria-label="批量设置课题阶段"
+                      >
+                        <option v-for="stage in state.meta.project_stages" :key="stage.value" :value="stage.value">{{ stage.label }}</option>
+                      </select>
+                      <button
+                        class="ghost-button"
+                        type="button"
+                        :disabled="!state.admin.selectedProjectIds.length || state.admin.bulkProjectActionSubmitting"
+                        @click="bulkSetSelectedProjectStage"
+                      >批量设置状态</button>
                       <button
                         class="ghost-button danger"
                         type="button"
-                        :disabled="!state.admin.selectedProjectIds.length || state.admin.bulkArchivingProjects"
-                        @click="bulkArchiveSelectedProjects"
-                      >
-                        {{ state.admin.bulkArchivingProjects ? '正在删除...' : '批量删除(' + state.admin.selectedProjectIds.length + ')' }}
-                      </button>
-                      <button class="primary-button" type="button" @click="newProject">新增课题</button>
+                        :disabled="!state.admin.selectedProjectIds.length || state.admin.bulkProjectActionSubmitting"
+                        @click="bulkDeleteSelectedProjects"
+                      >批量删除</button>
                     </div>
                   </div>
                   <div class="admin-filter-row">
@@ -4324,7 +4439,8 @@ const App = {
                       <span>{{ adminProjectVisibilityLabel(project) }}</span>
                       <span class="button-row">
                         <button class="ghost-button" type="button" @click="editProject(project)">编辑</button>
-                        <button class="ghost-button danger" type="button" @click="archiveProject(project)">删除</button>
+                        <button class="ghost-button" type="button" :disabled="project.stage === 'archived'" @click="archiveProject(project)">归档</button>
+                        <button class="ghost-button danger" type="button" @click="deleteAdminProject(project)">删除</button>
                       </span>
                     </div>
                   </div>
@@ -4351,6 +4467,11 @@ const App = {
                       <span>导入课题目录</span>
                       <small>自动匹配同名 .json 与 .pdf</small>
                       <input type="file" accept=".json,application/json,.pdf,application/pdf" webkitdirectory directory multiple @change="handleJsonFiles" />
+                    </label>
+                    <label class="file-picker json-import-picker">
+                      <span>选择 JSON/PDF 文件</span>
+                      <small>Linux 文件夹选择不可用时，直接框选目录内文件</small>
+                      <input type="file" accept=".json,application/json,.pdf,application/pdf" multiple @change="handleJsonFiles" />
                     </label>
                     <button class="primary-button" type="button" :disabled="state.admin.jsonImport.applying || !state.admin.jsonImport.rows.length" @click="openJsonImportPreview">
                       预览并确认
@@ -4505,7 +4626,8 @@ const App = {
                       <span class="button-row">
                         <button class="ghost-button" type="button" @click="editTheme(theme)">编辑</button>
                         <a v-if="adminThemeDatasetFile(theme)?.detail_pdf_path" class="ghost-button" :href="themeFileDetailPdfHref(adminThemeDatasetFile(theme))" download>下载PDF</a>
-                        <button class="ghost-button danger" type="button" @click="deactivateTheme(theme)">停用</button>
+                        <button class="ghost-button" type="button" :disabled="!theme.is_active" @click="deactivateTheme(theme)">停用</button>
+                        <button class="ghost-button danger" type="button" @click="deleteTheme(theme)">删除</button>
                       </span>
                     </div>
                   </div>

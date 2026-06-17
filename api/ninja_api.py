@@ -13,7 +13,7 @@ from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.forms import SetPasswordForm
 from django.contrib.auth.models import User
 from django.core.paginator import Paginator
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Case, IntegerField, Q, Value, When
 from django.http import Http404, HttpResponse
 from django.middleware.csrf import get_token
@@ -222,6 +222,13 @@ class ProjectBulkImportRequest(Schema):
 
 class ProjectBulkArchiveRequest(Schema):
     ids: list[int]
+
+
+class ProjectBulkActionRequest(Schema):
+    ids: list[int]
+    action: str
+    stage: Optional[str] = None
+    is_public: Optional[bool] = None
 
 
 class ProjectDocumentWriteRequest(Schema):
@@ -1539,10 +1546,13 @@ def admin_theme_delete(request, theme_id: int):
         return auth_error
     theme = get_object_or_404(Theme, pk=theme_id)
     before = theme_payload(theme)
-    theme.is_active = False
-    theme.save(update_fields=["is_active", "updated_at"])
-    audit(request.user, "theme.deactivate", "Theme", theme.id, before=before, after=theme_payload(theme))
-    return ok(theme_payload(theme))
+    detail_pdf_paths = list(theme.files.exclude(detail_pdf_path="").values_list("detail_pdf_path", flat=True))
+    with transaction.atomic():
+        theme.delete()
+        audit(request.user, "theme.delete", "Theme", theme_id, before=before, after={"id": theme_id, "deleted": True})
+    for path in detail_pdf_paths:
+        maybe_delete_managed_theme_file_detail_pdf(path)
+    return ok({"id": theme_id, "deleted": True})
 
 
 @api.get("/admin/theme-files/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Admin"])
@@ -1843,21 +1853,42 @@ def admin_project_import_json(request, payload: ProjectBulkImportRequest):
     results = []
     created_count = 0
     updated_count = 0
-    with transaction.atomic():
-        for index, data in validated_projects:
-            project, created = upsert_project_with_instance(data, source_label="api-admin-json-import", allow_create_theme=True, created_by=request.user)
-            project = Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents").get(pk=project.pk)
-            if created:
-                created_count += 1
-            else:
-                updated_count += 1
-            results.append({"row": index, "action": "created" if created else "updated", "project": project_detail_payload(project)})
+    current_index = None
+    try:
+        with transaction.atomic():
+            for index, data in validated_projects:
+                current_index = index
+                project, created = upsert_project_with_instance(data, source_label="api-admin-json-import", allow_create_theme=True, created_by=request.user)
+                project = Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents").get(pk=project.pk)
+                if created:
+                    created_count += 1
+                else:
+                    updated_count += 1
+                results.append({"row": index, "action": "created" if created else "updated", "project": project_detail_payload(project)})
+            audit(
+                request.user,
+                "project.import_json",
+                "Project",
+                "bulk",
+                after={"created_count": created_count, "updated_count": updated_count, "total_count": len(results)},
+            )
+    except (IntegrityError, ValueError) as exc:
+        message = str(exc) or "Project import failed."
         audit(
             request.user,
             "project.import_json",
             "Project",
             "bulk",
-            after={"created_count": created_count, "updated_count": updated_count, "total_count": len(results)},
+            after={"created_count": 0, "updated_count": 0, "total_count": len(validated_projects), "failed_row": current_index},
+            status="failed",
+            error_code="project_import_failed",
+            error_message=message[:500],
+        )
+        return fail(
+            "Project import failed.",
+            status=422,
+            code="validation_error",
+            errors=[{"row": current_index, "message": message, "code": "project_import_failed"}],
         )
 
     return ok(
@@ -1893,6 +1924,67 @@ def admin_project_bulk_archive(request, payload: ProjectBulkArchiveRequest):
             after={"archived_count": len(projects), "ids": ids, "missing_ids": missing_ids},
         )
     return ok({"archived_count": len(projects), "ids": ids, "missing_ids": missing_ids})
+
+
+@api.post("/admin/projects/bulk-action/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+def admin_project_bulk_action(request, payload: ProjectBulkActionRequest):
+    auth_error = require_capability(request, "manage_projects")
+    if auth_error:
+        return auth_error
+    try:
+        ids = sorted({int(value) for value in payload.ids if int(value) > 0})
+    except (TypeError, ValueError):
+        return fail("ids must be positive integers.", status=422, code="validation_error")
+    if not ids:
+        return fail("ids cannot be empty.", status=422, code="validation_error")
+
+    action = str(payload.action or "").strip()
+    if action not in {"archive", "delete", "set_public", "set_stage"}:
+        return fail("Bulk action is invalid.", status=422, code="validation_error")
+
+    update_fields = {}
+    if action == "archive":
+        update_fields = {"stage": ProjectStage.ARCHIVED, "is_public": False}
+    elif action == "set_public":
+        if payload.is_public is None:
+            return fail("is_public is required.", status=422, code="validation_error")
+        update_fields = {"is_public": bool(payload.is_public)}
+    elif action == "set_stage":
+        stage = normalize_project_stage_value(payload.stage)
+        if stage not in ProjectStage.values:
+            return fail("stage is invalid.", status=422, code="validation_error")
+        update_fields = {"stage": stage}
+        if stage == ProjectStage.ARCHIVED:
+            update_fields["is_public"] = False
+
+    document_paths = []
+    with transaction.atomic():
+        projects = list(Project.objects.filter(id__in=ids).prefetch_related("documents").order_by("topic_id"))
+        found_ids = {project.id for project in projects}
+        missing_ids = [value for value in ids if value not in found_ids]
+        before = [
+            {"id": project.id, "topic_id": project.topic_id, "stage": project.stage, "is_public": project.is_public}
+            for project in projects
+        ]
+        if action == "delete":
+            document_paths = [document.path for project in projects for document in project.documents.all()]
+            Project.objects.filter(id__in=found_ids).delete()
+        else:
+            Project.objects.filter(id__in=found_ids).update(**update_fields, updated_at=timezone.now())
+        after = {
+            "action": action,
+            "affected_count": len(projects),
+            "ids": ids,
+            "missing_ids": missing_ids,
+            **update_fields,
+        }
+        audit(request.user, f"project.bulk_{action}", "Project", "bulk", before={"projects": before}, after=after)
+
+    if action == "delete":
+        for path in document_paths:
+            maybe_delete_managed_project_document_file(path)
+
+    return ok({"action": action, "affected_count": len(projects), "ids": ids, "missing_ids": missing_ids})
 
 
 @api.get("/admin/projects/{project_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope}, tags=["Admin"])
@@ -2023,11 +2115,12 @@ def admin_project_delete(request, project_id: int):
         return auth_error
     project = get_object_or_404(Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents"), pk=project_id)
     before = project_detail_payload(project)
-    project.is_public = False
-    project.stage = ProjectStage.ARCHIVED
-    project.save(update_fields=["is_public", "stage", "updated_at"])
-    audit(request.user, "project.archive", "Project", project.id, before=before, after=project_detail_payload(project))
-    return ok(project_detail_payload(project))
+    document_paths = [document.path for document in project.documents.all()]
+    for path in document_paths:
+        maybe_delete_managed_project_document_file(path)
+    project.delete()
+    audit(request.user, "project.delete", "Project", project_id, before=before, after={"deleted": True})
+    return ok({"id": project_id, "deleted": True})
 
 
 @api.get("/admin/project-documents/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Admin"])

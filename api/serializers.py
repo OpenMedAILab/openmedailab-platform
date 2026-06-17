@@ -425,6 +425,7 @@ AUDIT_ACTION_LABELS = {
     "theme.create": "创建主题",
     "theme.update": "更新主题",
     "theme.deactivate": "停用主题",
+    "theme.delete": "删除主题",
     "theme_file.create": "创建主题文件",
     "theme_file.update": "更新主题文件",
     "theme_file.deactivate": "停用主题文件",
@@ -432,6 +433,10 @@ AUDIT_ACTION_LABELS = {
     "project.update": "更新课题",
     "project.upsert": "更新课题",
     "project.archive": "归档课题",
+    "project.bulk_archive": "批量归档课题",
+    "project.bulk_delete": "批量删除课题",
+    "project.bulk_set_public": "批量设置课题公开状态",
+    "project.bulk_set_stage": "批量设置课题阶段",
     "project.import_json": "导入课题",
 }
 

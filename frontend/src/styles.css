@@ -1791,6 +1791,54 @@ textarea:focus {
   flex-wrap: wrap;
 }
 
+.admin-project-toolbar {
+  display: grid;
+  grid-template-columns: minmax(150px, auto) minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  margin: 12px 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f8fbfb;
+}
+
+.bulk-selection-status {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 36px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.bulk-selection-status strong {
+  font-size: 14px;
+}
+
+.bulk-selection-status span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.admin-project-toolbar .admin-bulk-actions {
+  gap: 8px;
+}
+
+.admin-project-toolbar .ghost-button,
+.admin-project-toolbar .primary-button {
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.admin-project-toolbar .admin-stage-select {
+  width: 150px;
+  min-width: 150px;
+}
+
 .audit-table .admin-table-head,
 .audit-table .audit-table-row {
   grid-template-columns: minmax(150px, 0.9fr) minmax(130px, 0.7fr) minmax(150px, 0.8fr) minmax(150px, 0.7fr) minmax(320px, 1.7fr);
@@ -3295,6 +3343,7 @@ code {
   }
 
   .admin-filter-row,
+  .admin-project-toolbar,
   .form-grid,
   .markdown-import-actions,
   .markdown-import-row,
@@ -3312,6 +3361,18 @@ code {
   .theme-admin-table .admin-table-row {
     grid-template-columns: 1fr;
     min-width: 0;
+  }
+
+  .admin-project-toolbar {
+    align-items: stretch;
+  }
+
+  .admin-project-toolbar .admin-bulk-actions {
+    justify-content: flex-start;
+  }
+
+  .admin-project-toolbar .admin-stage-select {
+    width: 100%;
   }
 
   .admin-table {

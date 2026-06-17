@@ -538,6 +538,44 @@ class ApiTests(TestCase):
         self.assertEqual(file_delete_response.status_code, 200)
         self.assertFalse(ThemeFile.objects.get(pk=file_id).is_active)
 
+    def test_admin_theme_deactivate_and_delete_are_separate(self):
+        self.login_platform_admin()
+        theme = Theme.objects.create(name="待删除主题", slug="delete-theme")
+        project = Project.objects.create(
+            topic_id=15,
+            title="保留课题",
+            problem_statement="课题不随主题删除",
+            clinical_endpoint="验证课题保留",
+            existing_foundation="已有测试数据",
+            theme=theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        theme_file = ThemeFile.objects.create(
+            theme=theme,
+            file_type=ThemeFile.FileType.DATASET_META,
+            title="待删除主题说明",
+            path="dataset-descriptions/delete-theme",
+            detail_pdf_title="说明 PDF",
+            detail_pdf_path="/media/theme-file-detail-pdfs/delete-theme/1/detail.pdf",
+        )
+
+        deactivate_response = self.patch_json(f"/api/admin/themes/{theme.pk}/", {"is_active": False})
+        self.assertEqual(deactivate_response.status_code, 200)
+        theme.refresh_from_db()
+        self.assertFalse(theme.is_active)
+        self.assertTrue(Project.objects.filter(pk=project.pk, theme=theme).exists())
+        self.assertTrue(ThemeFile.objects.filter(pk=theme_file.pk).exists())
+
+        delete_response = self.client.delete(f"/api/admin/themes/{theme.pk}/")
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertEqual(delete_response.json()["data"], {"id": theme.pk, "deleted": True})
+        self.assertFalse(Theme.objects.filter(pk=theme.pk).exists())
+        self.assertFalse(ThemeFile.objects.filter(pk=theme_file.pk).exists())
+        project.refresh_from_db()
+        self.assertIsNone(project.theme_id)
+        self.assertTrue(AuditLog.objects.filter(action="theme.delete", target_id=str(theme.pk)).exists())
+
     def test_admin_project_create_update_boundaries(self):
         admin = self.login_platform_admin()
 
@@ -956,6 +994,88 @@ class ApiTests(TestCase):
         self.assertNotIn(third.topic_id, public_topic_ids)
         self.assertTrue(AuditLog.objects.filter(action="project.bulk_archive", target_id="bulk").exists())
 
+    def test_admin_project_bulk_action_updates_and_deletes_selected_projects(self):
+        self.login_platform_admin()
+        second = Project.objects.create(
+            topic_id=2,
+            title="批量操作课题二",
+            summary="用于测试批量操作。",
+            theme=self.theme,
+            stage=ProjectStage.DRAFT,
+            is_public=False,
+        )
+        third = Project.objects.create(
+            topic_id=3,
+            title="批量操作课题三",
+            summary="用于测试批量删除。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        ProjectDocument.objects.create(
+            project=third,
+            doc_type=ProjectDocument.DocumentType.PDF,
+            document_kind=ProjectDocument.DocumentKind.DETAIL,
+            title="批量删除 PDF",
+            path="media/project-documents/T0003/detail.pdf",
+        )
+
+        public_response = self.post_json(
+            "/api/admin/projects/bulk-action/",
+            {"ids": [second.pk], "action": "set_public", "is_public": True},
+        )
+        self.assertEqual(public_response.status_code, 200)
+        second.refresh_from_db()
+        self.assertTrue(second.is_public)
+
+        stage_response = self.post_json(
+            "/api/admin/projects/bulk-action/",
+            {"ids": [second.pk], "action": "set_stage", "stage": "team_building"},
+        )
+        self.assertEqual(stage_response.status_code, 200)
+        second.refresh_from_db()
+        self.assertEqual(second.stage, ProjectStage.TEAM_BUILDING)
+
+        delete_response = self.post_json(
+            "/api/admin/projects/bulk-action/",
+            {"ids": [third.pk, 999999], "action": "delete"},
+        )
+        self.assertEqual(delete_response.status_code, 200)
+        delete_payload = delete_response.json()["data"]
+        self.assertEqual(delete_payload["affected_count"], 1)
+        self.assertEqual(delete_payload["missing_ids"], [999999])
+        self.assertFalse(Project.objects.filter(pk=third.pk).exists())
+        self.assertFalse(ProjectDocument.objects.filter(project_id=third.pk).exists())
+        self.assertTrue(AuditLog.objects.filter(action="project.bulk_set_public", target_id="bulk").exists())
+        self.assertTrue(AuditLog.objects.filter(action="project.bulk_set_stage", target_id="bulk").exists())
+        self.assertTrue(AuditLog.objects.filter(action="project.bulk_delete", target_id="bulk").exists())
+
+    def test_admin_project_delete_physically_removes_project(self):
+        self.login_platform_admin()
+        project = Project.objects.create(
+            topic_id=9,
+            title="待物理删除课题",
+            summary="用于测试管理员物理删除。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        ProjectDocument.objects.create(
+            project=project,
+            doc_type=ProjectDocument.DocumentType.PDF,
+            document_kind=ProjectDocument.DocumentKind.DETAIL,
+            title="待删除 PDF",
+            path="media/project-documents/T0009/detail.pdf",
+        )
+
+        response = self.client.delete(f"/api/admin/projects/{project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"], {"id": project.pk, "deleted": True})
+        self.assertFalse(Project.objects.filter(pk=project.pk).exists())
+        self.assertFalse(ProjectDocument.objects.filter(project_id=project.pk).exists())
+        self.assertTrue(AuditLog.objects.filter(action="project.delete", target_id=str(project.pk)).exists())
+
     def test_admin_project_json_import_auto_assigns_incrementing_topic_ids(self):
         self.login_platform_admin()
 
@@ -1056,6 +1176,32 @@ class ApiTests(TestCase):
         self.assertEqual([item["project"]["topic_code"] for item in payload["results"]], ["T0003", "T0004"])
         self.assertEqual(Project.objects.get(topic_id=1).title, "纵向病例证据 RAG")
         self.assertEqual(Project.objects.get(topic_id=2).title, "已有第二个课题")
+
+    def test_admin_project_json_import_returns_validation_error_for_database_failures(self):
+        self.login_platform_admin()
+
+        with patch("api.ninja_api.upsert_project_with_instance", side_effect=ValueError("数据库保存失败")):
+            response = self.post_json(
+                "/api/admin/projects/import-json/",
+                {
+                    "projects": [
+                        {
+                            "theme": "FFA",
+                            "title": "触发保存异常",
+                            "summary": "数据库保存异常应返回 422。",
+                            "problem_statement": "导入失败应可读。",
+                            "clinical_endpoint": "错误反馈",
+                            "existing_foundation": "已有测试主题",
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "validation_error")
+        self.assertEqual(payload["error"]["details"][0]["row"], 1)
+        self.assertTrue(AuditLog.objects.filter(action="project.import_json", status="failed").exists())
 
     def test_admin_user_list_orders_platform_admin_first_then_uid(self):
         admin = self.login_platform_admin()

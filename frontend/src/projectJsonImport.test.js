@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, join, relative } from "node:path";
 import { test } from "node:test";
 
-import { parseProjectJsonImport, qualityCheckProjectPayload, selectedProjectJsonFiles, sortProjectImportRows, summarizeProjectImportFiles } from "./projectJsonImport.js";
+import { parseProjectJsonImport, projectImportFileKey, qualityCheckProjectPayload, selectedProjectJsonFiles, sortProjectImportRows, summarizeProjectImportFiles } from "./projectJsonImport.js";
 
 test("parseProjectJsonImport maps json array records to strict project payloads", () => {
   const text = JSON.stringify([
@@ -112,6 +115,41 @@ test("summarizeProjectImportFiles counts only project json and matching pdf file
   assert.deepEqual(jsonFiles.map((file) => file.name), ["001_topic.json", "002_topic.json", "metadata.json"]);
 });
 
+test("actual directory selection matches project json with same-name pdf", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openmedailab-import-"));
+  const sourceDir = join(root, "topics");
+  try {
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(join(sourceDir, "001_topic.json"), JSON.stringify(actualDirectoryProjectPayload()));
+    await writeFile(join(sourceDir, "001_topic.pdf"), "%PDF-1.4\n% matching pdf\n%%EOF\n");
+    await writeFile(join(sourceDir, "orphan.pdf"), "%PDF-1.4\n% ignored pdf\n%%EOF\n");
+    await writeFile(join(sourceDir, "notes.md"), "# ignored\n");
+
+    const files = await fileLikesFromDirectory(sourceDir, root);
+    const summary = summarizeProjectImportFiles(files);
+    const jsonFiles = selectedProjectJsonFiles(files);
+    const pdfFilesByKey = new Map(
+      files
+        .filter((file) => String(file.name || "").toLowerCase().endsWith(".pdf"))
+        .map((file) => [projectImportFileKey(file), file])
+    );
+    const rows = parseProjectJsonImport(await jsonFiles[0].text(), jsonFiles[0].webkitRelativePath);
+    const matchedPdf = pdfFilesByKey.get(projectImportFileKey(jsonFiles[0]));
+
+    assert.deepEqual(summary, {
+      totalFileCount: 4,
+      jsonFileCount: 1,
+      matchedPdfCount: 1,
+      ignoredFileCount: 2
+    });
+    assert.equal(rows[0].payload.title, "真实目录导入课题");
+    assert.equal(matchedPdf.name, "001_topic.pdf");
+    assert.equal(matchedPdf.webkitRelativePath, "topics/001_topic.pdf");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("sortProjectImportRows orders import preview by topic id", () => {
   const rows = [
     { payload: { topic_id: 100, title: "T0100" }, sourcePath: "topics/100.json" },
@@ -125,3 +163,33 @@ test("sortProjectImportRows orders import preview by topic id", () => {
     ["T0001", "T0002", "T0100", "未编号"]
   );
 });
+
+function actualDirectoryProjectPayload() {
+  return {
+    id: "T0001",
+    theme: "FFA",
+    title: "真实目录导入课题",
+    summary: "从真实目录选择 JSON 和同名 PDF。",
+    problem_statement: "目录上传是否可用",
+    clinical_endpoint: "成功导入",
+    existing_foundation: "已有 JSON 与 PDF"
+  };
+}
+
+async function fileLikesFromDirectory(directory, root) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    const fullPath = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await fileLikesFromDirectory(fullPath, root)));
+      continue;
+    }
+    files.push({
+      name: basename(fullPath),
+      webkitRelativePath: relative(root, fullPath),
+      text: async () => readFile(fullPath, "utf8")
+    });
+  }
+  return files;
+}

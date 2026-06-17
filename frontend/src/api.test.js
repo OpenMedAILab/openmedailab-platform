@@ -150,6 +150,7 @@ test("project lifecycle api exposes backend json import endpoint", async () => {
   assert.equal(typeof api.adminUpdateProject, "function");
   assert.equal(typeof api.adminProjects, "function");
   assert.equal(typeof api.adminBulkArchiveProjects, "function");
+  assert.equal(typeof api.adminBulkProjectAction, "function");
 });
 
 test("project lifecycle api reuses admin project update/delete instead of redundant stage wrappers", async () => {
@@ -167,6 +168,7 @@ test("project lifecycle api reuses admin project update/delete instead of redund
   assert.equal(typeof api.adminUpdateProject, "function");
   assert.equal(typeof api.adminDeleteProject, "function");
   assert.equal(typeof api.adminBulkArchiveProjects, "function");
+  assert.equal(typeof api.adminBulkProjectAction, "function");
 });
 
 function jsonResponse(status, payload) {

@@ -160,6 +160,7 @@ export const api = {
   adminUpdateProject: (id, payload) => request(`/api/admin/projects/${id}/`, { method: "PATCH", body: payload }),
   adminDeleteProject: (id) => request(`/api/admin/projects/${id}/`, { method: "DELETE", body: {} }),
   adminBulkArchiveProjects: (payload) => request("/api/admin/projects/bulk-archive/", { method: "POST", body: payload }),
+  adminBulkProjectAction: (payload) => request("/api/admin/projects/bulk-action/", { method: "POST", body: payload }),
   adminUploadProjectDocuments: (formData) => requestForm("/api/admin/project-documents/upload/", formData),
   adminDeleteProjectDocument: (id) => request(`/api/admin/project-documents/${id}/`, { method: "DELETE", body: {} })
 };
