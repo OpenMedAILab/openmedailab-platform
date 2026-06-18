@@ -828,7 +828,11 @@ def project_progress(request, project_id: int):
     include_private = can_view_project_private_content(request.user, project)
     documents = project_progress_documents_queryset(project, include_private)
     timeline = project_progress_entries_queryset(project, include_private)
-    return ok(project_progress_payload(project, documents, timeline))
+    data = project_progress_payload(project, documents, timeline)
+    data["project"]["claim_availability"] = claim_availability_payload(request.user, project)
+    if request.user.is_authenticated:
+        data["project"]["viewer_state"] = viewer_state(request.user, project)
+    return ok(data)
 
 
 @api.get("/projects/{project_id}/status-card/", response={200: Envelope, 404: ErrorEnvelope}, tags=["Projects"], auth=None)
@@ -3969,6 +3973,14 @@ def claim_type_label(claim_type):
     return dict(ClaimType.choices).get(claim_type, claim_type)
 
 
+def claim_relation_label(claim_type):
+    if claim_type == ClaimType.LEADER:
+        return "项目负责人认领"
+    if claim_type == ClaimType.PAPER_FIRST_UNIT:
+        return "论文第一单位认领"
+    return claim_type_label(claim_type)
+
+
 def active_claim_slot_queryset(project, claim_type):
     return ProjectClaimIntent.objects.filter(
         project=project,
@@ -3979,16 +3991,28 @@ def active_claim_slot_queryset(project, claim_type):
 
 def claim_availability_for_type(user, project, claim_type):
     label = claim_type_label(claim_type)
+    relation_label = claim_relation_label(claim_type)
     authenticated = bool(getattr(user, "is_authenticated", False))
     own_active = None
     if authenticated:
         own_active = active_claim_slot_queryset(project, claim_type).filter(user=user).first()
     if own_active:
+        if own_active.status == InteractionStatus.PENDING:
+            return {
+                "available": False,
+                "action": "pending",
+                "own_status": own_active.status,
+                "own_interaction_id": own_active.pk,
+                "reason_code": "own_pending",
+                "reason": f"你的{relation_label}正在管理员审批中，审批通过后可撤回{relation_label}。",
+            }
         return {
             "available": False,
             "action": "withdraw",
-            "reason_code": "own_active",
-            "reason": f"你已有{label}，可撤回后重新提交。",
+            "own_status": own_active.status,
+            "own_interaction_id": own_active.pk,
+            "reason_code": "own_approved",
+            "reason": f"你的{relation_label}已通过，可撤回{relation_label}。",
         }
     if not authenticated:
         return {

@@ -146,6 +146,40 @@ test("project cards and headers keep small-screen overflow guards", () => {
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.section-head h1\s*\{[\s\S]*?font-size:\s*30px;/);
 });
 
+test("self-related project cards align meta chips near the corner ribbon without overlap", () => {
+  const max980Start = stylesSource.indexOf("@media (max-width: 980px)");
+  const max640Start = stylesSource.indexOf("@media (max-width: 640px)");
+  const max980Block = stylesSource.slice(max980Start, max640Start);
+
+  assert.match(mainSource, /project-card-headline--self-related/);
+  assert.match(mainSource, /primarySelfRelationLabel\(project\)/);
+  assert.match(stylesSource, /\.project-card--self-related\s*\{[\s\S]*?padding-top:\s*108px;/);
+  assert.match(stylesSource, /\.project-card-headline\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;/);
+  assert.match(stylesSource, /\.project-card--self-related \.project-card-headline,\s*\.project-card-headline--self-related\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?top:\s*16px;[\s\S]*?left:\s*18px;[\s\S]*?right:\s*18px;[\s\S]*?align-items:\s*start;/);
+  assert.match(stylesSource, /\.project-card--self-related \.project-card-headline \.project-card-meta,\s*\.project-card-headline--self-related \.project-card-meta\s*\{[\s\S]*?padding-left:\s*56px;/);
+  assert.notEqual(max980Start, -1);
+  assert.notEqual(max640Start, -1);
+  assert.doesNotMatch(max980Block, /\.project-card-headline--self-related/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card--self-related\s*\{[\s\S]*?padding-top:\s*96px;/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card--self-related \.project-card-headline,\s*\.project-card-headline--self-related\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?top:\s*18px;[\s\S]*?left:\s*14px;[\s\S]*?right:\s*14px;/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card--self-related \.project-card-headline \.project-card-meta,\s*\.project-card-headline--self-related \.project-card-meta\s*\{[\s\S]*?padding-left:\s*56px;/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card-headline--self-related \.project-card-side\s*\{[\s\S]*?display:\s*none;/);
+});
+
+test("project interaction buttons use a compact responsive grid without stretching", () => {
+  assert.match(mainSource, /第一单位认领审批中/);
+  assert.match(mainSource, /项目负责人审批中/);
+  assert.match(mainSource, /claim-action-button/);
+  assert.match(mainSource, /sponsor-action-button/);
+  assert.match(stylesSource, /\.project-interaction-actions\s*\{[\s\S]*?display:\s*grid;[\s\S]*?grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(118px,\s*154px\)\);[\s\S]*?justify-content:\s*start;/);
+  assert.match(stylesSource, /\.project-interaction-actions button\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?white-space:\s*normal;/);
+  assert.match(stylesSource, /\.project-interaction-actions \.sponsor-action-button\s*\{[\s\S]*?border-color:\s*rgba\(217,\s*154,\s*24,\s*0\.4\);/);
+  assert.match(stylesSource, /\.interaction-button > span:last-child\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?overflow-wrap:\s*anywhere;/);
+  assert.match(stylesSource, /\.interaction-icon\s*\{[\s\S]*?flex:\s*0 0 auto;/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card-footer\s*\{[\s\S]*?align-items:\s*stretch;[\s\S]*?flex-direction:\s*column;/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/);
+});
+
 test("small-screen tab and chip rows wrap instead of hiding content horizontally", () => {
   assert.match(stylesSource, /\.admin-tabs\s*\{[\s\S]*?flex-wrap:\s*wrap;[\s\S]*?overflow:\s*visible;/);
   assert.match(stylesSource, /\.admin-tabs button\s*\{[\s\S]*?flex:\s*0 1 auto;/);
@@ -278,7 +312,8 @@ test("homepage theme selector uses image-backed topic cards", () => {
   assert.doesNotMatch(stylesSource, /\.theme-dropdown-card/);
   assert.doesNotMatch(stylesSource, /\.theme-dropdown\s*\{/);
   assert.match(stylesSource, /\.theme-dataset-link\s*\{/);
-  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.topic-theme-strip\.single-row\s*\{[\s\S]*?grid-template-columns:\s*repeat\(var\(--home-theme-columns\),\s*minmax\(0,\s*1fr\)\);/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.topic-theme-strip\.single-row\s*\{[\s\S]*?grid-template-columns:\s*none;[\s\S]*?grid-auto-flow:\s*column;[\s\S]*?grid-auto-columns:\s*minmax\(118px,\s*42vw\);[\s\S]*?overflow-x:\s*auto;/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.topic-theme-strip\.single-row \.topic-theme-card\s*\{[\s\S]*?scroll-snap-align:\s*start;/);
 });
 
 test("topbar exposes only aggregate platform stats", () => {
@@ -356,7 +391,7 @@ test("project cards keep compact summary UI without hover status styles", () => 
   assert.match(mainSource, /followButtonLabel\(project\)/);
   assert.match(mainSource, /leadClaimButtonLabel\(project\)/);
   assert.match(mainSource, /认领项目负责人/);
-  assert.match(mainSource, /已认领项目负责人/);
+  assert.match(mainSource, /项目负责人审批中/);
   assert.match(mainSource, /认领第一单位/);
   assert.doesNotMatch(mainSource, />Lead</);
   assert.match(mainSource, /sponsorButtonLabel\(project\)/);
@@ -380,8 +415,8 @@ test("project cards keep compact summary UI without hover status styles", () => 
   assert.match(stylesSource, /\.project-card--self-related:hover::before\s*\{[\s\S]*?#d99a18/);
   assert.match(stylesSource, /\.project-status-row\s*\{[\s\S]*?grid-template-columns:\s*38px minmax\(0,\s*1fr\);/);
   assert.match(stylesSource, /\.project-role-chip-row\s*\{[\s\S]*?display:\s*flex;/);
-  assert.match(stylesSource, /\.project-interaction-actions\s*\{[\s\S]*?display:\s*flex;[\s\S]*?justify-content:\s*flex-start;/);
-  assert.match(stylesSource, /\.project-interaction-actions button\s*\{[\s\S]*?flex:\s*0 0 108px;/);
+  assert.match(stylesSource, /\.project-interaction-actions\s*\{[\s\S]*?display:\s*grid;[\s\S]*?justify-content:\s*start;/);
+  assert.match(stylesSource, /\.project-interaction-actions button\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-width:\s*0;/);
   assert.match(stylesSource, /\.interaction-icon\s*\{[\s\S]*?font-variation-settings:\s*"FILL" 0/);
   assert.match(stylesSource, /\.interaction-button\.interaction-active \.interaction-icon,[\s\S]*?\.follow-button\.active \.interaction-icon\s*\{[\s\S]*?font-variation-settings:\s*"FILL" 1/);
   assert.match(stylesSource, /\.interaction-button\.interaction-active\s*\{/);
@@ -501,6 +536,21 @@ test("project lifecycle actions are gated by project stage and review status", (
   assert.match(mainSource, /claimRequestsByProjectId:\s*\{\}/);
   assert.match(mainSource, /function withdrawLeadClaim\(project\)/);
   assert.match(mainSource, /api\.withdrawInteraction\("claim",\s*request\.id/);
+  assert.match(mainSource, /function isClaimPending\(request\)/);
+  assert.match(mainSource, /function isClaimApproved\(request\)/);
+  assert.match(mainSource, /async function withdrawLeadClaim\(project\)[\s\S]*?!request\?\.id \|\| !isClaimApproved\(request\)/);
+  assert.match(mainSource, /async function withdrawPaperClaim\(project\)[\s\S]*?!request\?\.id \|\| !isClaimApproved\(request\)/);
+  assert.match(mainSource, /function claimRequestFromAvailability\(project,\s*claimType\)/);
+  assert.match(mainSource, /function hasClaimAvailability\(project,\s*claimType\)/);
+  assert.match(mainSource, /own_interaction_id/);
+  assert.match(mainSource, /syncProjectClaimAvailability\(project\)/);
+  assert.match(mainSource, /applyProjectClaimAvailability\(item,\s*savedClaim\)/);
+  assert.match(mainSource, /reason_code:\s*"own_pending"/);
+  assert.match(mainSource, /reason_code:\s*"own_approved"/);
+  assert.match(mainSource, /if \(action === "pending"\)[\s\S]*?showClaimUnavailableFeedback\(event,\s*project,\s*"leader"\)/);
+  assert.match(mainSource, /if \(action === "pending"\)[\s\S]*?showClaimUnavailableFeedback\(event,\s*project,\s*"paper_first_unit"\)/);
+  assert.match(mainSource, /项目负责人审批中/);
+  assert.match(mainSource, /第一单位认领审批中/);
   assert.match(mainSource, /撤回项目负责人认领/);
   assert.match(mainSource, /已撤回项目负责人认领/);
   assert.match(mainSource, /撤回论文第一单位认领/);
@@ -525,6 +575,16 @@ test("project lifecycle actions are gated by project stage and review status", (
   assert.match(mainSource, /取消参与/);
   assert.match(mainSource, /function refreshProjectStatus\(project\)/);
   assert.match(mainSource, /api\.projectStatusCard\(id\)/);
+  assert.match(mainSource, /const SPONSOR_POPOVER_HEIGHT = 420;/);
+  assert.match(mainSource, /function sponsorPopoverPositionFromTrigger\(trigger,\s*popoverSize = \{\}\)/);
+  assert.match(mainSource, /function realignSponsorPopoverFromRenderedSize\(trigger = state\.sponsorModal\.returnFocus\)/);
+  assert.match(mainSource, /document\.querySelector\("\.sponsor-popover"\)\?\.getBoundingClientRect\?\.\(\)/);
+  assert.match(mainSource, /width:\s*popoverRect\.width,[\s\S]*?height:\s*popoverRect\.height/);
+  assert.match(mainSource, /sponsorPopoverPositionFromTrigger\(trigger,\s*renderedSize\)/);
+  assert.match(mainSource, /realignSponsorPopoverFromRenderedSize\(state\.sponsorModal\.returnFocus\);[\s\S]*?document\.querySelector\("\.sponsor-popover input:not\(:disabled\)"\)\?\.focus\(\);/);
+  assert.match(mainSource, /function handleSponsorPopoverViewportChange\(\)[\s\S]*?realignSponsorPopoverFromRenderedSize\(\)/);
+  assert.match(mainSource, /window\.addEventListener\("resize",\s*handleSponsorPopoverViewportChange\)/);
+  assert.match(mainSource, /window\.removeEventListener\("resize",\s*handleSponsorPopoverViewportChange\)/);
   assert.match(mainSource, /await refreshProjectStatus\(project\)/);
   assert.match(mainSource, /if \(roleType === "phd_or_above"\) return "大学老师";/);
   assert.match(mainSource, /function participationRoleForCurrentUser\(\)[\s\S]*?return "学生";[\s\S]*?function markProjectInterestSubmitted/);
@@ -725,8 +785,8 @@ test("business modals use an explicit z-index scale and close competing overlays
   assert.match(stylesSource, /\.project-form-modal\s*\{[\s\S]*?z-index:\s*300;/);
   assert.match(stylesSource, /\.task-result-modal,\s*\.task-detail-modal\s*\{[\s\S]*?z-index:\s*320;/);
   assert.match(stylesSource, /\.confirm-modal-backdrop\s*\{[\s\S]*?z-index:\s*900;/);
-  assert.match(indexSource, new RegExp(`href="/src/styles\\.css\\?v=${packageJson.version}"`));
-  assert.match(indexSource, new RegExp(`src="/src/main\\.js\\?v=${packageJson.version}"`));
+  assert.match(indexSource, new RegExp(`href="/src/styles\\.css\\?v=${packageJson.version}(?:-[^"]+)?"`));
+  assert.match(indexSource, new RegExp(`src="/src/main\\.js\\?v=${packageJson.version}(?:-[^"]+)?"`));
 });
 
 test("legacy approved-project handoff helpers are not returned as product entry points", () => {

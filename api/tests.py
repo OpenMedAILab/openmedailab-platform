@@ -2209,8 +2209,36 @@ class ApiTests(TestCase):
         own_response = self.client.get(f"/api/projects/{self.project.pk}/status-card/")
         self.assertEqual(own_response.status_code, 200)
         own_availability = own_response.json()["data"]["claim_availability"]["leader"]
-        self.assertEqual(own_availability["action"], "withdraw")
-        self.assertEqual(own_availability["reason_code"], "own_active")
+        self.assertEqual(own_availability["action"], "pending")
+        self.assertEqual(own_availability["reason_code"], "own_pending")
+        self.assertEqual(own_availability["own_status"], InteractionStatus.PENDING)
+        self.assertEqual(own_availability["own_interaction_id"], ProjectClaimIntent.objects.get(user=claimant, project=self.project).pk)
+        self.assertIn("项目负责人认领正在管理员审批中", own_availability["reason"])
+
+        ProjectClaimIntent.objects.filter(user=claimant, project=self.project, claim_type="leader").update(
+            status=InteractionStatus.APPROVED,
+        )
+        approved_response = self.client.get(f"/api/projects/{self.project.pk}/status-card/")
+        self.assertEqual(approved_response.status_code, 200)
+        approved_availability = approved_response.json()["data"]["claim_availability"]["leader"]
+        self.assertEqual(approved_availability["action"], "withdraw")
+        self.assertEqual(approved_availability["reason_code"], "own_approved")
+        self.assertEqual(approved_availability["own_status"], InteractionStatus.APPROVED)
+        self.assertIn("可撤回项目负责人认领", approved_availability["reason"])
+
+        ProjectClaimIntent.objects.create(
+            user=claimant,
+            project=self.project,
+            claim_type="paper_first_unit",
+            claimed_unit_name="中山大学附属第一医院",
+            status=InteractionStatus.PENDING,
+        )
+        progress_response = self.client.get(f"/api/projects/{self.project.pk}/progress/")
+        self.assertEqual(progress_response.status_code, 200)
+        progress_project = progress_response.json()["data"]["project"]
+        self.assertEqual(progress_project["claim_availability"]["leader"]["action"], "withdraw")
+        self.assertEqual(progress_project["claim_availability"]["paper_first_unit"]["action"], "pending")
+        self.assertIn("paper_first_unit", progress_project["viewer_state"]["claim_types"])
 
         other = User.objects.create_user(username="availabilityother", email="availabilityother@example.com", password="StrongPass12345")
         self.client.force_login(other)

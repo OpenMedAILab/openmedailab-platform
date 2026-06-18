@@ -13,7 +13,12 @@ const RECRUITING_STAGE_VALUES = new Set(["open_recruiting", "team_building"]);
 const TASK_MANAGEMENT_STAGE_VALUES = ["team_building", "active", "paused"];
 const RELATION_STATUS_PRIORITY = { approved: 4, pending: 3, rejected: 2, withdrawn: 1 };
 const WITHDRAWABLE_PARTICIPATION_STATUSES = new Set(["pending", "approved"]);
+const WITHDRAWABLE_CLAIM_STATUSES = new Set(["approved"]);
 const QUICK_SPONSOR_TYPES = ["labor_fee", "compute"];
+const SPONSOR_POPOVER_WIDTH = 320;
+const SPONSOR_POPOVER_HEIGHT = 420;
+const SPONSOR_POPOVER_GAP = 10;
+const SPONSOR_POPOVER_EDGE_GAP = 12;
 const SELF_RELATION_PRIORITY = ["claim", "participation", "sponsor"];
 const SELF_RELATION_LABELS = {
   claim: "我已认领",
@@ -26,6 +31,38 @@ const RELATION_STATUS_LABELS = {
   rejected: "被拒绝",
   withdrawn: "已撤回"
 };
+
+function clampNumber(value, min, max) {
+  return Math.min(Math.max(value, min), Math.max(min, max));
+}
+
+function sponsorPopoverPositionFromTrigger(trigger, popoverSize = {}) {
+  const viewportWidth = window.innerWidth || SPONSOR_POPOVER_WIDTH + SPONSOR_POPOVER_EDGE_GAP * 2;
+  const viewportHeight = window.innerHeight || SPONSOR_POPOVER_HEIGHT + SPONSOR_POPOVER_EDGE_GAP * 2;
+  const preferredWidth = Number(popoverSize.width) || SPONSOR_POPOVER_WIDTH;
+  const preferredHeight = Number(popoverSize.height) || SPONSOR_POPOVER_HEIGHT;
+  const width = Math.min(preferredWidth, Math.max(0, viewportWidth - SPONSOR_POPOVER_EDGE_GAP * 2));
+  const height = Math.min(preferredHeight, Math.max(0, viewportHeight - SPONSOR_POPOVER_EDGE_GAP * 2));
+  const rect = trigger?.getBoundingClientRect?.();
+
+  if (!rect) {
+    return { x: SPONSOR_POPOVER_EDGE_GAP, y: SPONSOR_POPOVER_EDGE_GAP };
+  }
+
+  const x = clampNumber(
+    rect.left + rect.width / 2 - width / 2,
+    SPONSOR_POPOVER_EDGE_GAP,
+    viewportWidth - width - SPONSOR_POPOVER_EDGE_GAP
+  );
+  const belowY = rect.bottom + SPONSOR_POPOVER_GAP;
+  const aboveY = rect.top - height - SPONSOR_POPOVER_GAP;
+  const shouldOpenAbove = belowY + height > viewportHeight - SPONSOR_POPOVER_EDGE_GAP && aboveY >= SPONSOR_POPOVER_EDGE_GAP;
+  const y = shouldOpenAbove
+    ? aboveY
+    : clampNumber(belowY, SPONSOR_POPOVER_EDGE_GAP, viewportHeight - height - SPONSOR_POPOVER_EDGE_GAP);
+
+  return { x, y };
+}
 const SIDEBAR_QR_ENTRIES = [
   { key: "admin-contact", label: "联系管理员", image: "", icon: "support_agent" },
   { key: "community", label: "加入社区", image: "", icon: "group_add" }
@@ -396,6 +433,7 @@ const App = {
       window.addEventListener("scroll", handleScroll, { passive: true });
       window.addEventListener("keydown", handleKeydown);
       window.addEventListener("pointermove", handlePointerMove, { passive: true });
+      window.addEventListener("resize", handleSponsorPopoverViewportChange);
       await boot();
     });
 
@@ -404,6 +442,7 @@ const App = {
       window.removeEventListener("scroll", handleScroll);
       window.removeEventListener("keydown", handleKeydown);
       window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("resize", handleSponsorPopoverViewportChange);
       document.body.classList.remove("modal-open");
     });
 
@@ -1798,6 +1837,10 @@ const App = {
         showClaimUnavailableFeedback(event, project, "leader");
         return;
       }
+      if (action === "pending") {
+        showClaimUnavailableFeedback(event, project, "leader");
+        return;
+      }
       if (!ensureLogin()) return;
       if (action === "withdraw") {
         await withdrawLeadClaim(project);
@@ -1828,7 +1871,7 @@ const App = {
     async function withdrawLeadClaim(project) {
       if (!ensureLogin()) return;
       const request = claimRequestForProject(project);
-      if (!request?.id || !isActiveParticipationRequest(request)) {
+      if (!request?.id || !isClaimApproved(request)) {
         showToast("没有可撤回的项目负责人认领");
         return;
       }
@@ -1852,6 +1895,10 @@ const App = {
     async function submitPaperClaim(project, event = null) {
       const action = claimAvailabilityAction(project, "paper_first_unit");
       if (action === "unavailable") {
+        showClaimUnavailableFeedback(event, project, "paper_first_unit");
+        return;
+      }
+      if (action === "pending") {
         showClaimUnavailableFeedback(event, project, "paper_first_unit");
         return;
       }
@@ -1912,7 +1959,7 @@ const App = {
     async function withdrawPaperClaim(project) {
       if (!ensureLogin()) return;
       const request = paperClaimRequestForProject(project);
-      if (!request?.id || !isActiveParticipationRequest(request)) {
+      if (!request?.id || !isClaimApproved(request)) {
         showToast("没有可撤回的论文第一单位认领");
         return;
       }
@@ -1933,6 +1980,26 @@ const App = {
       }
     }
 
+    function realignSponsorPopoverFromRenderedSize(trigger = state.sponsorModal.returnFocus) {
+      if (!state.sponsorModal.open) return;
+      const popoverRect = document.querySelector(".sponsor-popover")?.getBoundingClientRect?.();
+      const renderedSize = popoverRect
+        ? {
+          width: popoverRect.width,
+          height: popoverRect.height
+        }
+        : {};
+      const position = sponsorPopoverPositionFromTrigger(trigger, renderedSize);
+      if (Math.abs(state.sponsorModal.x - position.x) > 1 || Math.abs(state.sponsorModal.y - position.y) > 1) {
+        state.sponsorModal.x = position.x;
+        state.sponsorModal.y = position.y;
+      }
+    }
+
+    function handleSponsorPopoverViewportChange() {
+      realignSponsorPopoverFromRenderedSize();
+    }
+
     async function submitSponsor(project, event = null) {
       if (!ensureLogin()) return;
       if (!project?.id) {
@@ -1951,13 +2018,14 @@ const App = {
         sponsor_types: activeTypes.filter((type) => QUICK_SPONSOR_TYPES.includes(type)),
         note: ""
       };
-      const rect = event?.currentTarget?.getBoundingClientRect?.();
+      const popoverPosition = sponsorPopoverPositionFromTrigger(event?.currentTarget);
       state.sponsorModal.open = true;
       state.sponsorModal.project = project;
       state.sponsorModal.returnFocus = event?.currentTarget || null;
-      state.sponsorModal.x = rect ? Math.min(Math.max(12, window.innerWidth - 352), Math.max(12, rect.left)) : 24;
-      state.sponsorModal.y = rect ? Math.min(Math.max(12, window.innerHeight - 280), Math.max(12, rect.bottom + 8)) : 120;
+      state.sponsorModal.x = popoverPosition.x;
+      state.sponsorModal.y = popoverPosition.y;
       nextTick(() => {
+        realignSponsorPopoverFromRenderedSize(state.sponsorModal.returnFocus);
         document.querySelector(".sponsor-popover input:not(:disabled)")?.focus();
       });
     }
@@ -2145,8 +2213,8 @@ const App = {
         project: claim?.project || project,
         claim_type: claim?.claim_type || "leader",
         claim_type_label: claim?.claim_type_label || "认领项目负责人",
-        status: claim?.status || "approved",
-        status_label: claim?.status_label || "已通过"
+        status: claim?.status || "pending",
+        status_label: claim?.status_label || "待处理"
       };
       state.claimRequestsByProjectId = {
         ...state.claimRequestsByProjectId,
@@ -2154,6 +2222,7 @@ const App = {
       };
       const targets = projectTargets(id, project);
       targets.forEach((item) => {
+        applyProjectClaimAvailability(item, savedClaim);
         const claimTypes = new Set(item.viewer_state?.claim_types || []);
         claimTypes.add(savedClaim.claim_type);
         item.viewer_state = {
@@ -2192,7 +2261,10 @@ const App = {
           item.id === savedClaim.id ? savedClaim : item
         ));
       }
-      projectTargets(id, project).forEach((item) => clearProjectLeadClaimViewerState(item));
+      projectTargets(id, project).forEach((item) => {
+        clearProjectAvailability(item, "leader");
+        clearProjectLeadClaimViewerState(item);
+      });
     }
 
     function markProjectPaperClaimed(project, claim = null) {
@@ -2212,6 +2284,7 @@ const App = {
         [id]: savedClaim
       };
       projectTargets(id, project).forEach((item) => {
+        applyProjectClaimAvailability(item, savedClaim);
         const claimTypes = new Set(item.viewer_state?.claim_types || []);
         claimTypes.add(savedClaim.claim_type);
         item.viewer_state = {
@@ -2250,7 +2323,10 @@ const App = {
           item.id === savedClaim.id ? savedClaim : item
         ));
       }
-      projectTargets(id, project).forEach((item) => clearProjectPaperClaimViewerState(item));
+      projectTargets(id, project).forEach((item) => {
+        clearProjectAvailability(item, "paper_first_unit");
+        clearProjectPaperClaimViewerState(item);
+      });
     }
 
     function markProjectSponsorSubmitted(project, request = null) {
@@ -2377,6 +2453,7 @@ const App = {
 
     function applyProjectViewerState(project) {
       if (!project) return;
+      syncProjectClaimAvailability(project);
       const participationRequest = participationRequestForProject(project);
       const claimRequest = claimRequestForProject(project);
       const paperClaimRequest = paperClaimRequestForProject(project);
@@ -2391,14 +2468,14 @@ const App = {
       const claimTypes = new Set(project.viewer_state?.claim_types || []);
       const sponsorTypes = new Set(project.viewer_state?.sponsor_types || []);
       if (claimRequest?.claim_type === "leader") {
-        if (isActiveParticipationRequest(claimRequest)) {
+        if (isActiveClaimRequest(claimRequest)) {
           claimTypes.add("leader");
         } else {
           claimTypes.delete("leader");
         }
       }
       if (paperClaimRequest?.claim_type === "paper_first_unit") {
-        if (isActiveParticipationRequest(paperClaimRequest)) {
+        if (isActiveClaimRequest(paperClaimRequest)) {
           claimTypes.add("paper_first_unit");
         } else {
           claimTypes.delete("paper_first_unit");
@@ -2429,10 +2506,10 @@ const App = {
       if (isActiveParticipationRequest(participationRequest)) {
         project.viewer_state.relationship_labels = [...new Set([...project.viewer_state.relationship_labels, participationRelationshipLabel(participationRequest)])];
       }
-      if (isActiveParticipationRequest(claimRequest) && claimRequest.claim_type === "leader") {
+      if (isActiveClaimRequest(claimRequest) && claimRequest.claim_type === "leader") {
         project.viewer_state.relationship_labels = [...new Set([...project.viewer_state.relationship_labels, leadClaimRelationshipLabel(claimRequest)])];
       }
-      if (isActiveParticipationRequest(paperClaimRequest) && paperClaimRequest.claim_type === "paper_first_unit") {
+      if (isActiveClaimRequest(paperClaimRequest) && paperClaimRequest.claim_type === "paper_first_unit") {
         project.viewer_state.relationship_labels = [...new Set([...project.viewer_state.relationship_labels, paperClaimRelationshipLabel(paperClaimRequest)])];
       }
       sponsorRequests
@@ -2551,8 +2628,28 @@ const App = {
     }
 
     function claimAvailability(project, claimType) {
+      const authoritativeAvailability = project?.claim_availability?.[claimType];
+      if (authoritativeAvailability) return authoritativeAvailability;
+      const request = claimType === "paper_first_unit" ? paperClaimRequestForProject(project) : claimRequestForProject(project);
+      const label = claimType === "leader" ? "项目负责人认领" : "论文第一单位认领";
+      if (isClaimPending(request)) {
+        return {
+          available: false,
+          action: "pending",
+          reason_code: "own_pending",
+          reason: `你的${label}正在管理员审批中，审批通过后可撤回${label}。`
+        };
+      }
+      if (isClaimApproved(request)) {
+        return {
+          available: false,
+          action: "withdraw",
+          reason_code: "own_approved",
+          reason: `你的${label}已通过，可撤回${label}。`
+        };
+      }
       const fallbackAvailable = canRecruitProject(project) && !isClaimTypeLocallyClaimed(project, claimType);
-      return project?.claim_availability?.[claimType] || {
+      return {
         available: fallbackAvailable,
         action: fallbackAvailable ? "submit" : "unavailable",
         reason_code: fallbackAvailable ? "available" : "stage_not_recruiting",
@@ -2561,8 +2658,6 @@ const App = {
     }
 
     function claimAvailabilityAction(project, claimType) {
-      if (claimType === "leader" && leadClaimCanWithdraw(project)) return "withdraw";
-      if (claimType === "paper_first_unit" && paperClaimCanWithdraw(project)) return "withdraw";
       return claimAvailability(project, claimType).action || "unavailable";
     }
 
@@ -2570,6 +2665,8 @@ const App = {
       const availability = claimAvailability(project, claimType);
       const label = claimType === "leader" ? "项目负责人认领" : "论文第一单位认领";
       const reasonByCode = {
+        own_pending: `你的${label}正在管理员审批中，审批通过后可撤回${label}。`,
+        own_approved: `你的${label}已通过，可撤回${label}。`,
         own_active: `你的${label}正在审核或已通过。`,
         login_required: `登录后可提交${label}。`,
         stage_not_recruiting: `当前阶段暂不接受${label}。`,
@@ -2581,7 +2678,8 @@ const App = {
     }
 
     function showClaimReasonTooltip(event, project, claimType) {
-      if (claimAvailabilityAction(project, claimType) !== "unavailable") {
+      const action = claimAvailabilityAction(project, claimType);
+      if (!["pending", "unavailable"].includes(action)) {
         hideClaimReasonTooltip();
         return;
       }
@@ -2606,7 +2704,7 @@ const App = {
     }
 
     function claimButtonAriaDisabled(project, claimType) {
-      return claimAvailabilityAction(project, claimType) === "unavailable" ? "true" : "false";
+      return ["pending", "unavailable"].includes(claimAvailabilityAction(project, claimType)) ? "true" : "false";
     }
 
     function isClaimTypeLocallyClaimed(project, claimType) {
@@ -2618,18 +2716,22 @@ const App = {
     function leadClaimButtonLabel(project) {
       if (isWithdrawingLeadClaim(project)) return "撤回中...";
       if (isSubmittingLeadClaim(project)) return "提交中...";
-      if (claimAvailabilityAction(project, "leader") === "withdraw") return "撤回项目负责人认领";
-      if (isLeadClaimed(project)) return "已认领项目负责人";
-      if (claimAvailabilityAction(project, "leader") === "unavailable") return "暂不认领";
+      const action = claimAvailabilityAction(project, "leader");
+      if (action === "pending") return "项目负责人审批中";
+      if (action === "withdraw") return "撤回项目负责人认领";
+      if (action === "unavailable") return "暂不认领";
+      if (isLeadClaimed(project)) return "项目负责人审批中";
       return "认领项目负责人";
     }
 
     function paperClaimButtonLabel(project) {
       if (isWithdrawingPaperClaim(project)) return "撤回中...";
       if (isSubmittingPaperClaim(project)) return "提交中...";
-      if (claimAvailabilityAction(project, "paper_first_unit") === "withdraw") return "撤回论文第一单位认领";
-      if (isPaperClaimed(project)) return "已认领第一单位";
-      if (claimAvailabilityAction(project, "paper_first_unit") === "unavailable") return "暂不认领";
+      const action = claimAvailabilityAction(project, "paper_first_unit");
+      if (action === "pending") return "第一单位认领审批中";
+      if (action === "withdraw") return "撤回论文第一单位认领";
+      if (action === "unavailable") return "暂不认领";
+      if (isPaperClaimed(project)) return "第一单位认领审批中";
       return "认领第一单位";
     }
 
@@ -2654,22 +2756,118 @@ const App = {
 
     function claimRequestForProject(project) {
       const id = project?.id;
-      return id ? state.claimRequestsByProjectId[id] || null : null;
+      return claimRequestFromAvailability(project, "leader") || (hasClaimAvailability(project, "leader") ? null : (id ? state.claimRequestsByProjectId[id] || null : null));
     }
 
     function leadClaimCanWithdraw(project) {
       const request = claimRequestForProject(project);
-      return request?.claim_type === "leader" && isActiveParticipationRequest(request);
+      return request?.claim_type === "leader" && isClaimApproved(request);
     }
 
     function paperClaimRequestForProject(project) {
       const id = project?.id;
-      return id ? state.paperClaimRequestsByProjectId[id] || null : null;
+      return claimRequestFromAvailability(project, "paper_first_unit") || (hasClaimAvailability(project, "paper_first_unit") ? null : (id ? state.paperClaimRequestsByProjectId[id] || null : null));
     }
 
     function paperClaimCanWithdraw(project) {
       const request = paperClaimRequestForProject(project);
-      return request?.claim_type === "paper_first_unit" && isActiveParticipationRequest(request);
+      return request?.claim_type === "paper_first_unit" && isClaimApproved(request);
+    }
+
+    function isClaimPending(request) {
+      return request?.status === "pending";
+    }
+
+    function isClaimApproved(request) {
+      return Boolean(request?.status && WITHDRAWABLE_CLAIM_STATUSES.has(request.status));
+    }
+
+    function isActiveClaimRequest(request) {
+      return isClaimPending(request) || isClaimApproved(request);
+    }
+
+    function claimRequestFromAvailability(project, claimType) {
+      const availability = project?.claim_availability?.[claimType];
+      if (!project?.id || !availability?.own_interaction_id || !availability?.own_status) return null;
+      const previous = claimType === "paper_first_unit"
+        ? state.paperClaimRequestsByProjectId[project.id]
+        : state.claimRequestsByProjectId[project.id];
+      return {
+        ...(previous || {}),
+        id: availability.own_interaction_id,
+        project,
+        claim_type: claimType,
+        claim_type_label: claimTypeLabel(claimType),
+        status: availability.own_status,
+        status_label: claimStatusLabel(availability.own_status)
+      };
+    }
+
+    function hasClaimAvailability(project, claimType) {
+      return Boolean(project?.claim_availability && Object.prototype.hasOwnProperty.call(project.claim_availability, claimType));
+    }
+
+    function syncProjectClaimAvailability(project) {
+      if (!project?.id) return;
+      ["leader", "paper_first_unit"].forEach((claimType) => {
+        const request = claimRequestFromAvailability(project, claimType);
+        if (!request) return;
+        if (claimType === "paper_first_unit") {
+          state.paperClaimRequestsByProjectId = {
+            ...state.paperClaimRequestsByProjectId,
+            [project.id]: request
+          };
+        } else {
+          state.claimRequestsByProjectId = {
+            ...state.claimRequestsByProjectId,
+            [project.id]: request
+          };
+        }
+      });
+    }
+
+    function applyProjectClaimAvailability(project, request) {
+      if (!project?.id || !request?.claim_type || !["pending", "approved"].includes(request.status)) return;
+      project.claim_availability = {
+        ...(project.claim_availability || {}),
+        [request.claim_type]: {
+          available: false,
+          action: request.status === "approved" ? "withdraw" : "pending",
+          own_status: request.status,
+          own_interaction_id: request.id,
+          reason_code: request.status === "approved" ? "own_approved" : "own_pending",
+          reason: claimAvailabilityReason(request.claim_type, request.status)
+        }
+      };
+    }
+
+    function clearProjectAvailability(project, claimType) {
+      if (!project?.claim_availability?.[claimType]) return;
+      const { [claimType]: _removed, ...rest } = project.claim_availability;
+      project.claim_availability = rest;
+    }
+
+    function claimTypeLabel(claimType) {
+      return claimType === "paper_first_unit" ? "认领课题（论文第一单位）" : "认领项目负责人";
+    }
+
+    function claimRelationLabel(claimType) {
+      return claimType === "paper_first_unit" ? "论文第一单位认领" : "项目负责人认领";
+    }
+
+    function claimStatusLabel(status) {
+      return {
+        pending: "待处理",
+        approved: "已通过",
+        rejected: "已拒绝",
+        withdrawn: "已撤回"
+      }[status] || RELATION_STATUS_LABELS[status] || status;
+    }
+
+    function claimAvailabilityReason(claimType, status) {
+      const label = claimRelationLabel(claimType);
+      if (status === "approved") return `你的${label}已通过，可撤回${label}。`;
+      return `你的${label}正在管理员审批中，审批通过后可撤回${label}。`;
     }
 
     function isActiveParticipationRequest(request) {
@@ -4958,29 +5156,29 @@ const App = {
                 :class="['project-card project-list-card project-catalog-card', { 'project-card--self-related': hasSelfRelation(project) }]"
               >
                 <span v-if="primarySelfRelationLabel(project)" class="self-relation-corner">{{ primarySelfRelationLabel(project) }}</span>
-                <div class="project-list-main">
-                  <div class="project-card-top">
-                    <div class="project-card-meta">
-                      <span v-for="label in secondarySelfRelationLabels(project)" :key="label" class="self-relation-inline-chip">{{ label }}</span>
-                      <span>{{ topicCode(project) }}</span>
-                      <span>{{ project.theme?.name || '未分类' }}</span>
-                      <span class="project-stage-chip" :class="projectStageTone(project)">{{ project.stage_label }}</span>
-                      <span class="project-funding-chip" :class="{ funded: projectFundingReady(project) }">{{ projectFundingLabel(project) }}</span>
-                    </div>
-                    <div class="project-card-side">
-                      <dl class="project-card-counts" aria-label="课题互动统计">
-                        <div><dt>点赞</dt><dd>{{ project.score_count || 0 }}</dd></div>
-                        <div><dt>关注</dt><dd>{{ project.follow_count || 0 }}</dd></div>
-                      </dl>
-                      <span class="project-card-uploader contact-hover-trigger" tabindex="0">
-                        {{ projectCreatorLabel(project) }}
-                        <span v-if="projectCreatorContact(project)" class="contact-hover-card creator-contact-card">
-                          <strong>{{ contactName(projectCreatorContact(project)) }}</strong>
-                          <small>{{ contactWechatText(projectCreatorContact(project)) }}</small>
-                        </span>
-                      </span>
-                    </div>
+                <div :class="['project-card-headline', { 'project-card-headline--self-related': primarySelfRelationLabel(project) }]">
+                  <div class="project-card-meta">
+                    <span v-for="label in secondarySelfRelationLabels(project)" :key="label" class="self-relation-inline-chip">{{ label }}</span>
+                    <span>{{ topicCode(project) }}</span>
+                    <span>{{ project.theme?.name || '未分类' }}</span>
+                    <span class="project-stage-chip" :class="projectStageTone(project)">{{ project.stage_label }}</span>
+                    <span class="project-funding-chip" :class="{ funded: projectFundingReady(project) }">{{ projectFundingLabel(project) }}</span>
                   </div>
+                  <div class="project-card-side">
+                    <dl class="project-card-counts" aria-label="课题互动统计">
+                      <div><dt>点赞</dt><dd>{{ project.score_count || 0 }}</dd></div>
+                      <div><dt>关注</dt><dd>{{ project.follow_count || 0 }}</dd></div>
+                    </dl>
+                    <span class="project-card-uploader contact-hover-trigger" tabindex="0">
+                      {{ projectCreatorLabel(project) }}
+                      <span v-if="projectCreatorContact(project)" class="contact-hover-card creator-contact-card">
+                        <strong>{{ contactName(projectCreatorContact(project)) }}</strong>
+                        <small>{{ contactWechatText(projectCreatorContact(project)) }}</small>
+                      </span>
+                    </span>
+                  </div>
+                </div>
+                <div class="project-list-main">
                   <h3>
                     <a class="project-title-link" :href="projectDetailHref(project)" @click.prevent="navigate('project', { id: project.id })">{{ project.title }}</a>
                   </h3>
@@ -5039,15 +5237,15 @@ const App = {
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">groups</span>
                       <span>{{ participationButtonLabel(project) }}</span>
                     </button>
-                    <button class="ghost-button interaction-button" :class="{ 'interaction-active': interactionButtonActive('lead', project) }" type="button" :disabled="!canClickLeadClaim(project)" :aria-disabled="claimButtonAriaDisabled(project, 'leader')" @mouseenter="showClaimReasonTooltip($event, project, 'leader')" @focus="showClaimReasonTooltip($event, project, 'leader')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click.stop="submitLeadClaim(project, $event)">
+                    <button class="ghost-button interaction-button claim-action-button" :class="{ 'interaction-active': interactionButtonActive('lead', project) }" type="button" :disabled="!canClickLeadClaim(project)" :aria-disabled="claimButtonAriaDisabled(project, 'leader')" @mouseenter="showClaimReasonTooltip($event, project, 'leader')" @focus="showClaimReasonTooltip($event, project, 'leader')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click.stop="submitLeadClaim(project, $event)">
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">supervisor_account</span>
                       <span>{{ leadClaimButtonLabel(project) }}</span>
                     </button>
-                    <button class="ghost-button interaction-button" :class="{ 'interaction-active': interactionButtonActive('paper', project) }" type="button" :disabled="!canClickPaperClaim(project)" :aria-disabled="claimButtonAriaDisabled(project, 'paper_first_unit')" @mouseenter="showClaimReasonTooltip($event, project, 'paper_first_unit')" @focus="showClaimReasonTooltip($event, project, 'paper_first_unit')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click.stop="submitPaperClaim(project, $event)">
+                    <button class="ghost-button interaction-button claim-action-button" :class="{ 'interaction-active': interactionButtonActive('paper', project) }" type="button" :disabled="!canClickPaperClaim(project)" :aria-disabled="claimButtonAriaDisabled(project, 'paper_first_unit')" @mouseenter="showClaimReasonTooltip($event, project, 'paper_first_unit')" @focus="showClaimReasonTooltip($event, project, 'paper_first_unit')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click.stop="submitPaperClaim(project, $event)">
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">workspace_premium</span>
                       <span>{{ paperClaimButtonLabel(project) }}</span>
                     </button>
-                    <button class="ghost-button interaction-button" :class="{ 'interaction-active': interactionButtonActive('sponsor', project) }" type="button" :disabled="!canClickSponsor(project)" aria-controls="sponsor-popover" :aria-expanded="state.sponsorModal.open && state.sponsorModal.project?.id === project.id ? 'true' : 'false'" @click.stop="submitSponsor(project, $event)">
+                    <button class="ghost-button interaction-button sponsor-action-button" :class="{ 'interaction-active': interactionButtonActive('sponsor', project) }" type="button" :disabled="!canClickSponsor(project)" aria-controls="sponsor-popover" :aria-expanded="state.sponsorModal.open && state.sponsorModal.project?.id === project.id ? 'true' : 'false'" @click.stop="submitSponsor(project, $event)">
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">volunteer_activism</span>
                       <span>{{ sponsorButtonLabel(project) }}</span>
                     </button>
@@ -5586,15 +5784,15 @@ const App = {
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">groups</span>
                       <span>{{ participationButtonLabel(project) }}</span>
                     </button>
-                    <button class="ghost-button interaction-button" :class="{ 'interaction-active': interactionButtonActive('lead', project) }" type="button" :disabled="!canClickLeadClaim(project)" :aria-disabled="claimButtonAriaDisabled(project, 'leader')" @mouseenter="showClaimReasonTooltip($event, project, 'leader')" @focus="showClaimReasonTooltip($event, project, 'leader')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click.stop="submitLeadClaim(project, $event)">
+                    <button class="ghost-button interaction-button claim-action-button" :class="{ 'interaction-active': interactionButtonActive('lead', project) }" type="button" :disabled="!canClickLeadClaim(project)" :aria-disabled="claimButtonAriaDisabled(project, 'leader')" @mouseenter="showClaimReasonTooltip($event, project, 'leader')" @focus="showClaimReasonTooltip($event, project, 'leader')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click.stop="submitLeadClaim(project, $event)">
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">supervisor_account</span>
                       <span>{{ leadClaimButtonLabel(project) }}</span>
                     </button>
-                    <button class="ghost-button interaction-button" :class="{ 'interaction-active': interactionButtonActive('paper', project) }" type="button" :disabled="!canClickPaperClaim(project)" :aria-disabled="claimButtonAriaDisabled(project, 'paper_first_unit')" @mouseenter="showClaimReasonTooltip($event, project, 'paper_first_unit')" @focus="showClaimReasonTooltip($event, project, 'paper_first_unit')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click.stop="submitPaperClaim(project, $event)">
+                    <button class="ghost-button interaction-button claim-action-button" :class="{ 'interaction-active': interactionButtonActive('paper', project) }" type="button" :disabled="!canClickPaperClaim(project)" :aria-disabled="claimButtonAriaDisabled(project, 'paper_first_unit')" @mouseenter="showClaimReasonTooltip($event, project, 'paper_first_unit')" @focus="showClaimReasonTooltip($event, project, 'paper_first_unit')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click.stop="submitPaperClaim(project, $event)">
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">workspace_premium</span>
                       <span>{{ paperClaimButtonLabel(project) }}</span>
                     </button>
-                    <button class="ghost-button interaction-button" :class="{ 'interaction-active': interactionButtonActive('sponsor', project) }" type="button" :disabled="!canClickSponsor(project)" aria-controls="sponsor-popover" :aria-expanded="state.sponsorModal.open && state.sponsorModal.project?.id === project.id ? 'true' : 'false'" @click.stop="submitSponsor(project, $event)">
+                    <button class="ghost-button interaction-button sponsor-action-button" :class="{ 'interaction-active': interactionButtonActive('sponsor', project) }" type="button" :disabled="!canClickSponsor(project)" aria-controls="sponsor-popover" :aria-expanded="state.sponsorModal.open && state.sponsorModal.project?.id === project.id ? 'true' : 'false'" @click.stop="submitSponsor(project, $event)">
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">volunteer_activism</span>
                       <span>{{ sponsorButtonLabel(project) }}</span>
                     </button>
@@ -6555,7 +6753,7 @@ const App = {
           </section>
         </div>
 
-        <div v-if="state.sponsorModal.open" class="form-modal-backdrop" @click.self="closeSponsorModal">
+        <div v-if="state.sponsorModal.open" class="form-modal-backdrop sponsor-popover-backdrop" @click.self="closeSponsorModal">
           <section id="sponsor-popover" class="sponsor-popover" :style="{ left: state.sponsorModal.x + 'px', top: state.sponsorModal.y + 'px' }" role="dialog" aria-modal="true" aria-label="选择资助类型">
             <header class="modal-header">
               <div>
