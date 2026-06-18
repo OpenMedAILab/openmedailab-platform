@@ -46,5 +46,5 @@ export function expectNoIntersection(a, b, margin = 0) {
     || b.x + b.width + margin <= a.x
     || a.y + a.height + margin <= b.y
     || b.y + b.height + margin <= a.y;
-  expect(separated).toBe(true);
+  expect(separated, JSON.stringify({ a, b, margin })).toBe(true);
 }

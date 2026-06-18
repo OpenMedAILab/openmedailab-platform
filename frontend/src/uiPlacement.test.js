@@ -160,7 +160,7 @@ test("self-related project cards align meta chips near the corner ribbon without
   assert.match(stylesSource, /\.project-card-headline\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;/);
   assert.match(stylesSource, /\.project-card--self-related \.project-card-headline,\s*\.project-card-headline--self-related\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?top:\s*16px;[\s\S]*?left:\s*18px;[\s\S]*?right:\s*18px;[\s\S]*?align-items:\s*start;/);
   assert.match(stylesSource, /\.project-card--self-related \.project-card-headline \.project-card-meta,\s*\.project-card-headline--self-related \.project-card-meta\s*\{[\s\S]*?padding-left:\s*82px;/);
-  assert.match(stylesSource, /\.project-card--self-related \.project-list-main\s*\{[\s\S]*?padding-left:\s*var\(--self-relation-content-offset,\s*80px\);/);
+  assert.match(stylesSource, /\.project-card--self-related \.project-list-main\s*\{[\s\S]*?padding-left:\s*var\(--self-relation-content-offset,\s*82px\);/);
   assert.notEqual(max980Start, -1);
   assert.notEqual(max640Start, -1);
   assert.doesNotMatch(max980Block, /\.project-card-headline--self-related/);
@@ -168,6 +168,7 @@ test("self-related project cards align meta chips near the corner ribbon without
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card--self-related \.project-card-headline,\s*\.project-card-headline--self-related\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?top:\s*18px;[\s\S]*?left:\s*14px;[\s\S]*?right:\s*14px;/);
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card--self-related \.project-card-headline \.project-card-meta,\s*\.project-card-headline--self-related \.project-card-meta\s*\{[\s\S]*?padding-left:\s*82px;/);
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card-headline--self-related \.project-card-side\s*\{[\s\S]*?display:\s*none;/);
+  assert.match(stylesSource, /@media \(max-width:\s*340px\)\s*\{[\s\S]*?\.project-card--self-related \.project-list-main\s*\{[\s\S]*?padding-left:\s*82px;/);
 });
 
 test("project interaction buttons use a compact responsive grid without stretching", () => {

@@ -42,11 +42,11 @@ function sponsorPopoverPositionFromTrigger(trigger, popoverSize = {}) {
   const preferredWidth = Number(popoverSize.width) || SPONSOR_POPOVER_WIDTH;
   const preferredHeight = Number(popoverSize.height) || SPONSOR_POPOVER_HEIGHT;
   const width = Math.min(preferredWidth, Math.max(0, viewportWidth - SPONSOR_POPOVER_EDGE_GAP * 2));
-  const height = Math.min(preferredHeight, Math.max(0, viewportHeight - SPONSOR_POPOVER_EDGE_GAP * 2));
+  const fallbackMaxHeight = Math.max(180, viewportHeight - SPONSOR_POPOVER_EDGE_GAP * 2);
   const rect = trigger?.getBoundingClientRect?.();
 
   if (!rect) {
-    return { x: SPONSOR_POPOVER_EDGE_GAP, y: SPONSOR_POPOVER_EDGE_GAP };
+    return { x: SPONSOR_POPOVER_EDGE_GAP, y: SPONSOR_POPOVER_EDGE_GAP, maxHeight: fallbackMaxHeight };
   }
 
   const x = clampNumber(
@@ -54,14 +54,16 @@ function sponsorPopoverPositionFromTrigger(trigger, popoverSize = {}) {
     SPONSOR_POPOVER_EDGE_GAP,
     viewportWidth - width - SPONSOR_POPOVER_EDGE_GAP
   );
-  const belowY = rect.bottom + SPONSOR_POPOVER_GAP;
-  const aboveY = rect.top - height - SPONSOR_POPOVER_GAP;
-  const shouldOpenAbove = belowY + height > viewportHeight - SPONSOR_POPOVER_EDGE_GAP && aboveY >= SPONSOR_POPOVER_EDGE_GAP;
+  const availableBelow = Math.max(0, viewportHeight - rect.bottom - SPONSOR_POPOVER_GAP - SPONSOR_POPOVER_EDGE_GAP);
+  const availableAbove = Math.max(0, rect.top - SPONSOR_POPOVER_GAP - SPONSOR_POPOVER_EDGE_GAP);
+  const shouldOpenAbove = availableBelow < Math.min(preferredHeight, 240) && availableAbove > availableBelow;
+  const availableHeight = Math.max(180, shouldOpenAbove ? availableAbove : availableBelow);
+  const renderedHeight = Math.min(preferredHeight, availableHeight);
   const y = shouldOpenAbove
-    ? aboveY
-    : clampNumber(belowY, SPONSOR_POPOVER_EDGE_GAP, viewportHeight - height - SPONSOR_POPOVER_EDGE_GAP);
+    ? clampNumber(rect.top - SPONSOR_POPOVER_GAP - renderedHeight, SPONSOR_POPOVER_EDGE_GAP, viewportHeight - renderedHeight - SPONSOR_POPOVER_EDGE_GAP)
+    : clampNumber(rect.bottom + SPONSOR_POPOVER_GAP, SPONSOR_POPOVER_EDGE_GAP, viewportHeight - Math.min(180, renderedHeight) - SPONSOR_POPOVER_EDGE_GAP);
 
-  return { x, y };
+  return { x, y, maxHeight: availableHeight };
 }
 const SIDEBAR_QR_ENTRIES = [
   { key: "admin-contact", label: "联系管理员", image: "", icon: "support_agent" },
@@ -313,6 +315,7 @@ const state = reactive({
     submitting: false,
     x: 0,
     y: 0,
+    maxHeight: SPONSOR_POPOVER_HEIGHT,
     returnFocus: null
   },
   claimReasonTooltip: {
@@ -2023,9 +2026,14 @@ const App = {
         }
         : {};
       const position = sponsorPopoverPositionFromTrigger(trigger, renderedSize);
-      if (Math.abs(state.sponsorModal.x - position.x) > 1 || Math.abs(state.sponsorModal.y - position.y) > 1) {
+      if (
+        Math.abs(state.sponsorModal.x - position.x) > 1
+        || Math.abs(state.sponsorModal.y - position.y) > 1
+        || Math.abs(state.sponsorModal.maxHeight - position.maxHeight) > 1
+      ) {
         state.sponsorModal.x = position.x;
         state.sponsorModal.y = position.y;
+        state.sponsorModal.maxHeight = position.maxHeight;
       }
     }
 
@@ -2059,6 +2067,7 @@ const App = {
       rememberModalTrigger(event?.currentTarget || null);
       state.sponsorModal.x = popoverPosition.x;
       state.sponsorModal.y = popoverPosition.y;
+      state.sponsorModal.maxHeight = popoverPosition.maxHeight;
       nextTick(() => {
         realignSponsorPopoverFromRenderedSize(state.sponsorModal.returnFocus);
         document.querySelector(".sponsor-popover input:not(:disabled)")?.focus();
@@ -6938,7 +6947,7 @@ const App = {
         </div>
 
         <div v-if="state.sponsorModal.open" class="form-modal-backdrop sponsor-popover-backdrop" @click.self="closeSponsorModal">
-          <section id="sponsor-popover" ref="sponsorModalRef" class="sponsor-popover" data-testid="sponsor-popover" :style="{ left: state.sponsorModal.x + 'px', top: state.sponsorModal.y + 'px' }" role="dialog" aria-modal="true" aria-label="选择资助类型" tabindex="-1" @keydown="trapModalFocus($event, sponsorModalRef)">
+          <section id="sponsor-popover" ref="sponsorModalRef" class="sponsor-popover" data-testid="sponsor-popover" :style="{ left: state.sponsorModal.x + 'px', top: state.sponsorModal.y + 'px', maxHeight: state.sponsorModal.maxHeight + 'px' }" role="dialog" aria-modal="true" aria-label="选择资助类型" tabindex="-1" @keydown="trapModalFocus($event, sponsorModalRef)">
             <header class="modal-header">
               <div>
                 <span class="eyebrow">选择资助类型</span>

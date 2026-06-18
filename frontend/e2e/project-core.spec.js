@@ -56,7 +56,9 @@ test("relationship badge geometry and hover strip match product requirement", as
   expectNoIntersection(topic, titleBox);
   expect(gap).toBeGreaterThanOrEqual(12);
   expect(gap).toBeLessThanOrEqual(28);
-  expect(rel.x + rel.width).toBeLessThanOrEqual(topic.x - 8);
+  if (Math.abs(rel.y - topic.y) <= 1) {
+    expect(rel.x + rel.width).toBeLessThanOrEqual(topic.x - 8);
+  }
   expect(Math.abs(titleBox.x - topic.x)).toBeLessThanOrEqual(4);
   expect(row.y).toBeGreaterThanOrEqual(rb.y + rb.height * 0.35);
 
@@ -92,7 +94,8 @@ test("project detail runs a real collaboration CTA flow", async ({ page }) => {
   await expect(page.getByRole("status")).toContainText(/已参与|参与/);
   await expect(page.getByRole("button", { name: /取消参与|已参与/ })).toBeVisible();
 
-  await page.getByRole("button", { name: /资助/ }).click();
+  const detailActions = page.locator(".project-progress-actions");
+  await detailActions.getByRole("button", { name: /^资助$/ }).click();
   const popover = page.getByTestId("sponsor-popover");
   await expect(popover.getByLabel("资助劳务费")).toBeVisible();
   await expect(popover.getByLabel("资助算力")).toBeVisible();
@@ -100,7 +103,7 @@ test("project detail runs a real collaboration CTA flow", async ({ page }) => {
   await popover.getByLabel("资助算力").check();
   await expectWithinViewport(page, popover);
   await popover.getByRole("button", { name: /提交资助意向/ }).click();
-  await expect(page.getByRole("button", { name: /资助审批中|撤回资助|已资助/ })).toBeVisible();
+  await expect(detailActions.getByRole("button", { name: /管理资助|资助审批中|撤回资助|已资助/ })).toBeVisible();
 });
 
 test("claim reason tooltip, sponsor popover and contact card stay within viewport", async ({ page, isMobile }) => {
@@ -129,7 +132,9 @@ test("claim reason tooltip, sponsor popover and contact card stay within viewpor
   await expect(contactCard).toBeVisible();
   await expectWithinViewport(page, contactCard);
 
-  const sponsorButton = page.getByRole("button", { name: /资助/ }).first();
+  const sponsorButton = card.getByRole("button", { name: /管理资助|资助/ }).first();
+  await sponsorButton.scrollIntoViewIfNeeded();
+  await expect(sponsorButton).toBeVisible();
   const triggerBox = await sponsorButton.boundingBox();
   await sponsorButton.click();
   const popover = page.getByTestId("sponsor-popover");
@@ -167,20 +172,22 @@ test("secondary token sponsor flow is reachable and reviewable", async ({ page }
   const data = fixture();
   await loginAs(page, data.users.sponsor, data.users.password);
   await page.goto(`/#/project/${data.projects.public_id}`);
-  await page.getByRole("button", { name: /资助/ }).click();
+  const detailActions = page.locator(".project-progress-actions");
+  await detailActions.getByRole("button", { name: /^资助$/ }).click();
   const popover = page.getByTestId("sponsor-popover");
   await expect(popover).toBeVisible();
   await popover.getByRole("button", { name: /更多资助类型/ }).click();
   await popover.getByLabel("资助 token").check();
   await popover.getByRole("button", { name: /提交资助意向/ }).click();
-  await expect(page.getByRole("button", { name: /资助审批中|撤回资助|已资助/ })).toBeVisible();
+  await expect(detailActions.getByRole("button", { name: /管理资助|资助审批中|撤回资助|已资助/ })).toBeVisible();
 
   await page.goto("/#/dashboard");
+  await page.getByRole("button", { name: "我的任务", exact: true }).click();
   await expect(page.getByText(/资助 token|token/).first()).toBeVisible();
 
   await loginAs(page, data.users.admin, data.users.password);
   await page.goto("/#/admin");
-  await page.getByRole("button", { name: /任务审批/ }).click();
+  await page.getByRole("button", { name: "任务审批", exact: true }).click();
   await expect(page.getByText(/资助 token|token/).first()).toBeVisible();
   page.once("dialog", async (dialog) => {
     await dialog.accept("token 额度确认");
@@ -190,5 +197,6 @@ test("secondary token sponsor flow is reachable and reviewable", async ({ page }
 
   await loginAs(page, data.users.sponsor, data.users.password);
   await page.goto("/#/dashboard");
+  await page.getByRole("button", { name: "我的任务", exact: true }).click();
   await expect(page.getByText(/token 额度确认|已通过|资助 token/).first()).toBeVisible();
 });

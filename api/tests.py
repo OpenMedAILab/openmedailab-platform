@@ -1,6 +1,7 @@
 import json
 import importlib.util
 import io
+import threading
 import tempfile
 import zipfile
 from datetime import timedelta
@@ -11,7 +12,8 @@ from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.conf import settings
-from django.test import Client, TestCase, override_settings
+from django.db import close_old_connections
+from django.test import Client, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import PLATFORM_ADMIN_UID, RoleType
