@@ -13,6 +13,7 @@ class InteractionStatus(models.TextChoices):
 class ParticipationRole(models.TextChoices):
     DOCTOR = "医生", "医生"
     STUDENT = "学生", "学生"
+    TEACHER = "大学老师", "大学老师"
     LEADER = "Leader", "Leader"
     AI_ENGINEER = "AI工程师", "AI 工程师"
     STATISTICIAN = "医学统计", "医学统计"

@@ -46,7 +46,7 @@ const FAQ_ENTRIES = [
   },
   {
     question: "我可以发布自己的课题吗？",
-    answer: "可以。登录后进入“我的空间”-“我的上传”，填写课题结构化字段并上传课题说明 PDF。普通用户每天最多上传 10 个课题。"
+    answer: "可以。登录后进入“个人中心”-“我的上传”，填写课题结构化字段并上传课题说明 PDF。普通用户每天最多上传 10 个课题。"
   },
   {
     question: "课题说明 PDF 有什么用？",
@@ -289,7 +289,7 @@ const App = {
         { name: "faq", label: "常见问答" }
       ];
       if (state.user) {
-        items.push({ name: "dashboard", label: "我的空间" });
+        items.push({ name: "dashboard", label: "个人中心" });
       }
       if (can("view_admin_console")) items.push({ name: "admin", label: "管理" });
       return items;
@@ -4500,10 +4500,9 @@ const App = {
                 <div><dt>机构</dt><dd>{{ state.user.profile?.organization || '未填写机构' }}</dd></div>
                 <div><dt>邮箱</dt><dd>{{ state.user.email || state.user.profile?.contact_email || '未填写邮箱' }}</dd></div>
                 <div><dt>积分</dt><dd>{{ state.user.profile?.credit_balance ?? 0 }}</dd></div>
-                <div><dt>声誉</dt><dd>{{ state.user.profile?.reputation_score ?? 0 }}</dd></div>
               </dl>
               <div class="profile-actions">
-                <button class="ghost-button" type="button" @click="state.workspaceTab = 'overview'; navigate('dashboard'); closeProfileMenu(); $event.currentTarget.blur()">我的空间</button>
+                <button class="ghost-button" type="button" @click="state.workspaceTab = 'overview'; navigate('dashboard'); closeProfileMenu(); $event.currentTarget.blur()">个人中心</button>
                 <button class="ghost-button" type="button" @click="state.workspaceTab = 'favorites'; navigate('dashboard'); closeProfileMenu(); $event.currentTarget.blur()">我的关注</button>
                 <button class="ghost-button danger profile-logout" type="button" @click="logout(); closeProfileMenu(); $event.currentTarget.blur()"><span class="material-symbols-rounded" style="font-size: 18px;">logout</span> 退出</button>
               </div>
@@ -4912,12 +4911,12 @@ const App = {
           <section v-else-if="activeView === 'dashboard'" class="dashboard-view">
             <div class="section-head">
               <div>
-                <span class="eyebrow">我的空间</span>
+                <span class="eyebrow">个人中心</span>
                 <h1>{{ state.user?.profile?.display_name || state.user?.username }}</h1>
                 <p>{{ state.user?.profile?.uid || '未分配 UID' }} · {{ roleInfo.role_label }} · {{ state.user?.profile?.organization || '未填写机构' }}</p>
               </div>
             </div>
-            <div class="workspace-tabs" role="tablist" aria-label="我的空间">
+            <div class="workspace-tabs" role="tablist" aria-label="个人中心">
               <button type="button" :class="{ active: state.workspaceTab === 'overview' }" @click="setWorkspaceTab('overview')">总览</button>
               <button type="button" :class="{ active: state.workspaceTab === 'favorites' }" @click="setWorkspaceTab('favorites')">我的关注</button>
               <button type="button" :class="{ active: state.workspaceTab === 'interactions' }" @click="setWorkspaceTab('interactions')">我的任务</button>
@@ -4940,6 +4939,13 @@ const App = {
                   </button>
                 </div>
                 <div class="credit-overview-grid">
+                  <article class="content-panel credit-balance-panel">
+                    <div>
+                      <h2>当前积分</h2>
+                      <p>{{ state.user?.profile?.credit_balance ?? 0 }}</p>
+                      <small>参与课题需 50 分</small>
+                    </div>
+                  </article>
                   <article class="content-panel credit-transfer-panel">
                     <div class="panel-title-row compact-title-row">
                       <div>

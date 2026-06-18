@@ -6,7 +6,7 @@
 
 代码基准：以当前仓库代码为准；若本文档与当前代码冲突，必须先核对代码，再同步修正文档。
 
-当前产品版本文件：`VERSION = 0.12.0`
+当前产品版本文件：`VERSION = 0.12.1`
 
 本文档用途：后续任何 agent 在执行任何任务前，必须先读本文档，再按“任务定位索引”打开必要代码文件。目标是避免每次从零通读完整仓库，同时保证生命周期、API、数据库、权限和前端入口不被改乱。
 
@@ -31,7 +31,7 @@
 | 课题库、课题详情、进度页、讨论区、搜索筛选、状态卡 | 2.2、3.3、4.2、5.2、6.1 |
 | 用户上传课题、编辑课题、每日限制 | 2.3、3.2、3.3、4.3、5.2 |
 | 收藏、参与、认领、资助、撤回 | 2.4、3.4、4.4、5.3 |
-| 我的空间、我的任务、任务结果 | 2.5、3.5、4.5、6.2 |
+| 个人中心、我的任务、任务结果 | 2.5、3.5、4.5、6.2 |
 | 管理员工作台、任务审批、任务管理、系统入口、备份恢复 | 2.6、3.5、4.6、6.3 |
 | 主题、主题排序、数据集说明 PDF、课题 PDF、进度 PDF | 2.7、3.6、4.7、5.2 |
 | 审计日志、异常、请求 ID | 2.8、3.7、4.8、5.5 |
@@ -147,7 +147,7 @@
 - 任一参与或认领通过后，课题可进入组队中；当前自动推进逻辑集中在后端辅助函数中，改动前必须确认产品需求。
 - 参与和认领提交前必须检查可用积分额度：余额扣除未启动但已占用的 50 分参与额度后，仍需至少剩余 50 分。
 
-### 2.5 我的空间、我的任务、任务结果
+### 2.5 个人中心、我的任务、任务结果
 
 | 目的 | 主要文件 | 重点位置 |
 | --- | --- | --- |
@@ -155,8 +155,8 @@
 | 用户任务结果 API | `api/ninja_api.py` | `me_task_list`、`me_contribution_list`、`me_contribution_create`、`me_contribution_upload` |
 | 提交资格校验 | `api/ninja_api.py` | `user_has_approved_project_relation`、课题阶段校验 |
 | 序列化 | `api/serializers.py` | `contribution_payload`、`dashboard_payload` |
-| 前端我的空间 | `frontend/src/main.js` | `loadDashboard`、`loadFavorites`、`loadMyProjects`、`openContributionModal`、`submitContribution` |
-| 样式 | `frontend/src/styles.css` | 我的空间面板、任务弹窗、响应式 |
+| 前端个人中心 | `frontend/src/main.js` | `loadDashboard`、`loadFavorites`、`loadMyProjects`、`openContributionModal`、`submitContribution` |
+| 样式 | `frontend/src/styles.css` | 个人中心面板、任务弹窗、响应式 |
 | 测试 | `api/tests.py`、`frontend/src/uiPlacement.test.js` | 提交资格、弹窗不遮挡、小屏适配 |
 
 产品规则：
@@ -375,7 +375,7 @@ flowchart LR
 | 认领项目负责人/论文第一单位 | 用户 | `pending` | 是 | 通过后可触发组队中 | 状态卡认领 UID 分组；审核意见返回申请人 |
 | 其他兼容认领 | 用户 | `approved` | 否 | 可触发组队中 | 状态卡认领 UID 分组 |
 | 资助 | 用户 | `pending` | 是 | 不自动进入进行中 | 管理员资助审批、状态卡资助 UID 分组 |
-| 撤回 | 用户 | `withdrawn` | 否 | 不自动回退阶段 | 我的空间和状态卡反映 |
+| 撤回 | 用户 | `withdrawn` | 否 | 不自动回退阶段 | 个人中心和状态卡反映 |
 
 ### 3.5 任务结果生命周期
 
@@ -435,7 +435,7 @@ stateDiagram-v2
 | `POST` | `/api/auth/logout/` | 退出 |
 | `POST` | `/api/auth/password/change-required/` | 默认密码登录后的强制改密 |
 | `GET/PATCH/PUT` | `/api/me/profile/` | 用户资料 |
-| `GET` | `/api/me/dashboard/` | 我的空间汇总 |
+| `GET` | `/api/me/dashboard/` | 个人中心汇总 |
 | `GET` | `/api/me/projects/` | 我的上传课题 |
 
 ### 4.2 Public Projects
@@ -542,7 +542,8 @@ stateDiagram-v2
 - `contact_email` / `email_normalized`: 联系邮箱和唯一性约束
 - `must_change_password`: 默认密码登录后的强制改密标记
 - `last_seen_at`: 最近一次登录用户请求活动时间，仅用于在线人数聚合统计
-- `credit_balance` / `reputation_score`: 保留字段，当前不是主流程核心
+- `credit_balance`: 当前积分余额，普通用户可在个人中心总览查看。
+- `reputation_score`: 保留字段，当前不是主流程核心，不在普通用户悬浮卡展示。
 
 管理员固定：
 
@@ -633,7 +634,7 @@ stateDiagram-v2
 | --- | --- |
 | `#/` | 课题库首页 |
 | `#/project/{id}` | 课题详情 |
-| `#/dashboard` | 我的空间 |
+| `#/dashboard` | 个人中心 |
 | `#/admin` | 管理员工作台 |
 | `#/login` | 登录 |
 | `#/register` | 注册 |
@@ -804,7 +805,7 @@ rg -n 'TO[D]O|TB[D]|FIX[M]E|待[定]|不确[定]' AGENTS.md
 6. 访客打开课题详情，预览课题主 PDF，查看主题数据集说明 PDF。
 7. 用户登录、收藏、取消收藏。
 8. 用户参与、认领、资助，观察状态反馈。
-9. 用户进入我的空间，查看我的任务、我上传、个人资料。
+9. 用户进入个人中心，查看我的任务、我上传、个人资料和当前积分。
 10. 用户提交任务结果，可同时上传 PDF 或 Markdown 文档。
 11. 管理员登录，进入任务审批、任务管理、课题管理、主题管理、系统入口、备份恢复、用户管理、审计日志。
 12. 管理员审批资助、查看任务结果文档、修改课题阶段。

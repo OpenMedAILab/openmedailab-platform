@@ -292,7 +292,9 @@ test("topbar exposes only aggregate platform stats", () => {
 });
 
 test("workspace lifecycle UI exposes user/admin spaces and always-expanded project cards", () => {
-  assert.match(mainSource, /label:\s*"我的空间"/);
+  assert.match(mainSource, /label:\s*"个人中心"/);
+  assert.match(mainSource, />当前积分<\/h2>/);
+  assert.doesNotMatch(mainSource, /<dt>声誉<\/dt>/);
   assert.match(mainSource, /workspace-tabs/);
   assert.match(mainSource, />我的任务<\/button>/);
   assert.match(mainSource, />我的上传<\/button>/);

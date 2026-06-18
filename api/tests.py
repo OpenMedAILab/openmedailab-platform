@@ -1977,6 +1977,24 @@ class ApiTests(TestCase):
         self.project.refresh_from_db()
         self.assertEqual(self.project.stage, ProjectStage.TEAM_BUILDING)
 
+        teacher = User.objects.create_user(username="teacher", email="teacher@example.com", password="StrongPass12345")
+        teacher.profile.role_type = RoleType.PHD_OR_ABOVE
+        teacher.profile.save(update_fields=["role_type", "updated_at"])
+        self.client.force_login(teacher)
+        teacher_response = self.post_json(
+            f"/api/projects/{self.project.pk}/interest/",
+            {
+                "role": "大学老师",
+                "available_hours_per_week": 4,
+                "message": "参与开放课题协作",
+                "authorship_intention": "contribution",
+            },
+        )
+        self.assertEqual(teacher_response.status_code, 201)
+        self.assertEqual(ProjectInterest.objects.get(user=teacher, project=self.project).role, "大学老师")
+
+        self.client.force_login(applicant)
+
         claim_response = self.post_json(
             f"/api/projects/{self.project.pk}/claim/",
             {"claim_type": "leader", "message": "认领项目负责人"},

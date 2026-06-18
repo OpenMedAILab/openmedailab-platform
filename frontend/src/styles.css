@@ -1648,11 +1648,42 @@ textarea:focus {
 
 .credit-overview-grid {
   display: grid;
-  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+  grid-template-columns: minmax(180px, 0.75fr) minmax(0, 1fr) minmax(0, 1.05fr);
   gap: 16px;
   margin-top: 16px;
 }
 
+.credit-balance-panel {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  background:
+    linear-gradient(135deg, rgba(8, 118, 111, 0.12), rgba(31, 156, 134, 0.04)),
+    #ffffff;
+}
+
+.credit-balance-panel h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  color: #355464;
+}
+
+.credit-balance-panel p {
+  margin: 0;
+  font-size: 36px;
+  line-height: 1;
+  font-weight: 800;
+  color: #065f5b;
+}
+
+.credit-balance-panel small {
+  display: block;
+  margin-top: 10px;
+  color: #6c8093;
+  font-weight: 700;
+}
+
+.credit-balance-panel,
 .credit-transfer-panel,
 .credit-ledger-panel {
   align-content: start;
