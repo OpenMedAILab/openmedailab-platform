@@ -40,6 +40,10 @@ class Contribution(models.Model):
 class CreditLedger(models.Model):
     class ActionType(models.TextChoices):
         REGISTER_BONUS = "register_bonus", "注册奖励"
+        PROFILE_COMPLETION_BONUS = "profile_completion_bonus", "完善资料奖励"
+        PROJECT_PARTICIPATION_COST = "project_participation_cost", "参与课题消耗"
+        PROJECT_COMPLETION_RETURN = "project_completion_return", "课题结题返还"
+        TRANSFER = "transfer", "积分转赠"
         TASK_DEPOSIT = "task_deposit", "任务承诺"
         TASK_REWARD = "task_reward", "任务奖励"
         SPONSOR_POOL = "sponsor_pool", "项目资助池"

@@ -51,7 +51,7 @@ test("admin project form exposes progress document upload separately from the ma
 test("planned recruitment theme progress discussion and faq entry features are wired", () => {
   assert.match(mainSource, /overfilled/);
   assert.match(mainSource, /· 超额/);
-  assert.match(stylesSource, /\.project-role-chip-row span\.overfilled\s*\{/);
+  assert.match(stylesSource, /\.project-role-chip-row > span\.overfilled\s*\{/);
 
   assert.match(apiSource, /adminReorderThemes/);
   assert.match(apiSource, /\/api\/admin\/themes\/reorder\//);
@@ -342,17 +342,20 @@ test("project cards keep compact summary UI without hover status styles", () => 
   assert.match(mainSource, /interactionButtonActive\('like', project\)/);
   assert.match(mainSource, /interactionButtonActive\('participation', project\)/);
   assert.match(mainSource, /interactionButtonActive\('lead', project\)/);
+  assert.match(mainSource, /interactionButtonActive\('paper', project\)/);
   assert.match(mainSource, /interactionButtonActive\('sponsor', project\)/);
   assert.match(mainSource, />thumb_up<\/span>/);
   assert.match(mainSource, />star<\/span>/);
   assert.match(mainSource, />groups<\/span>/);
   assert.match(mainSource, />supervisor_account<\/span>/);
+  assert.match(mainSource, />workspace_premium<\/span>/);
   assert.match(mainSource, />volunteer_activism<\/span>/);
-  assert.match(mainSource, /@click\.stop="submitLike\(project\)"[\s\S]*?@click\.stop="toggleFollow\(project\)"[\s\S]*?@click\.stop="handleParticipationAction\(project\)"[\s\S]*?@click\.stop="submitLeadClaim\(project\)"[\s\S]*?@click\.stop="submitSponsor\(project\)"/);
+  assert.match(mainSource, /@click\.stop="submitLike\(project\)"[\s\S]*?@click\.stop="toggleFollow\(project\)"[\s\S]*?@click\.stop="handleParticipationAction\(project\)"[\s\S]*?@click\.stop="submitLeadClaim\(project\)"[\s\S]*?@click\.stop="submitPaperClaim\(project\)"[\s\S]*?@click\.stop="submitSponsor\(project\)"/);
   assert.match(mainSource, /followButtonLabel\(project\)/);
   assert.match(mainSource, /leadClaimButtonLabel\(project\)/);
-  assert.match(mainSource, /认领负责人/);
-  assert.match(mainSource, /已认领负责人/);
+  assert.match(mainSource, /认领项目负责人/);
+  assert.match(mainSource, /已认领项目负责人/);
+  assert.match(mainSource, /认领第一单位/);
   assert.doesNotMatch(mainSource, />Lead</);
   assert.match(mainSource, /sponsorButtonLabel\(project\)/);
   assert.match(mainSource, />招募<\/strong>/);
@@ -375,7 +378,8 @@ test("project cards keep compact summary UI without hover status styles", () => 
   assert.match(stylesSource, /\.interaction-button\.interaction-active\s*\{/);
   assert.match(stylesSource, /\.project-card-meta span\.ready\s*\{/);
   assert.match(stylesSource, /\.project-startup-status\.ready > span\s*\{/);
-  assert.match(stylesSource, /\.project-role-groups span\.ready\s*\{/);
+  assert.match(stylesSource, /\.project-role-chip-row > span\.ready\s*\{/);
+  assert.match(stylesSource, /\.project-role-chip-row > span\.overfilled\s*\{/);
   assert.match(stylesSource, /\.project-stage-chip\.stage-active\s*\{/);
   assert.match(stylesSource, /\.project-funding-chip\.funded\s*\{/);
   assert.match(stylesSource, /\.project-expanded-detail\s*\{/);

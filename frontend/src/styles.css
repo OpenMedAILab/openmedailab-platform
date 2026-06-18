@@ -1207,7 +1207,7 @@ textarea:focus {
   min-width: 0;
 }
 
-.project-role-groups span {
+.project-role-chip-row > span {
   display: inline-flex;
   align-items: center;
   min-height: 26px;
@@ -1220,16 +1220,80 @@ textarea:focus {
   font-weight: 800;
 }
 
-.project-role-groups span.ready {
+.project-role-groups span.ready,
+.project-role-chip-row > span.ready {
   border-color: rgba(15, 159, 154, 0.28);
   background: #e8f7f4;
   color: #08766f;
 }
 
-.project-role-chip-row span.overfilled {
+.project-role-chip-row > span.overfilled {
   border-color: rgba(245, 158, 11, 0.34);
   background: #fff7ed;
   color: #b45309;
+}
+
+.contact-hover-trigger {
+  position: relative;
+  cursor: default;
+}
+
+.project-card-uploader.contact-hover-trigger {
+  display: inline-flex;
+  justify-content: flex-end;
+}
+
+.contact-hover-card {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 35;
+  display: none;
+  min-width: 220px;
+  max-width: min(300px, 80vw);
+  padding: 12px;
+  border: 1px solid rgba(15, 159, 154, 0.18);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 44px rgba(15, 23, 42, 0.16);
+  color: var(--text);
+  text-align: left;
+  white-space: normal;
+}
+
+.contact-hover-trigger:hover > .contact-hover-card,
+.contact-hover-trigger:focus-visible > .contact-hover-card,
+.contact-hover-trigger:focus-within > .contact-hover-card {
+  display: grid;
+  gap: 8px;
+}
+
+.project-role-chip-row .team-contact-card {
+  left: 0;
+  right: auto;
+}
+
+.contact-hover-card strong,
+.contact-hover-card b {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.contact-hover-card small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.contact-member-row {
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fbfc;
 }
 
 .project-progress-page {
@@ -1580,6 +1644,59 @@ textarea:focus {
 
 .workspace-panel {
   margin-top: 16px;
+}
+
+.credit-overview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.credit-transfer-panel,
+.credit-ledger-panel {
+  align-content: start;
+}
+
+.credit-ledger-list {
+  display: grid;
+  gap: 8px;
+}
+
+.credit-ledger-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fbfc;
+}
+
+.credit-ledger-row span,
+.credit-ledger-row small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.credit-ledger-row strong {
+  color: var(--text);
+}
+
+.credit-ledger-row small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.credit-ledger-row .positive {
+  color: #08766f;
+}
+
+.credit-ledger-row .negative {
+  color: #b42318;
 }
 
 .workspace-split {
@@ -2675,6 +2792,54 @@ textarea:focus {
   min-height: 0;
   overflow: auto;
   padding: 18px;
+}
+
+.form-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 310;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(14, 31, 35, 0.32);
+  backdrop-filter: blur(10px);
+}
+
+.form-modal {
+  width: min(640px, calc(100vw - 36px));
+  max-height: calc(100dvh - 36px);
+  overflow: auto;
+  border: 1px solid rgba(217, 231, 233, 0.95);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 28px 90px rgba(10, 40, 48, 0.28);
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  padding: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.modal-header h2 {
+  margin: 6px 0 0;
+  font-size: 22px;
+  line-height: 1.3;
+}
+
+.stacked-form {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+.form-note {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
 }
 
 .project-document-manager {
@@ -3828,6 +3993,10 @@ code {
 
   .workspace-overview-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .credit-overview-grid {
+    grid-template-columns: 1fr;
   }
 
   .space-summary-row,

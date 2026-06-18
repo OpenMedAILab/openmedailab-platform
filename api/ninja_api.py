@@ -27,7 +27,7 @@ from ninja.security import SessionAuth
 
 from config.release import APP_VERSION, release_payload
 from accounts.forms import RegisterForm, UserProfileForm
-from accounts.models import PLATFORM_ADMIN_UID, PUBLIC_ROLE_CHOICES, UserProfile
+from accounts.models import PLATFORM_ADMIN_UID, PUBLIC_ROLE_CHOICES, RoleType, UserProfile, normalize_public_role
 from accounts.services import (
     DefaultPasswordConfigError,
     create_registered_user,
@@ -37,6 +37,7 @@ from accounts.services import (
 from credits.models import Contribution, ContributionStatus, CreditLedger
 from interactions.forms import ProjectClaimIntentForm, ProjectInterestForm, ProjectScoreForm, SponsorIntentForm
 from interactions.models import (
+    AuthorshipIntent,
     ClaimType,
     InteractionStatus,
     ParticipationRole,
@@ -107,8 +108,13 @@ api = NinjaAPI(
 )
 
 REVIEWABLE_INTERACTION_STATUSES = {InteractionStatus.APPROVED, InteractionStatus.REJECTED}
+REVIEW_REQUIRED_CLAIM_TYPES = {ClaimType.LEADER, ClaimType.PAPER_FIRST_UNIT}
 REVIEWABLE_CONTRIBUTION_STATUSES = {ContributionStatus.APPROVED, ContributionStatus.REJECTED}
 ACTIVE_VIEWER_INTERACTION_STATUSES = {InteractionStatus.APPROVED, InteractionStatus.PENDING}
+PROJECT_PARTICIPATION_CREDIT_COST = 50
+PROJECT_COMPLETION_CREDIT_RETURN = 100
+PROFILE_COMPLETION_BONUS = 5
+CREDIT_TRANSFER_MAX_AMOUNT = 50
 USER_PROJECT_ALLOWED_STAGES = {ProjectStage.DRAFT, ProjectStage.OPEN_RECRUITING}
 DAILY_USER_PROJECT_UPLOAD_LIMIT = 10
 AUDIT_ACTION_MAX_LENGTH = 120
@@ -183,6 +189,7 @@ class InterestRequest(Schema):
     available_hours_per_week: int = 0
     experience: Optional[str] = ""
     message: Optional[str] = ""
+    authorship_intention: str = AuthorshipIntent.CONTRIBUTION
 
 
 class ClaimRequest(Schema):
@@ -286,6 +293,12 @@ class InteractionStatusRequest(Schema):
 
 
 class InteractionWithdrawRequest(Schema):
+    reason: Optional[str] = ""
+
+
+class CreditTransferRequest(Schema):
+    target_uid: str
+    amount: int
     reason: Optional[str] = ""
 
 
@@ -416,6 +429,7 @@ def meta(request):
             "project_stages": choice_payload(ProjectStage.choices),
             "profile_roles": choice_payload(PUBLIC_ROLE_CHOICES),
             "participation_roles": choice_payload(ParticipationRole.choices),
+            "authorship_intents": choice_payload(AuthorshipIntent.choices),
             "claim_types": choice_payload(ClaimType.choices),
             "sponsor_types": choice_payload(SponsorType.choices),
             "platform_stats": platform_stats_payload(),
@@ -648,10 +662,14 @@ def profile_patch(request, payload: ProfilePatchRequest):
             error_message="Profile update failed.",
         )
         return fail("Profile update failed.", status=422, code="validation_error", errors=form_errors(form))
-    form.save()
+    with transaction.atomic():
+        form.save()
+        bonus_entry = grant_profile_completion_bonus_once(request.user, request.user)
     request.user.refresh_from_db()
     request.user.profile.refresh_from_db()
     audit(request.user, "profile.update", "UserProfile", audit_user_target_id(request.user), before=before, after=audit_user_snapshot(request.user))
+    if bonus_entry:
+        audit(request.user, "credit.profile_completion_bonus", "CreditLedger", bonus_entry.pk, after=credit_ledger_payload(bonus_entry))
     return ok(user_payload(request.user))
 
 
@@ -675,10 +693,14 @@ def profile_put(request, payload: ProfilePatchRequest):
             error_message="Profile update failed.",
         )
         return fail("Profile update failed.", status=422, code="validation_error", errors=form_errors(form))
-    form.save()
+    with transaction.atomic():
+        form.save()
+        bonus_entry = grant_profile_completion_bonus_once(request.user, request.user)
     request.user.refresh_from_db()
     request.user.profile.refresh_from_db()
     audit(request.user, "profile.update", "UserProfile", audit_user_target_id(request.user), before=before, after=audit_user_snapshot(request.user))
+    if bonus_entry:
+        audit(request.user, "credit.profile_completion_bonus", "CreditLedger", bonus_entry.pk, after=credit_ledger_payload(bonus_entry))
     return ok(user_payload(request.user))
 
 
@@ -786,7 +808,7 @@ def project_status_card(request, project_id: int):
     uid_groups = status_uid_groups_for_project(project, bool(request.user.is_authenticated))
     return ok(
         {
-            "project": project_summary_payload(project),
+            "project": project_list_payload(project, request.user),
             "viewer_state": viewer_state_payload,
             "participants": {
                 "count": len(participant_uids),
@@ -1266,20 +1288,30 @@ def admin_interaction_update_status(request, type: str, interaction_id: int, pay
     auth_error = require_capability(request, "review_interactions")
     if auth_error:
         return auth_error
-    if type != "sponsor":
-        return fail("管理员只审批资助意向。", status=422, code="invalid_interaction_type")
+    if type not in {"claim", "sponsor"}:
+        return fail("管理员只审批认领和资助意向。", status=422, code="invalid_interaction_type")
     if payload.status not in REVIEWABLE_INTERACTION_STATUSES:
         return fail("Invalid interaction status.", status=422, code="validation_error")
     with transaction.atomic():
         item = get_interaction_or_404(type, interaction_id)
         item = item.__class__.objects.select_for_update().select_related("user", "user__profile", "project", "project__theme").get(pk=item.pk)
+        if type == "claim" and item.claim_type not in REVIEW_REQUIRED_CLAIM_TYPES:
+            return fail("该认领类型不需要管理员审核。", status=422, code="invalid_interaction_type")
         project = Project.objects.select_for_update().get(pk=item.project_id)
         before = interaction_payload(type, item)
         if item.status != InteractionStatus.PENDING:
             return fail("Only pending interactions can be reviewed.", status=422, code="interaction_not_pending")
         previous_project_stage = project.stage
         item.status = payload.status
-        item.save(update_fields=["status", "updated_at"])
+        update_fields = ["status", "updated_at"]
+        if type == "claim":
+            item.review_comment = payload.review_note or ""
+            item.reviewed_by = request.user
+            item.reviewed_at = timezone.now()
+            update_fields.extend(["review_comment", "reviewed_by", "reviewed_at"])
+        item.save(update_fields=update_fields)
+        if type == "claim" and item.status == InteractionStatus.APPROVED:
+            maybe_advance_project_stage_after_interaction(project, request.user)
         item.project.refresh_from_db()
         after = interaction_payload(type, item)
         audit(
@@ -1416,6 +1448,62 @@ def me_credit_list(request, page: int = 1, page_size: int = 50):
         .order_by("-created_at")
     )
     return ok(paginated_queryset(entries, page, page_size, credit_ledger_payload, max_page_size=100))
+
+
+@api.post("/me/credits/transfer/", response={200: Envelope, 401: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Me"])
+def me_credit_transfer(request, payload: CreditTransferRequest):
+    auth_error = require_login(request)
+    if auth_error:
+        return auth_error
+    target_uid = str(payload.target_uid or "").strip()
+    amount = int(payload.amount or 0)
+    reason = str(payload.reason or "").strip()[:200]
+    if not target_uid:
+        return fail("请输入接收人的 UID。", status=422, code="validation_error")
+    if amount < 1 or amount > CREDIT_TRANSFER_MAX_AMOUNT:
+        return fail("单次转赠积分需在 1 到 50 之间。", status=422, code="validation_error")
+    if target_uid == request.user.profile.uid:
+        return fail("不能给自己转赠积分。", status=422, code="validation_error")
+    with transaction.atomic():
+        source_profile = UserProfile.objects.select_for_update().select_related("user").get(user=request.user)
+        target_profile = get_object_or_404(
+            UserProfile.objects.select_for_update().select_related("user"),
+            uid=target_uid,
+            user__is_active=True,
+        )
+        reserved_amount = len(reserved_participation_project_ids(request.user)) * PROJECT_PARTICIPATION_CREDIT_COST
+        if source_profile.credit_balance - reserved_amount < amount:
+            return fail("当前可用积分不足，无法转赠。", status=422, code="insufficient_credits")
+        source_profile.credit_balance -= amount
+        target_profile.credit_balance += amount
+        source_profile.save(update_fields=["credit_balance", "updated_at"])
+        target_profile.save(update_fields=["credit_balance", "updated_at"])
+        source_entry = CreditLedger.objects.create(
+            user=source_profile.user,
+            action_type=CreditLedger.ActionType.TRANSFER,
+            amount=-amount,
+            balance_after=source_profile.credit_balance,
+            reason=reason or f"转赠给 {target_profile.uid}",
+            created_by=request.user,
+        )
+        target_entry = CreditLedger.objects.create(
+            user=target_profile.user,
+            action_type=CreditLedger.ActionType.TRANSFER,
+            amount=amount,
+            balance_after=target_profile.credit_balance,
+            reason=reason or f"收到 {source_profile.uid} 转赠",
+            created_by=request.user,
+        )
+    request.user.profile.refresh_from_db()
+    audit(request.user, "credit.transfer_send", "CreditLedger", source_entry.pk, after=credit_ledger_payload(source_entry))
+    audit(request.user, "credit.transfer_receive", "CreditLedger", target_entry.pk, after=credit_ledger_payload(target_entry))
+    return ok(
+        {
+            "balance": request.user.profile.credit_balance,
+            "sent": credit_ledger_payload(source_entry),
+            "received": credit_ledger_payload(target_entry),
+        }
+    )
 
 
 @api.get("/admin/tasks/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope}, tags=["Admin"])
@@ -2192,12 +2280,16 @@ def admin_project_bulk_archive(request, payload: ProjectBulkArchiveRequest):
     ids = sorted({int(value) for value in payload.ids if int(value) > 0})
     if not ids:
         return fail("ids cannot be empty.", status=422, code="validation_error")
+    returned_entries = []
     with transaction.atomic():
         projects = list(Project.objects.filter(id__in=ids).order_by("topic_id"))
         found_ids = {project.id for project in projects}
         missing_ids = [value for value in ids if value not in found_ids]
         before = [{"id": project.id, "topic_id": project.topic_id, "stage": project.stage, "is_public": project.is_public} for project in projects]
         Project.objects.filter(id__in=found_ids).update(stage=ProjectStage.ARCHIVED, is_public=False, updated_at=timezone.now())
+        active_project_ids = [project.id for project in projects if project.stage == ProjectStage.ACTIVE]
+        for project in Project.objects.select_for_update().filter(id__in=active_project_ids).order_by("topic_id"):
+            returned_entries.extend(grant_project_completion_credits_once(project, request.user))
         audit(
             request.user,
             "project.bulk_archive",
@@ -2206,6 +2298,8 @@ def admin_project_bulk_archive(request, payload: ProjectBulkArchiveRequest):
             before={"projects": before},
             after={"archived_count": len(projects), "ids": ids, "missing_ids": missing_ids},
         )
+        for entry in returned_entries:
+            audit(request.user, "credit.project_completion_return", "CreditLedger", entry.pk, after=credit_ledger_payload(entry))
     return ok({"archived_count": len(projects), "ids": ids, "missing_ids": missing_ids})
 
 
@@ -2241,6 +2335,8 @@ def admin_project_bulk_action(request, payload: ProjectBulkActionRequest):
             update_fields["is_public"] = False
 
     document_paths = []
+    charged_entries = []
+    returned_entries = []
     with transaction.atomic():
         projects = list(Project.objects.filter(id__in=ids).prefetch_related("documents").order_by("topic_id"))
         found_ids = {project.id for project in projects}
@@ -2254,6 +2350,22 @@ def admin_project_bulk_action(request, payload: ProjectBulkActionRequest):
             Project.objects.filter(id__in=found_ids).delete()
         else:
             Project.objects.filter(id__in=found_ids).update(**update_fields, updated_at=timezone.now())
+            if action == "set_stage" and update_fields.get("stage") == ProjectStage.ACTIVE:
+                active_project_ids = [
+                    project.id
+                    for project in projects
+                    if project.stage != ProjectStage.ACTIVE
+                ]
+                for project in Project.objects.select_for_update().filter(id__in=active_project_ids).order_by("topic_id"):
+                    charged_entries.extend(charge_project_participation_credits_once(project, request.user))
+            if update_fields.get("stage") == ProjectStage.ARCHIVED:
+                completed_project_ids = [
+                    project.id
+                    for project in projects
+                    if project.stage == ProjectStage.ACTIVE
+                ]
+                for project in Project.objects.select_for_update().filter(id__in=completed_project_ids).order_by("topic_id"):
+                    returned_entries.extend(grant_project_completion_credits_once(project, request.user))
         after = {
             "action": action,
             "affected_count": len(projects),
@@ -2262,6 +2374,10 @@ def admin_project_bulk_action(request, payload: ProjectBulkActionRequest):
             **update_fields,
         }
         audit(request.user, f"project.bulk_{action}", "Project", "bulk", before={"projects": before}, after=after)
+        for entry in charged_entries:
+            audit(request.user, "credit.project_participation_cost", "CreditLedger", entry.pk, after=credit_ledger_payload(entry))
+        for entry in returned_entries:
+            audit(request.user, "credit.project_completion_return", "CreditLedger", entry.pk, after=credit_ledger_payload(entry))
 
     if action == "delete":
         for path in document_paths:
@@ -2339,6 +2455,7 @@ def admin_project_update(request, project_id: int, payload: ProjectWriteRequest)
         return auth_error
     project = get_object_or_404(Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents"), pk=project_id)
     before = project_detail_payload(project)
+    previous_stage = project.stage
     patch_data = payload.model_dump(exclude_unset=True, exclude_none=True)
     normalize_project_identity_alias(patch_data)
     if "topic_id" in patch_data and patch_data["topic_id"] != project.topic_id:
@@ -2386,8 +2503,22 @@ def admin_project_update(request, project_id: int, payload: ProjectWriteRequest)
             error_message=str(exc),
         )
         return fail(str(exc), status=422, code="validation_error")
+    charged_entries = []
+    returned_entries = []
+    if previous_stage != ProjectStage.ACTIVE and project.stage == ProjectStage.ACTIVE:
+        with transaction.atomic():
+            locked_project = Project.objects.select_for_update().get(pk=project.pk)
+            charged_entries = charge_project_participation_credits_once(locked_project, request.user)
+    if previous_stage == ProjectStage.ACTIVE and project.stage == ProjectStage.ARCHIVED:
+        with transaction.atomic():
+            locked_project = Project.objects.select_for_update().get(pk=project.pk)
+            returned_entries = grant_project_completion_credits_once(locked_project, request.user)
     project = get_object_or_404(Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents"), pk=project.pk)
     audit(request.user, "project.update", "Project", project.id, before=before, after=project_detail_payload(project))
+    for entry in charged_entries:
+        audit(request.user, "credit.project_participation_cost", "CreditLedger", entry.pk, after=credit_ledger_payload(entry))
+    for entry in returned_entries:
+        audit(request.user, "credit.project_completion_return", "CreditLedger", entry.pk, after=credit_ledger_payload(entry))
     return ok(project_detail_payload(project))
 
 
@@ -2667,6 +2798,8 @@ def interest_project(request, project_id: int, payload: InterestRequest):
     project = get_object_or_404(Project, pk=project_id, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
     if project.stage not in RECRUITING_PROJECT_STAGES:
         return fail("Project is not recruiting.", status=422, code="project_not_recruiting")
+    if not has_required_participation_credits(request.user, project=project):
+        return fail("参与课题需要50积分，当前积分不足。", status=422, code="insufficient_credits")
     form = ProjectInterestForm(payload.model_dump())
     if not form.is_valid():
         return fail("Interest submit failed.", status=422, code="validation_error", errors=form_errors(form))
@@ -2679,6 +2812,7 @@ def interest_project(request, project_id: int, payload: InterestRequest):
                 "available_hours_per_week": form.cleaned_data["available_hours_per_week"],
                 "experience": form.cleaned_data.get("experience", ""),
                 "message": form.cleaned_data.get("message", ""),
+                "authorship_intention": form.cleaned_data["authorship_intention"],
                 "status": InteractionStatus.APPROVED,
             },
         )
@@ -2696,19 +2830,31 @@ def claim_project(request, project_id: int, payload: ClaimRequest):
     project = get_object_or_404(Project, pk=project_id, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
     if project.stage not in RECRUITING_PROJECT_STAGES:
         return fail("Project is not recruiting.", status=422, code="project_not_recruiting")
+    if not has_required_participation_credits(request.user, project=project):
+        return fail("参与课题需要50积分，当前积分不足。", status=422, code="insufficient_credits")
     form = ProjectClaimIntentForm(payload.model_dump())
     if not form.is_valid():
         return fail("Claim submit failed.", status=422, code="validation_error", errors=form_errors(form))
+    claim_type = form.cleaned_data["claim_type"]
+    requires_review = claim_type in REVIEW_REQUIRED_CLAIM_TYPES
     with transaction.atomic():
         claim, _ = ProjectClaimIntent.objects.update_or_create(
             user=request.user,
             project=project,
-            claim_type=form.cleaned_data["claim_type"],
-            defaults={"message": form.cleaned_data.get("message", ""), "status": InteractionStatus.APPROVED},
+            claim_type=claim_type,
+            defaults={
+                "message": form.cleaned_data.get("message", ""),
+                "status": InteractionStatus.PENDING if requires_review else InteractionStatus.APPROVED,
+                "review_comment": "",
+                "reviewed_by": None,
+                "reviewed_at": None,
+            },
         )
-        maybe_advance_project_stage_after_interaction(project, request.user)
+        if claim.status == InteractionStatus.APPROVED:
+            maybe_advance_project_stage_after_interaction(project, request.user)
         claim.refresh_from_db()
-        audit(request.user, "interaction.auto_approve", "ProjectClaimIntent", claim.pk, after=claim_payload(claim))
+        audit_action = "interaction.submit_claim_for_review" if requires_review else "interaction.auto_approve"
+        audit(request.user, audit_action, "ProjectClaimIntent", claim.pk, after=claim_payload(claim))
     return 201, ok(claim_payload(claim))
 
 
@@ -3457,7 +3603,10 @@ def status_uid_groups_for_project(project, authenticated):
 
 
 def pending_interaction_count():
-    return SponsorIntent.objects.filter(status=InteractionStatus.PENDING).count()
+    return (
+        SponsorIntent.objects.filter(status=InteractionStatus.PENDING).count()
+        + ProjectClaimIntent.objects.filter(status=InteractionStatus.PENDING, claim_type__in=REVIEW_REQUIRED_CLAIM_TYPES).count()
+    )
 
 
 def maybe_advance_project_stage_after_interaction(project, actor):
@@ -3575,7 +3724,7 @@ def discussion_audit_snapshot(discussion):
 
 
 def interaction_kinds(type_filter=""):
-    valid = ["sponsor"]
+    valid = ["claim", "sponsor"]
     if not type_filter:
         return valid
     return [type_filter] if type_filter in valid else []
@@ -3583,11 +3732,14 @@ def interaction_kinds(type_filter=""):
 
 def interaction_queryset(kind):
     model = interaction_model(kind)
-    return (
+    queryset = (
         model.objects.select_related("user", "user__profile", "project", "project__theme")
         .prefetch_related("project__tags")
         .order_by("-updated_at")
     )
+    if kind == "claim":
+        queryset = queryset.filter(claim_type__in=REVIEW_REQUIRED_CLAIM_TYPES)
+    return queryset
 
 
 def interaction_model(kind):
@@ -3621,7 +3773,11 @@ def interaction_payload(kind, item):
         subtype = item.claim_type
         subtype_label = item.get_claim_type_display()
         message = item.message
-        detail = {}
+        detail = {
+            "review_comment": getattr(item, "review_comment", ""),
+            "reviewed_by": uid_only_user_payload(item.reviewed_by) if getattr(item, "reviewed_by_id", None) else None,
+            "reviewed_at": getattr(item, "reviewed_at", None),
+        }
     else:
         subtype = item.sponsor_type
         subtype_label = item.get_sponsor_type_display()
@@ -3637,6 +3793,7 @@ def interaction_payload(kind, item):
         "detail": detail,
         "status": item.status,
         "status_label": item.get_status_display(),
+        "review_comment": getattr(item, "review_comment", ""),
         "user": uid_only_user_payload(item.user),
         "project": project_summary_payload(item.project),
         "created_at": item.created_at,
@@ -3718,8 +3875,95 @@ def viewer_state(user, project):
     }
 
 
+def collaboration_display_name(user):
+    if not user:
+        return ""
+    profile = getattr(user, "profile", None)
+    if profile:
+        return profile.real_name or profile.display_name or user.username or profile.uid or ""
+    return user.username or ""
+
+
+def collaboration_contact_payload(user, include_wechat=False):
+    if not user:
+        return None
+    profile = getattr(user, "profile", None)
+    return {
+        "uid": getattr(profile, "uid", None),
+        "name": collaboration_display_name(user),
+        "wechat": getattr(profile, "contact_wechat", "") if include_wechat else "",
+        "wechat_visible": bool(include_wechat and getattr(profile, "contact_wechat", "")),
+    }
+
+
+def interest_team_role_key(interest):
+    profile = getattr(interest.user, "profile", None)
+    role_type = normalize_public_role(getattr(profile, "role_type", ""))
+    if not role_type:
+        role_type = {
+            "医生": RoleType.DOCTOR,
+            "学生": RoleType.UNDERGRAD_OR_BELOW,
+            "大学老师": RoleType.PHD_OR_ABOVE,
+            "AI工程师": RoleType.ENGINEER,
+            "工程师": RoleType.ENGINEER,
+        }.get(interest.role, "")
+    if not role_type and interest.role == "其他":
+        role_type = RoleType.UNDERGRAD_OR_BELOW
+    if role_type == RoleType.DOCTOR:
+        return "doctor"
+    if role_type in {RoleType.UNDERGRAD_OR_BELOW, RoleType.MASTER_STUDENT, RoleType.PHD_STUDENT}:
+        return "student"
+    if role_type == RoleType.PHD_OR_ABOVE:
+        return "mentor"
+    return ""
+
+
+def project_team_contact_groups(project, include_wechat=False):
+    groups = {role["key"]: [] for role in project.team_status.get("required_roles", [])}
+    seen = {key: set() for key in groups}
+
+    def add_member(key, user):
+        if key not in groups or not user or user.id in seen[key]:
+            return
+        payload = collaboration_contact_payload(user, include_wechat=include_wechat)
+        if payload:
+            groups[key].append(payload)
+            seen[key].add(user.id)
+
+    interests = ProjectInterest.objects.filter(project=project, status=InteractionStatus.APPROVED).select_related("user", "user__profile")
+    for interest in interests:
+        add_member(interest_team_role_key(interest), interest.user)
+        if interest.role == ParticipationRole.LEADER:
+            add_member("leader", interest.user)
+
+    claims = ProjectClaimIntent.objects.filter(
+        project=project,
+        status=InteractionStatus.APPROVED,
+        claim_type=ClaimType.LEADER,
+    ).select_related("user", "user__profile")
+    for claim in claims:
+        add_member("leader", claim.user)
+
+    return [
+        {
+            "key": role["key"],
+            "label": role["label"],
+            "members": groups.get(role["key"], []),
+        }
+        for role in project.team_status.get("required_roles", [])
+    ]
+
+
+def enrich_project_collaboration_payload(payload, project, user):
+    include_contacts = bool(getattr(user, "is_authenticated", False))
+    payload["created_by_display"] = collaboration_contact_payload(project.created_by, include_wechat=include_contacts)
+    payload["team_contact_groups"] = project_team_contact_groups(project, include_wechat=include_contacts) if include_contacts else []
+    return payload
+
+
 def project_list_payload(project, user):
     payload = project_summary_payload(project)
+    enrich_project_collaboration_payload(payload, project, user)
     if getattr(user, "is_authenticated", False):
         payload["viewer_state"] = viewer_state(user, project)
     return payload
@@ -3739,6 +3983,143 @@ def profile_form_initial(profile):
         "contact_wechat": profile.contact_wechat,
         "bio": profile.bio,
     }
+
+
+def profile_completion_bonus_ready(profile):
+    return bool(
+        profile.role_type
+        and str(profile.organization or "").strip()
+        and str(profile.research_interests or "").strip()
+        and str(profile.skills or "").strip()
+        and (str(profile.contact_email or "").strip() or str(profile.contact_wechat or "").strip())
+    )
+
+
+def grant_profile_completion_bonus_once(user, actor):
+    profile = UserProfile.objects.select_for_update().get(user=user)
+    if not profile_completion_bonus_ready(profile):
+        return None
+    exists = CreditLedger.objects.select_for_update().filter(
+        user=user,
+        action_type=CreditLedger.ActionType.PROFILE_COMPLETION_BONUS,
+    ).exists()
+    if exists:
+        return None
+    profile.credit_balance += PROFILE_COMPLETION_BONUS
+    profile.save(update_fields=["credit_balance", "updated_at"])
+    return CreditLedger.objects.create(
+        user=user,
+        action_type=CreditLedger.ActionType.PROFILE_COMPLETION_BONUS,
+        amount=PROFILE_COMPLETION_BONUS,
+        balance_after=profile.credit_balance,
+        reason="首次完善身份、机构、研究兴趣、技能和联系方式",
+        created_by=actor,
+    )
+
+
+def reserved_participation_project_ids(user, exclude_project=None):
+    project_ids = set(
+        ProjectInterest.objects.filter(user=user, status__in=ACTIVE_VIEWER_INTERACTION_STATUSES)
+        .exclude(project__stage=ProjectStage.ARCHIVED)
+        .values_list("project_id", flat=True)
+    )
+    project_ids.update(
+        ProjectClaimIntent.objects.filter(user=user, status__in=ACTIVE_VIEWER_INTERACTION_STATUSES)
+        .exclude(project__stage=ProjectStage.ARCHIVED)
+        .values_list("project_id", flat=True)
+    )
+    if exclude_project:
+        project_ids.discard(exclude_project.id)
+    if not project_ids:
+        return set()
+    charged_project_ids = set(
+        CreditLedger.objects.filter(
+            user=user,
+            project_id__in=project_ids,
+            action_type=CreditLedger.ActionType.PROJECT_PARTICIPATION_COST,
+        ).values_list("project_id", flat=True)
+    )
+    return project_ids - charged_project_ids
+
+
+def available_participation_credits(user, exclude_project=None):
+    profile = getattr(user, "profile", None)
+    if not profile:
+        return 0
+    reserved = len(reserved_participation_project_ids(user, exclude_project=exclude_project)) * PROJECT_PARTICIPATION_CREDIT_COST
+    return profile.credit_balance - reserved
+
+
+def has_required_participation_credits(user, project=None):
+    return available_participation_credits(user, exclude_project=project) >= PROJECT_PARTICIPATION_CREDIT_COST
+
+
+def charge_project_participation_credits_once(project, actor):
+    user_ids = set(
+        ProjectInterest.objects.filter(project=project, status=InteractionStatus.APPROVED)
+        .values_list("user_id", flat=True)
+    )
+    user_ids.update(
+        ProjectClaimIntent.objects.filter(project=project, status=InteractionStatus.APPROVED)
+        .values_list("user_id", flat=True)
+    )
+    charged = []
+    for profile in UserProfile.objects.select_for_update().filter(user_id__in=user_ids).select_related("user").order_by("uid"):
+        exists = CreditLedger.objects.select_for_update().filter(
+            user=profile.user,
+            project=project,
+            action_type=CreditLedger.ActionType.PROJECT_PARTICIPATION_COST,
+        ).exists()
+        if exists:
+            continue
+        profile.credit_balance -= PROJECT_PARTICIPATION_CREDIT_COST
+        profile.save(update_fields=["credit_balance", "updated_at"])
+        charged.append(
+            CreditLedger.objects.create(
+                user=profile.user,
+                project=project,
+                action_type=CreditLedger.ActionType.PROJECT_PARTICIPATION_COST,
+                amount=-PROJECT_PARTICIPATION_CREDIT_COST,
+                balance_after=profile.credit_balance,
+                reason=f"课题进入进行中：{project.topic_code}",
+                created_by=actor,
+            )
+        )
+    return charged
+
+
+def grant_project_completion_credits_once(project, actor):
+    user_ids = set(
+        ProjectInterest.objects.filter(project=project, status=InteractionStatus.APPROVED)
+        .values_list("user_id", flat=True)
+    )
+    user_ids.update(
+        ProjectClaimIntent.objects.filter(project=project, status=InteractionStatus.APPROVED)
+        .values_list("user_id", flat=True)
+    )
+    returned = []
+    for profile in UserProfile.objects.select_for_update().filter(user_id__in=user_ids).select_related("user").order_by("uid"):
+        exists = CreditLedger.objects.select_for_update().filter(
+            user=profile.user,
+            project=project,
+            action_type=CreditLedger.ActionType.PROJECT_COMPLETION_RETURN,
+        ).exists()
+        if exists:
+            continue
+        profile.credit_balance += PROJECT_COMPLETION_CREDIT_RETURN
+        profile.save(update_fields=["credit_balance", "updated_at"])
+        returned.append(
+            CreditLedger.objects.create(
+                user=profile.user,
+                project=project,
+                action_type=CreditLedger.ActionType.PROJECT_COMPLETION_RETURN,
+                amount=PROJECT_COMPLETION_CREDIT_RETURN,
+                balance_after=profile.credit_balance,
+                reason=f"课题结题返还：{project.topic_code}",
+                created_by=actor,
+            )
+        )
+    return returned
 
 
 def validate_admin_project_payload(data, creating, current_project=None, allow_create_theme=False):

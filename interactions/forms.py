@@ -1,6 +1,6 @@
 from django import forms
 
-from .models import ClaimType, ParticipationRole, ProjectClaimIntent, ProjectInterest, ProjectScore, SponsorIntent, SponsorType
+from .models import AuthorshipIntent, ClaimType, ParticipationRole, ProjectClaimIntent, ProjectInterest, ProjectScore, SponsorIntent, SponsorType
 
 
 class ProjectScoreForm(forms.ModelForm):
@@ -15,10 +15,11 @@ class ProjectScoreForm(forms.ModelForm):
 
 class ProjectInterestForm(forms.ModelForm):
     role = forms.ChoiceField(choices=ParticipationRole.choices)
+    authorship_intention = forms.ChoiceField(choices=AuthorshipIntent.choices)
 
     class Meta:
         model = ProjectInterest
-        fields = ("role", "available_hours_per_week", "experience", "message")
+        fields = ("role", "available_hours_per_week", "experience", "message", "authorship_intention")
         widgets = {
             "experience": forms.Textarea(attrs={"rows": 3}),
             "message": forms.Textarea(attrs={"rows": 3}),

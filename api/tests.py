@@ -1873,7 +1873,7 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "permission_denied")
 
-    def test_project_status_card_exposes_uid_only_for_authenticated_viewer(self):
+    def test_project_status_card_exposes_uid_and_contact_groups_for_authenticated_viewer(self):
         student = User.objects.create_user(username="studentuid", email="studentuid@example.com", password="StrongPass12345")
         doctor = User.objects.create_user(username="doctoruid", email="doctoruid@example.com", password="StrongPass12345")
         pending = User.objects.create_user(username="pendinguid", email="pendinguid@example.com", password="StrongPass12345")
@@ -1937,16 +1937,19 @@ class ApiTests(TestCase):
         group_labels = [group["label"] for group in payload["uid_groups"]["groups"]]
         self.assertEqual(
             group_labels,
-            ["收藏", "参与：学生（已通过）", "参与：医生（待处理）", "认领项目负责人（已通过）", "资助：算力（已通过）"],
+            ["收藏", "参与：学生（已通过）", "参与：医生（待处理）", "认领项目负责人（已通过）", "资助：资助算力（已通过）"],
         )
         uid_groups = {group["label"]: set(group["uids"]) for group in payload["uid_groups"]["groups"]}
         self.assertIn(student.profile.uid, uid_groups["收藏"])
         self.assertIn(student.profile.uid, uid_groups["参与：学生（已通过）"])
         self.assertIn(pending.profile.uid, uid_groups["参与：医生（待处理）"])
         self.assertIn(doctor.profile.uid, uid_groups["认领项目负责人（已通过）"])
-        self.assertIn(student.profile.uid, uid_groups["资助：算力（已通过）"])
+        self.assertIn(student.profile.uid, uid_groups["资助：资助算力（已通过）"])
         self.assertNotIn("studentuid@example.com", json.dumps(payload, ensure_ascii=False))
-        self.assertNotIn("studentuid", json.dumps(payload, ensure_ascii=False))
+        contact_groups = {group["key"]: group["members"] for group in payload["project"]["team_contact_groups"]}
+        self.assertEqual(contact_groups["student"][0]["uid"], student.profile.uid)
+        self.assertEqual(contact_groups["student"][0]["name"], "studentuid")
+        self.assertIn("wechat", contact_groups["student"][0])
 
         self.client.force_login(follower)
         ProjectFollow.objects.create(user=follower, project=self.project)
@@ -1959,7 +1962,7 @@ class ApiTests(TestCase):
         follow_group = next(group for group in follower_payload["uid_groups"]["groups"] if group["key"] == "follow")
         self.assertEqual(follow_group["uids"], sorted([student.profile.uid, follower.profile.uid]))
 
-    def test_interest_and_claim_auto_approve_and_admin_only_reviews_sponsors(self):
+    def test_interest_auto_approves_and_admin_reviews_claims_and_sponsors(self):
         applicant = User.objects.create_user(username="applicant", email="applicant@example.com", password="StrongPass12345")
         self.client.force_login(applicant)
 
@@ -1976,11 +1979,11 @@ class ApiTests(TestCase):
 
         claim_response = self.post_json(
             f"/api/projects/{self.project.pk}/claim/",
-            {"claim_type": "leader", "message": "认领负责人"},
+            {"claim_type": "leader", "message": "认领项目负责人"},
         )
         self.assertEqual(claim_response.status_code, 201)
         claim = ProjectClaimIntent.objects.get(user=applicant, project=self.project, claim_type="leader")
-        self.assertEqual(claim.status, InteractionStatus.APPROVED)
+        self.assertEqual(claim.status, InteractionStatus.PENDING)
 
         sponsor_response = self.post_json(
             f"/api/projects/{self.project.pk}/sponsor/",
@@ -1996,15 +1999,17 @@ class ApiTests(TestCase):
         admin = self.login_platform_admin()
         overview_response = self.client.get("/api/admin/overview/")
         self.assertEqual(overview_response.status_code, 200)
-        self.assertEqual(overview_response.json()["data"]["counts"]["pending_interactions"], 1)
+        self.assertEqual(overview_response.json()["data"]["counts"]["pending_interactions"], 2)
 
         list_response = self.client.get("/api/admin/interactions/?status=pending")
         self.assertEqual(list_response.status_code, 200)
         rows = list_response.json()["data"]["results"]
-        self.assertEqual([row["type"] for row in rows], ["sponsor"])
-        self.assertEqual(rows[0]["user"]["uid"], applicant.profile.uid)
-        self.assertNotIn("applicant@example.com", json.dumps(rows[0], ensure_ascii=False))
-        self.assertNotIn("applicant", json.dumps(rows[0], ensure_ascii=False))
+        self.assertEqual({row["type"] for row in rows}, {"claim", "sponsor"})
+        self.assertEqual({row["user"]["uid"] for row in rows}, {applicant.profile.uid})
+        self.assertTrue(any(row["subtype"] == "leader" for row in rows))
+        self.assertTrue(any(row["subtype"] == "compute" for row in rows))
+        self.assertNotIn("applicant@example.com", json.dumps(rows, ensure_ascii=False))
+        self.assertNotIn("applicant", json.dumps(rows, ensure_ascii=False))
 
         invalid_review_response = self.patch_json(
             f"/api/admin/interactions/interest/{interest.pk}/status/",
@@ -2012,6 +2017,16 @@ class ApiTests(TestCase):
         )
         self.assertEqual(invalid_review_response.status_code, 422)
         self.assertEqual(invalid_review_response.json()["error"]["code"], "invalid_interaction_type")
+
+        claim_review_response = self.patch_json(
+            f"/api/admin/interactions/claim/{claim.pk}/status/",
+            {"status": "approved", "review_note": "负责人认领通过"},
+        )
+        self.assertEqual(claim_review_response.status_code, 200)
+        claim.refresh_from_db()
+        self.assertEqual(claim.status, InteractionStatus.APPROVED)
+        self.assertEqual(claim.review_comment, "负责人认领通过")
+        self.assertEqual(claim.reviewed_by, admin)
 
         review_response = self.patch_json(
             f"/api/admin/interactions/sponsor/{sponsor.pk}/status/",
@@ -2047,10 +2062,126 @@ class ApiTests(TestCase):
         audit_response = self.client.get("/api/admin/audit-logs/?action=interaction.review")
         self.assertEqual(audit_response.status_code, 200)
         audit_entry = audit_response.json()["data"]["results"][0]
-        self.assertEqual(audit_entry["action_label"], "审核资助意向")
+        self.assertEqual(audit_entry["action_label"], "审核协作意向")
         self.assertIn(applicant.profile.uid, audit_entry["summary"])
         self.assertIn("已通过", audit_entry["summary"])
         self.assertNotIn('{"id"', audit_entry["summary"])
+
+    def test_credit_rules_cover_profile_transfer_reserve_and_completion_return(self):
+        donor = User.objects.create_user(username="creditdonor", email="creditdonor@example.com", password="StrongPass12345")
+        receiver = User.objects.create_user(username="creditreceiver", email="creditreceiver@example.com", password="StrongPass12345")
+        self.client.force_login(donor)
+
+        profile_response = self.patch_json(
+            "/api/me/profile/",
+            {
+                "display_name": "积分用户",
+                "real_name": "积分用户",
+                "role_type": "doctor",
+                "organization": "测试医院",
+                "research_interests": "医学 AI",
+                "skills": "临床审核",
+                "contact_email": "creditdonor@example.com",
+                "contact_wechat": "credit-donor",
+            },
+        )
+        self.assertEqual(profile_response.status_code, 200)
+        donor.profile.refresh_from_db()
+        self.assertEqual(donor.profile.credit_balance, 105)
+        self.assertTrue(
+            CreditLedger.objects.filter(user=donor, action_type=CreditLedger.ActionType.PROFILE_COMPLETION_BONUS).exists()
+        )
+
+        transfer_response = self.post_json(
+            "/api/me/credits/transfer/",
+            {"target_uid": receiver.profile.uid, "amount": 50, "reason": "协作支持"},
+        )
+        self.assertEqual(transfer_response.status_code, 200)
+        donor.profile.refresh_from_db()
+        receiver.profile.refresh_from_db()
+        self.assertEqual(donor.profile.credit_balance, 55)
+        self.assertEqual(receiver.profile.credit_balance, 150)
+
+        transfer_too_much_response = self.post_json(
+            "/api/me/credits/transfer/",
+            {"target_uid": receiver.profile.uid, "amount": 51},
+        )
+        self.assertEqual(transfer_too_much_response.status_code, 422)
+
+        participant = User.objects.create_user(username="creditparticipant", email="creditparticipant@example.com", password="StrongPass12345")
+        second_project = Project.objects.create(
+            topic_id=2,
+            title="第二个积分课题",
+            summary="第二个积分课题",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        third_project = Project.objects.create(
+            topic_id=3,
+            title="第三个积分课题",
+            summary="第三个积分课题",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        self.client.force_login(participant)
+        first_interest_response = self.post_json(
+            f"/api/projects/{self.project.pk}/interest/",
+            {"role": "学生", "available_hours_per_week": 4, "message": "第一个课题"},
+        )
+        self.assertEqual(first_interest_response.status_code, 201)
+        second_interest_response = self.post_json(
+            f"/api/projects/{second_project.pk}/interest/",
+            {"role": "学生", "available_hours_per_week": 4, "message": "第二个课题"},
+        )
+        self.assertEqual(second_interest_response.status_code, 201)
+        third_interest_response = self.post_json(
+            f"/api/projects/{third_project.pk}/interest/",
+            {"role": "学生", "available_hours_per_week": 4, "message": "第三个课题"},
+        )
+        self.assertEqual(third_interest_response.status_code, 422)
+        self.assertEqual(third_interest_response.json()["error"]["code"], "insufficient_credits")
+
+        reserved_transfer_response = self.post_json(
+            "/api/me/credits/transfer/",
+            {"target_uid": receiver.profile.uid, "amount": 1},
+        )
+        self.assertEqual(reserved_transfer_response.status_code, 422)
+        self.assertEqual(reserved_transfer_response.json()["error"]["code"], "insufficient_credits")
+
+        same_project_claim_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {"claim_type": "leader", "message": "同一课题负责人申请"},
+        )
+        self.assertEqual(same_project_claim_response.status_code, 201)
+
+        self.login_platform_admin()
+        active_response = self.patch_json(f"/api/admin/projects/{self.project.pk}/", {"stage": "active"})
+        self.assertEqual(active_response.status_code, 200)
+        participant.profile.refresh_from_db()
+        self.assertEqual(participant.profile.credit_balance, 50)
+        self.assertTrue(
+            CreditLedger.objects.filter(
+                user=participant,
+                project=self.project,
+                action_type=CreditLedger.ActionType.PROJECT_PARTICIPATION_COST,
+                amount=-50,
+            ).exists()
+        )
+
+        archived_response = self.patch_json(f"/api/admin/projects/{self.project.pk}/", {"stage": "archived"})
+        self.assertEqual(archived_response.status_code, 200)
+        participant.profile.refresh_from_db()
+        self.assertEqual(participant.profile.credit_balance, 150)
+        self.assertTrue(
+            CreditLedger.objects.filter(
+                user=participant,
+                project=self.project,
+                action_type=CreditLedger.ActionType.PROJECT_COMPLETION_RETURN,
+                amount=100,
+            ).exists()
+        )
 
     def test_sponsor_approval_does_not_auto_start_project(self):
         doctor = User.objects.create_user(username="readydoctor", email="readydoctor@example.com", password="StrongPass12345")

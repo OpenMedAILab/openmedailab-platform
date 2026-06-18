@@ -136,6 +136,7 @@ export const api = {
   updateMeTaskStatus: (id, payload) => request(`/api/me/tasks/${id}/status/`, { method: "PATCH", body: payload }),
   createMeContribution: (payload) => request("/api/me/contributions/", { method: "POST", body: payload }),
   createMeContributionWithFile: (formData) => requestForm("/api/me/contributions/upload/", formData),
+  transferCredits: (payload) => request("/api/me/credits/transfer/", { method: "POST", body: payload }),
   withdrawInteraction: (type, id, payload = {}) => request(`/api/me/interactions/${type}/${id}/withdraw/`, { method: "PATCH", body: payload }),
   adminOverview: () => request("/api/admin/overview/"),
   adminThemes: () => request("/api/admin/themes/"),
