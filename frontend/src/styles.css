@@ -845,8 +845,12 @@ textarea:focus {
 .project-card--self-related .project-card-headline .project-card-meta,
 .project-card-headline--self-related .project-card-meta {
   min-height: 32px;
-  padding-left: 56px;
+  padding-left: 82px;
   align-items: center;
+}
+
+.project-card--self-related .project-list-main {
+  padding-left: var(--self-relation-content-offset, 80px);
 }
 
 .self-relation-corner {
@@ -985,6 +989,22 @@ textarea:focus {
   background: linear-gradient(90deg, var(--teal), var(--blue));
   opacity: 0;
   transition: opacity 0.3s;
+}
+
+.project-card-hover-strip {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 4px;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: linear-gradient(90deg, var(--teal), var(--blue));
+  opacity: 0.78;
+  pointer-events: none;
+}
+
+.project-card--self-related .project-card-hover-strip,
+.project-card--self-related:hover .project-card-hover-strip {
+  background: linear-gradient(90deg, #f7d57a, #d99a18);
+  opacity: 1;
 }
 
 .card-topline,
@@ -1294,7 +1314,6 @@ textarea:focus {
 }
 
 .contact-hover-trigger {
-  position: relative;
   cursor: default;
 }
 
@@ -1304,13 +1323,13 @@ textarea:focus {
 }
 
 .contact-hover-card {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 8px);
-  z-index: 35;
-  display: none;
-  min-width: 220px;
-  max-width: min(300px, 80vw);
+  position: fixed;
+  z-index: 860;
+  display: grid;
+  gap: 8px;
+  width: min(300px, calc(100vw - 24px));
+  max-height: min(320px, calc(100dvh - 24px));
+  overflow: auto;
   padding: 12px;
   border: 1px solid rgba(15, 159, 154, 0.18);
   border-radius: 8px;
@@ -1319,18 +1338,6 @@ textarea:focus {
   color: var(--text);
   text-align: left;
   white-space: normal;
-}
-
-.contact-hover-trigger:hover > .contact-hover-card,
-.contact-hover-trigger:focus-visible > .contact-hover-card,
-.contact-hover-trigger:focus-within > .contact-hover-card {
-  display: grid;
-  gap: 8px;
-}
-
-.project-role-chip-row .team-contact-card {
-  left: 0;
-  right: auto;
 }
 
 .contact-hover-card strong,
@@ -3033,6 +3040,16 @@ textarea:focus {
   gap: 10px;
 }
 
+.sponsor-more-toggle {
+  align-self: flex-start;
+  min-height: 44px;
+  padding-inline: 0;
+}
+
+.sponsor-extra-options {
+  margin-top: -4px;
+}
+
 .checkbox-chip {
   display: inline-flex;
   align-items: center;
@@ -3049,7 +3066,8 @@ textarea:focus {
 
 .checkbox-chip input {
   width: 16px;
-  height: 16px;
+  height: 44px;
+  min-height: 44px;
   accent-color: #d99a18;
 }
 
@@ -4202,6 +4220,10 @@ code {
     text-align: left;
   }
 
+  .project-card .project-expanded-detail {
+    display: none;
+  }
+
   .project-pdf-actions {
     justify-content: flex-start;
     margin-left: 0;
@@ -4265,11 +4287,20 @@ code {
   }
 
   .toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: 10px;
+    margin-bottom: 12px;
+    padding: 10px;
   }
 
   .toolbar .filter-group.optional-mobile {
     display: none;
+  }
+
+  .toolbar .primary-button {
+    min-height: 46px;
+    padding: 0 16px;
+    font-size: 15px;
   }
 
   .brand {
@@ -4452,7 +4483,7 @@ code {
 
   .project-card--self-related .project-card-headline .project-card-meta,
   .project-card-headline--self-related .project-card-meta {
-    padding-left: 56px;
+    padding-left: 82px;
   }
 
   .project-card-headline--self-related .project-card-side {

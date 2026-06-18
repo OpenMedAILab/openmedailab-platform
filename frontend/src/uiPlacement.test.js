@@ -153,16 +153,20 @@ test("self-related project cards align meta chips near the corner ribbon without
 
   assert.match(mainSource, /project-card-headline--self-related/);
   assert.match(mainSource, /primarySelfRelationLabel\(project\)/);
+  assert.match(mainSource, /function selfRelationContentStyle\(project\)/);
+  assert.match(mainSource, /secondarySelfRelationLabels\(project\)\.length \* 72/);
+  assert.match(mainSource, /:style="selfRelationContentStyle\(project\)"/);
   assert.match(stylesSource, /\.project-card--self-related\s*\{[\s\S]*?padding-top:\s*108px;/);
   assert.match(stylesSource, /\.project-card-headline\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;/);
   assert.match(stylesSource, /\.project-card--self-related \.project-card-headline,\s*\.project-card-headline--self-related\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?top:\s*16px;[\s\S]*?left:\s*18px;[\s\S]*?right:\s*18px;[\s\S]*?align-items:\s*start;/);
-  assert.match(stylesSource, /\.project-card--self-related \.project-card-headline \.project-card-meta,\s*\.project-card-headline--self-related \.project-card-meta\s*\{[\s\S]*?padding-left:\s*56px;/);
+  assert.match(stylesSource, /\.project-card--self-related \.project-card-headline \.project-card-meta,\s*\.project-card-headline--self-related \.project-card-meta\s*\{[\s\S]*?padding-left:\s*82px;/);
+  assert.match(stylesSource, /\.project-card--self-related \.project-list-main\s*\{[\s\S]*?padding-left:\s*var\(--self-relation-content-offset,\s*80px\);/);
   assert.notEqual(max980Start, -1);
   assert.notEqual(max640Start, -1);
   assert.doesNotMatch(max980Block, /\.project-card-headline--self-related/);
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card--self-related\s*\{[\s\S]*?padding-top:\s*96px;/);
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card--self-related \.project-card-headline,\s*\.project-card-headline--self-related\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?top:\s*18px;[\s\S]*?left:\s*14px;[\s\S]*?right:\s*14px;/);
-  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card--self-related \.project-card-headline \.project-card-meta,\s*\.project-card-headline--self-related \.project-card-meta\s*\{[\s\S]*?padding-left:\s*56px;/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card--self-related \.project-card-headline \.project-card-meta,\s*\.project-card-headline--self-related \.project-card-meta\s*\{[\s\S]*?padding-left:\s*82px;/);
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card-headline--self-related \.project-card-side\s*\{[\s\S]*?display:\s*none;/);
 });
 
@@ -253,7 +257,10 @@ test("homepage search toolbar is lifted and visually emphasized", () => {
   assert.match(mainSource, /<option value="project_id">编号顺序<\/option>/);
   assert.match(mainSource, /<option value="newest">最新编号<\/option>/);
   assert.match(mainSource, /<option value="updated">最近更新<\/option>/);
+  assert.match(mainSource, /function projectListRequestParams\(\)\s*\{\s*return \{\s*\.\.\.state\.filters\s*\};\s*\}/);
+  assert.doesNotMatch(mainSource, /params\.sort === "likes"[\s\S]*?params\.sort = "follows"/);
   assert.match(mainSource, /state\.filters\.sort === "newest"[\s\S]*?projectTopicSortValue\(b\) - projectTopicSortValue\(a\)/);
+  assert.match(mainSource, /state\.filters\.sort === "likes"[\s\S]*?numericProjectField\(b,\s*"score_count"\) - numericProjectField\(a,\s*"score_count"\)/);
   assert.match(mainSource, /return rows\.sort\(\(a, b\) => compareSelfRelation\(a,\s*b\) \|\| projectTopicSortValue\(a\) - projectTopicSortValue\(b\)\);/);
   assert.match(stylesSource, /\.toolbar\s*\{[\s\S]*?margin:\s*-4px 0 22px;[\s\S]*?padding:\s*16px;[\s\S]*?border-radius:\s*12px;/);
   assert.match(stylesSource, /\.toolbar input,\s*\.toolbar select\s*\{[\s\S]*?min-height:\s*46px;[\s\S]*?border-radius:\s*10px;/);
@@ -628,6 +635,19 @@ test("project cards no longer keep hover status-card state after lifecycle write
   assert.match(mainSource, /invalidateProjectStatusCard\(project\.id\)/);
 });
 
+test("project contact hover cards are fixed viewport-safe overlays", () => {
+  assert.match(mainSource, /contactHoverCard:\s*\{[\s\S]*?visible:\s*false/);
+  assert.match(mainSource, /class="contact-hover-card floating-contact-card"/);
+  assert.match(mainSource, /data-testid="floating-contact-card"/);
+  assert.match(mainSource, /function showTeamContactCard\(event,\s*role,\s*project\)/);
+  assert.match(mainSource, /Math\.min\(maxY,\s*Math\.max\(12,\s*rect\.bottom \+ 8\)\)/);
+  assert.doesNotMatch(mainSource, /class="contact-hover-card team-contact-card"/);
+  assert.doesNotMatch(mainSource, /class="contact-hover-card creator-contact-card"/);
+  assert.match(stylesSource, /\.contact-hover-card\s*\{[\s\S]*?position:\s*fixed;[\s\S]*?z-index:\s*860;[\s\S]*?max-height:\s*min\(320px,\s*calc\(100dvh - 24px\)\);/);
+  assert.doesNotMatch(stylesSource, /\.contact-hover-trigger:hover\s*>\s*\.contact-hover-card/);
+  assert.doesNotMatch(stylesSource, /\.project-role-chip-row \.team-contact-card/);
+});
+
 test("project progress page exposes the same core interaction actions as project cards", () => {
   assert.match(mainSource, /class="project-progress-actions project-interaction-actions"/);
   assert.match(mainSource, /submitLike\(state\.projectProgress\.project\)/);
@@ -840,6 +860,15 @@ test("small-screen controls keep touch targets and avoid duplicate theme control
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.toolbar \.filter-group\.optional-mobile\s*\{[\s\S]*?display:\s*none;/);
   assert.match(stylesSource, /\.checkbox-chip\s*\{[\s\S]*?min-height:\s*44px;/);
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.topic-theme-strip\.single-row\s*\{[\s\S]*?margin-top:\s*8px;/);
+});
+
+test("sponsor popover keeps two quick choices and exposes token progressively", () => {
+  assert.match(mainSource, /const QUICK_SPONSOR_TYPES = \["labor_fee",\s*"compute"\]/);
+  assert.match(mainSource, /moreSponsorTypeOptions = computed\(\(\) => sponsorOptionsByValue\(state\.meta\.sponsor_types \|\| \[\],\s*\["token"\]\)\)/);
+  assert.match(mainSource, /更多资助类型/);
+  assert.match(mainSource, /state\.forms\.sponsor\.show_more_types/);
+  assert.match(mainSource, /sponsorPopoverTypes = \[\.\.\.QUICK_SPONSOR_TYPES,\s*"token"\]/);
+  assert.match(stylesSource, /\.sponsor-more-toggle\s*\{[\s\S]*?min-height:\s*44px;/);
 });
 
 test("legacy approved-project handoff helpers are not returned as product entry points", () => {

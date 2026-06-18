@@ -286,7 +286,7 @@ const state = reactive({
     passwordChange: { password1: "", password2: "" },
     participation: { authorship_intention: "contribution", message: "" },
     paperClaim: { claimed_unit_name: "", error: "" },
-    sponsor: { sponsor_type: "compute", sponsor_types: [], note: "" },
+    sponsor: { sponsor_type: "compute", sponsor_types: [], note: "", show_more_types: false },
     creditTransfer: { target_uid: "", amount: 50, reason: "" },
     profile: emptyProfileForm(),
     contribution: emptyContributionForm()
@@ -321,6 +321,13 @@ const state = reactive({
     x: 0,
     y: 0
   },
+  contactHoverCard: {
+    visible: false,
+    x: 0,
+    y: 0,
+    title: "",
+    members: []
+  },
   formState: {
     registerSubmitting: false,
     registerErrors: {},
@@ -329,6 +336,8 @@ const state = reactive({
     creditTransferSubmitting: false
   }
 });
+
+let contactHoverHideTimer = null;
 
 const App = {
   setup() {
@@ -370,6 +379,7 @@ const App = {
     const faqQrEntries = computed(() => sidebarQrEntries.value.filter((entry) => entry.has_image && sidebarQrImageSrc(entry)));
     const sponsorTypeOptions = computed(() => preferredSponsorTypes(state.meta.sponsor_types || []));
     const quickSponsorTypeOptions = computed(() => sponsorOptionsByValue(state.meta.sponsor_types || [], QUICK_SPONSOR_TYPES));
+    const moreSponsorTypeOptions = computed(() => sponsorOptionsByValue(state.meta.sponsor_types || [], ["token"]));
     const authorshipIntentOptions = computed(() => state.meta.authorship_intents?.length ? state.meta.authorship_intents : [
       { value: "no_interest", label: "对署名没有兴趣" },
       { value: "contribution", label: "普通参与，按贡献" },
@@ -558,11 +568,7 @@ const App = {
     }
 
     function projectListRequestParams() {
-      const params = { ...state.filters };
-      if (params.sort === "likes") {
-        params.sort = "follows";
-      }
-      return params;
+      return { ...state.filters };
     }
 
     function sortProjectsForCurrentFilter(projects = []) {
@@ -2042,8 +2048,9 @@ const App = {
       closeMutuallyExclusiveModals("sponsor");
       state.forms.sponsor = {
         sponsor_type: activeTypes[0] || "compute",
-        sponsor_types: activeTypes.filter((type) => QUICK_SPONSOR_TYPES.includes(type)),
-        note: ""
+        sponsor_types: activeTypes.filter((type) => [...QUICK_SPONSOR_TYPES, "token"].includes(type)),
+        note: "",
+        show_more_types: activeTypes.includes("token")
       };
       const popoverPosition = sponsorPopoverPositionFromTrigger(event?.currentTarget);
       state.sponsorModal.open = true;
@@ -2074,8 +2081,9 @@ const App = {
       const project = state.sponsorModal.project;
       if (!project?.id) return;
       if (!ensureLogin()) return;
-      const selectedTypes = (state.forms.sponsor.sponsor_types || []).filter((type) => QUICK_SPONSOR_TYPES.includes(type));
-      const activeRequests = activeSponsorRequestsForProject(project).filter((request) => QUICK_SPONSOR_TYPES.includes(request.sponsor_type));
+      const sponsorPopoverTypes = [...QUICK_SPONSOR_TYPES, "token"];
+      const selectedTypes = (state.forms.sponsor.sponsor_types || []).filter((type) => sponsorPopoverTypes.includes(type));
+      const activeRequests = activeSponsorRequestsForProject(project).filter((request) => sponsorPopoverTypes.includes(request.sponsor_type));
       const activeTypes = activeRequests.map((request) => request.sponsor_type).filter(Boolean);
       const typesToAdd = selectedTypes.filter((type) => !activeTypes.includes(type));
       const requestsToWithdraw = activeRequests.filter((request) => !selectedTypes.includes(request.sponsor_type));
@@ -2464,6 +2472,12 @@ const App = {
 
     function secondarySelfRelationLabels(project) {
       return selfRelationLabels(project).slice(1);
+    }
+
+    function selfRelationContentStyle(project) {
+      if (!primarySelfRelationLabel(project)) return {};
+      const offset = 80 + secondarySelfRelationLabels(project).length * 72;
+      return { "--self-relation-content-offset": `${offset}px` };
     }
 
     function hasSelfRelation(project) {
@@ -4849,6 +4863,7 @@ const App = {
       faqQrEntries,
       sponsorTypeOptions,
       quickSponsorTypeOptions,
+      moreSponsorTypeOptions,
       authorshipIntentOptions,
       sidebarQrImageSrc,
       sidebarQrAlt,
@@ -4904,6 +4919,11 @@ const App = {
       contactName,
       contactWechatText,
       teamContactMembers,
+      showProjectCreatorContactCard,
+      showTeamContactCard,
+      scheduleHideContactHoverCard,
+      cancelContactHoverCardHide,
+      hideContactHoverCard,
       canReviewInteraction,
       openProfileMenu,
       openProfileMenuFromTrigger,
@@ -4954,6 +4974,7 @@ const App = {
       selfRelationLabels,
       primarySelfRelationLabel,
       secondarySelfRelationLabels,
+      selfRelationContentStyle,
       hasSelfRelation,
       withdrawInteraction,
       taskProgressLabel,
@@ -5170,6 +5191,24 @@ const App = {
         >
           {{ state.claimReasonTooltip.text }}
         </div>
+        <div
+          v-if="state.contactHoverCard.visible"
+          class="contact-hover-card floating-contact-card"
+          data-testid="floating-contact-card"
+          :style="{ left: state.contactHoverCard.x + 'px', top: state.contactHoverCard.y + 'px' }"
+          role="tooltip"
+          @mouseenter="cancelContactHoverCardHide"
+          @mouseleave="hideContactHoverCard"
+        >
+          <strong>{{ state.contactHoverCard.title }}</strong>
+          <template v-if="state.contactHoverCard.members.length">
+            <span v-for="member in state.contactHoverCard.members" :key="member.uid || member.name" class="contact-member-row">
+              <b>{{ contactName(member) }}</b>
+              <small>{{ contactWechatText(member) }}</small>
+            </span>
+          </template>
+          <small v-else>暂无可展示联系人</small>
+        </div>
         <section v-if="state.booting" class="empty-state">
           <div class="loader"></div>
           <h2>正在载入课题库</h2>
@@ -5189,14 +5228,14 @@ const App = {
                   <option v-for="theme in state.meta.themes" :key="theme.slug" :value="theme.slug">{{ theme.name }}</option>
                 </select>
               </label>
-              <label>
+              <label class="filter-group optional-mobile">
                 <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;" aria-hidden="true">moving</span> 阶段</span>
                 <select v-model="state.filters.stage" @change="applyFilters">
                   <option value="">全部阶段</option>
                   <option v-for="stage in state.meta.project_stages" :key="stage.value" :value="stage.value">{{ stage.label }}</option>
                 </select>
               </label>
-              <label>
+              <label class="filter-group optional-mobile">
                 <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;" aria-hidden="true">sort</span> 排序</span>
                 <select v-model="state.filters.sort" @change="applyFilters">
                   <option value="project_id">编号顺序</option>
@@ -5265,6 +5304,7 @@ const App = {
                 data-testid="project-card"
                 :class="['project-card project-list-card project-catalog-card', { 'project-card--self-related': hasSelfRelation(project) }]"
               >
+                <span class="project-card-hover-strip" data-testid="project-status-strip" aria-hidden="true"></span>
                 <span v-if="primarySelfRelationLabel(project)" class="self-relation-corner" data-testid="relation-corner-ribbon">{{ primarySelfRelationLabel(project) }}</span>
                 <div :class="['project-card-headline', { 'project-card-headline--self-related': primarySelfRelationLabel(project) }]">
                   <div class="project-card-meta" data-testid="project-meta-row">
@@ -5279,16 +5319,19 @@ const App = {
                       <div><dt>点赞</dt><dd>{{ project.score_count || 0 }}</dd></div>
                       <div><dt>关注</dt><dd>{{ project.follow_count || 0 }}</dd></div>
                     </dl>
-                    <span class="project-card-uploader contact-hover-trigger" tabindex="0">
+                    <span
+                      class="project-card-uploader contact-hover-trigger"
+                      tabindex="0"
+                      @mouseenter="showProjectCreatorContactCard($event, project)"
+                      @focus="showProjectCreatorContactCard($event, project)"
+                      @mouseleave="scheduleHideContactHoverCard"
+                      @blur="scheduleHideContactHoverCard"
+                    >
                       {{ projectCreatorLabel(project) }}
-                      <span v-if="projectCreatorContact(project)" class="contact-hover-card creator-contact-card">
-                        <strong>{{ contactName(projectCreatorContact(project)) }}</strong>
-                        <small>{{ contactWechatText(projectCreatorContact(project)) }}</small>
-                      </span>
                     </span>
                   </div>
                 </div>
-                <div class="project-list-main">
+                <div class="project-list-main" :style="selfRelationContentStyle(project)">
                   <h3>
                     <a class="project-title-link" data-testid="project-title-link" :href="projectDetailHref(project)" @click.prevent="navigate('project', { id: project.id })">{{ project.title }}</a>
                   </h3>
@@ -5307,25 +5350,25 @@ const App = {
                     </div>
                   </div>
                 </div>
-                <div class="project-card-bottom project-status-strip" data-testid="project-status-strip">
+                <div class="project-card-bottom project-status-summary">
                   <div class="project-status-row">
                     <strong>招募</strong><span>{{ projectRecruitmentText(project) }}</span>
                   </div>
                   <div class="project-status-row project-role-groups compact">
                     <strong>组队</strong>
                     <div class="project-role-chip-row">
-                      <span v-for="role in requiredTeamRoles(project.team_status)" :key="role.key" class="team-role-chip contact-hover-trigger" :class="{ ready: role.ready, overfilled: role.overfilled }" tabindex="0">
+                      <span
+                        v-for="role in requiredTeamRoles(project.team_status)"
+                        :key="role.key"
+                        class="team-role-chip contact-hover-trigger"
+                        :class="{ ready: role.ready, overfilled: role.overfilled }"
+                        tabindex="0"
+                        @mouseenter="showTeamContactCard($event, role, project)"
+                        @focus="showTeamContactCard($event, role, project)"
+                        @mouseleave="scheduleHideContactHoverCard"
+                        @blur="scheduleHideContactHoverCard"
+                      >
                         {{ role.label }} {{ role.count }}/{{ role.required }}{{ role.overfilled ? ' · 超额' : '' }}
-                        <span v-if="state.user" class="contact-hover-card team-contact-card">
-                          <strong>{{ role.label }}</strong>
-                          <template v-if="teamContactMembers(project, role).length">
-                            <span v-for="member in teamContactMembers(project, role)" :key="role.key + '-' + member.uid" class="contact-member-row">
-                              <b>{{ contactName(member) }}</b>
-                              <small>{{ contactWechatText(member) }}</small>
-                            </span>
-                          </template>
-                          <small v-else>暂无已通过成员</small>
-                        </span>
                       </span>
                     </div>
                   </div>
@@ -5840,7 +5883,8 @@ const App = {
                 :data-project-id="project.id"
                 class="project-card project-list-card"
               >
-                <div class="project-list-main">
+                <span class="project-card-hover-strip" aria-hidden="true"></span>
+                <div class="project-list-main" :style="selfRelationContentStyle(project)">
                   <div class="project-card-top">
                     <div class="project-card-meta">
                       <span>{{ topicCode(project) }}</span>
@@ -5853,12 +5897,15 @@ const App = {
                         <div><dt>点赞</dt><dd>{{ project.score_count || 0 }}</dd></div>
                         <div><dt>关注</dt><dd>{{ project.follow_count || 0 }}</dd></div>
                       </dl>
-                      <span class="project-card-uploader contact-hover-trigger" tabindex="0">
+                      <span
+                        class="project-card-uploader contact-hover-trigger"
+                        tabindex="0"
+                        @mouseenter="showProjectCreatorContactCard($event, project)"
+                        @focus="showProjectCreatorContactCard($event, project)"
+                        @mouseleave="scheduleHideContactHoverCard"
+                        @blur="scheduleHideContactHoverCard"
+                      >
                         {{ projectCreatorLabel(project) }}
-                        <span v-if="projectCreatorContact(project)" class="contact-hover-card creator-contact-card">
-                          <strong>{{ contactName(projectCreatorContact(project)) }}</strong>
-                          <small>{{ contactWechatText(projectCreatorContact(project)) }}</small>
-                        </span>
                       </span>
                     </div>
                   </div>
@@ -5888,18 +5935,18 @@ const App = {
                   <div class="project-status-row project-role-groups compact">
                     <strong>组队</strong>
                     <div class="project-role-chip-row">
-                      <span v-for="role in requiredTeamRoles(project.team_status)" :key="role.key" class="team-role-chip contact-hover-trigger" :class="{ ready: role.ready, overfilled: role.overfilled }" tabindex="0">
+                      <span
+                        v-for="role in requiredTeamRoles(project.team_status)"
+                        :key="role.key"
+                        class="team-role-chip contact-hover-trigger"
+                        :class="{ ready: role.ready, overfilled: role.overfilled }"
+                        tabindex="0"
+                        @mouseenter="showTeamContactCard($event, role, project)"
+                        @focus="showTeamContactCard($event, role, project)"
+                        @mouseleave="scheduleHideContactHoverCard"
+                        @blur="scheduleHideContactHoverCard"
+                      >
                         {{ role.label }} {{ role.count }}/{{ role.required }}{{ role.overfilled ? ' · 超额' : '' }}
-                        <span v-if="state.user" class="contact-hover-card team-contact-card">
-                          <strong>{{ role.label }}</strong>
-                          <template v-if="teamContactMembers(project, role).length">
-                            <span v-for="member in teamContactMembers(project, role)" :key="role.key + '-' + member.uid" class="contact-member-row">
-                              <b>{{ contactName(member) }}</b>
-                              <small>{{ contactWechatText(member) }}</small>
-                            </span>
-                          </template>
-                          <small v-else>暂无已通过成员</small>
-                        </span>
                       </span>
                     </div>
                   </div>
@@ -6906,6 +6953,15 @@ const App = {
                   <span>{{ item.label }}<small v-if="sponsorRequestStatusLabel(state.sponsorModal.project, item.value)"> · {{ sponsorRequestStatusLabel(state.sponsorModal.project, item.value) }}</small></span>
                 </label>
               </div>
+              <button class="text-button sponsor-more-toggle" type="button" @click="state.forms.sponsor.show_more_types = !state.forms.sponsor.show_more_types">
+                {{ state.forms.sponsor.show_more_types ? '收起更多资助类型' : '更多资助类型' }}
+              </button>
+              <div v-if="state.forms.sponsor.show_more_types" class="sponsor-checkbox-row sponsor-extra-options">
+                <label v-for="item in moreSponsorTypeOptions" :key="item.value" class="checkbox-chip">
+                  <input v-model="state.forms.sponsor.sponsor_types" type="checkbox" :value="item.value" :disabled="!canRecruitProject(state.sponsorModal.project) && !activeSponsorTypesForProject(state.sponsorModal.project).includes(item.value)" />
+                  <span>{{ item.label }}<small v-if="sponsorRequestStatusLabel(state.sponsorModal.project, item.value)"> · {{ sponsorRequestStatusLabel(state.sponsorModal.project, item.value) }}</small></span>
+                </label>
+              </div>
               <label>
                 <span>说明</span>
                 <textarea v-model="state.forms.sponsor.note" rows="2" placeholder="可补充资源、额度或联系方式"></textarea>
@@ -7750,6 +7806,63 @@ function projectCreatorLabel(project) {
 
 function projectCreatorContact(project) {
   return project?.created_by_display || project?.created_by || null;
+}
+
+function contactHoverPosition(event) {
+  const rect = event?.currentTarget?.getBoundingClientRect?.();
+  if (!rect || typeof window === "undefined") return { x: 12, y: 12 };
+  const cardWidth = Math.min(300, Math.max(240, window.innerWidth - 24));
+  const cardHeight = Math.min(320, Math.max(160, window.innerHeight - 24));
+  const maxX = Math.max(12, window.innerWidth - cardWidth - 12);
+  const maxY = Math.max(12, window.innerHeight - cardHeight - 12);
+  return {
+    x: Math.round(Math.min(maxX, Math.max(12, rect.left))),
+    y: Math.round(Math.min(maxY, Math.max(12, rect.bottom + 8)))
+  };
+}
+
+function showContactHoverCard(event, title, members = []) {
+  cancelContactHoverCardHide();
+  const position = contactHoverPosition(event);
+  state.contactHoverCard = {
+    visible: true,
+    x: position.x,
+    y: position.y,
+    title,
+    members: members.filter(Boolean)
+  };
+}
+
+function showProjectCreatorContactCard(event, project) {
+  const contact = projectCreatorContact(project);
+  if (!contact) return;
+  showContactHoverCard(event, "创建者", [contact]);
+}
+
+function showTeamContactCard(event, role, project) {
+  if (!state.user) return;
+  const members = teamContactMembers(project, role);
+  showContactHoverCard(event, role?.label || "组队成员", members);
+}
+
+function cancelContactHoverCardHide() {
+  if (contactHoverHideTimer) {
+    window.clearTimeout(contactHoverHideTimer);
+    contactHoverHideTimer = null;
+  }
+}
+
+function hideContactHoverCard() {
+  cancelContactHoverCardHide();
+  state.contactHoverCard.visible = false;
+}
+
+function scheduleHideContactHoverCard() {
+  cancelContactHoverCardHide();
+  contactHoverHideTimer = window.setTimeout(() => {
+    state.contactHoverCard.visible = false;
+    contactHoverHideTimer = null;
+  }, 120);
 }
 
 function contactName(contact) {

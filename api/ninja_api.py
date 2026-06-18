@@ -775,6 +775,7 @@ def project_list(
     sort_map = {
         "recommended": ("topic_id", "id"),
         "follows": ("-follow_count", "-interest_count", "topic_id"),
+        "likes": ("-score_count", "-follow_count", "-interest_count", "topic_id"),
         "updated": ("-updated_at", "-topic_id"),
         "newest": ("-topic_id", "-id"),
         "project_id": ("topic_id", "id"),

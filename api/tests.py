@@ -397,6 +397,37 @@ class ApiTests(TestCase):
         self.assertEqual([row["topic_id"] for row in newest_response.json()["data"]["results"][:3]], [3, 2, 1])
         self.assertEqual(updated_response.json()["data"]["results"][0]["topic_id"], 1)
 
+    def test_project_list_likes_sort_happens_before_pagination(self):
+        low_like = Project.objects.create(
+            topic_id=9911,
+            title="低赞",
+            summary="低赞",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        high_like = Project.objects.create(
+            topic_id=9912,
+            title="高赞",
+            summary="高赞",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        ProjectScore.objects.create(
+            user=User.objects.create_user(username="lowlikeuser", email="lowlikeuser@example.com", password="StrongPass12345"),
+            project=low_like,
+            score=10,
+        )
+        for idx in range(3):
+            user = User.objects.create_user(username=f"liker{idx}", email=f"liker{idx}@example.com", password="StrongPass12345")
+            ProjectScore.objects.create(user=user, project=high_like, score=10)
+
+        response = self.client.get("/api/projects/?sort=likes&page_size=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["results"][0]["id"], high_like.id)
+
     def test_recruiting_and_follow_stage_rules(self):
         user = User.objects.create_user(username="stageuser", email="stageuser@example.com", password="StrongPass12345")
         self.client.force_login(user)
