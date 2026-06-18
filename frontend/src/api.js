@@ -10,6 +10,7 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.response = response;
     this.payload = payload;
+    this.errors = payload?.errors || payload?.error?.details || {};
   }
 }
 

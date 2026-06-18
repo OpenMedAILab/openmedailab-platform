@@ -644,6 +644,37 @@ class ApiTests(TestCase):
             self.assertEqual(public_file["detail_pdf_title"], "数据集特点说明")
             self.assertEqual(public_file["detail_pdf_path"], payload["detail_pdf_path"])
 
+    def test_theme_detail_pdf_rejects_fake_pdf_and_writes_failed_audit(self):
+        admin = self.login_platform_admin()
+        dataset = ThemeFile.objects.create(
+            theme=self.theme,
+            section="数据集说明文件",
+            file_type=ThemeFile.FileType.DATASET_META,
+            title="抗 VEGF 脱敏随访数据说明",
+            path="dataset-descriptions/antivegf-followup",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir), MEDIA_URL="/media/"):
+            response = self.client.post(
+                f"/api/admin/theme-files/{dataset.pk}/detail-pdf/",
+                {
+                    "title": "假 PDF",
+                    "file": SimpleUploadedFile("fake.pdf", b"not a pdf", content_type="application/pdf"),
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["message"], "PDF 文件格式无法识别。")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="theme_file.detail_pdf_upload",
+                target_type="ThemeFile",
+                target_id=str(dataset.pk),
+                status="failed",
+                error_code="validation_error",
+            ).exists()
+        )
+
     def test_admin_theme_dataset_description_uses_generated_path(self):
         self.login_platform_admin()
         response = self.post_json(
@@ -1109,6 +1140,42 @@ class ApiTests(TestCase):
             self.assertEqual(locked_response.status_code, 422)
             self.assertEqual(locked_response.json()["error"]["code"], "user_project_stage_locked")
 
+    def test_user_project_detail_pdf_rejects_fake_pdf_and_writes_failed_audit(self):
+        owner = User.objects.create_user(username="fake_pdf_owner", email="fake-pdf-owner@example.com", password="StrongPass12345")
+        project = Project.objects.create(
+            topic_id=18,
+            title="用户假 PDF 课题",
+            summary="普通用户上传假 PDF 应被拒绝。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+            created_by=owner,
+        )
+        self.client.force_login(owner)
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir), MEDIA_URL="media/"):
+            response = self.client.post(
+                "/api/project-documents/upload/",
+                {
+                    "project_id": project.pk,
+                    "document_kind": "detail",
+                    "title": "假 PDF",
+                    "files": SimpleUploadedFile("fake.pdf", b"not a pdf", content_type="application/pdf"),
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["message"], "PDF 文件格式无法识别。")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=owner,
+                action="project_document.user_upload",
+                target_type="Project",
+                target_id=str(project.pk),
+                status="failed",
+                error_code="validation_error",
+            ).exists()
+        )
+
     def test_request_id_is_bounded_in_errors_and_audit_logs(self):
         owner = User.objects.create_user(username="request_owner", email="request-owner@example.com", password="StrongPass12345")
         self.client.force_login(owner)
@@ -1523,6 +1590,32 @@ class ApiTests(TestCase):
                 "替换后的主文档",
             )
 
+    def test_admin_project_detail_pdf_rejects_fake_pdf_and_writes_failed_audit(self):
+        admin = self.login_platform_admin()
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir), MEDIA_URL="media/"):
+            response = self.client.post(
+                "/api/admin/project-documents/upload/",
+                {
+                    "project_id": self.project.pk,
+                    "document_kind": "detail",
+                    "title": "假主文档",
+                    "files": SimpleUploadedFile("fake.pdf", b"not a pdf", content_type="application/pdf"),
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["message"], "PDF 文件格式无法识别。")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="project_document.upload",
+                target_type="Project",
+                target_id=str(self.project.pk),
+                status="failed",
+                error_code="validation_error",
+            ).exists()
+        )
+
     def test_team_status_marks_required_roles_as_missing_ready_or_overfilled(self):
         doctor = User.objects.create_user(username="doctor1", password="StrongPass12345")
         doctor.profile.role_type = RoleType.DOCTOR
@@ -1630,6 +1723,32 @@ class ApiTests(TestCase):
             self.project.save(update_fields=["stage", "updated_at"])
             archived_response = self.client.get(f"/api/projects/{self.project.pk}/progress/")
             self.assertEqual(archived_response.status_code, 404)
+
+    def test_admin_project_progress_pdf_rejects_fake_pdf_and_writes_failed_audit(self):
+        admin = self.login_platform_admin()
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir), MEDIA_URL="media/"):
+            response = self.client.post(
+                "/api/admin/project-documents/upload/",
+                {
+                    "project_id": self.project.pk,
+                    "document_kind": "progress",
+                    "title": "假进度文档",
+                    "files": SimpleUploadedFile("fake.pdf", b"not a pdf", content_type="application/pdf"),
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["message"], "PDF 文件格式无法识别。")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="project_document.upload",
+                target_type="Project",
+                target_id=str(self.project.pk),
+                status="failed",
+                error_code="validation_error",
+            ).exists()
+        )
 
     def test_project_discussion_lifecycle_permissions_and_privacy(self):
         author = User.objects.create_user(username="discussion_author", password="StrongPass12345")
@@ -1885,7 +2004,21 @@ class ApiTests(TestCase):
                 detail_pdf_hash="old-dataset-hash",
                 is_active=True,
             )
-            self.login_platform_admin()
+            admin = self.login_platform_admin()
+            participant = User.objects.create_user(username="backup_relation_user", email="backup-relation@example.com", password="StrongPass12345")
+            interest = ProjectInterest.objects.create(user=participant, project=self.project, role="学生", status=InteractionStatus.APPROVED)
+            sponsor = SponsorIntent.objects.create(user=participant, project=self.project, sponsor_type="compute", status=InteractionStatus.APPROVED)
+            contribution = Contribution.objects.create(user=participant, project=self.project, title="备份外任务结果", result_type=Contribution.ResultType.STAGE)
+            ledger = CreditLedger.objects.create(
+                user=participant,
+                project=self.project,
+                action_type=CreditLedger.ActionType.ADMIN_ADJUST,
+                amount=1,
+                balance_after=101,
+                created_by=admin,
+            )
+            user_count = User.objects.count()
+            audit_before = AuditLog.objects.count()
 
             export_response = self.client.get("/api/admin/content-backup/export/")
 
@@ -1931,6 +2064,14 @@ class ApiTests(TestCase):
             self.assertEqual(ThemeFile.objects.get(theme=self.theme).detail_pdf_title, "数据集说明 PDF")
             self.assertTrue(project_pdf.exists())
             self.assertTrue(dataset_pdf.exists())
+            self.assertEqual(User.objects.count(), user_count)
+            self.assertTrue(ProjectInterest.objects.filter(pk=interest.pk).exists())
+            self.assertTrue(SponsorIntent.objects.filter(pk=sponsor.pk).exists())
+            self.assertTrue(Contribution.objects.filter(pk=contribution.pk).exists())
+            self.assertTrue(CreditLedger.objects.filter(pk=ledger.pk).exists())
+            self.assertGreater(AuditLog.objects.count(), audit_before)
+            self.assertTrue(AuditLog.objects.filter(actor=admin, action="content_backup.export", status="success").exists())
+            self.assertTrue(AuditLog.objects.filter(actor=admin, action="content_backup.restore", status="success").exists())
 
     def test_regular_user_cannot_manage_content(self):
         user = User.objects.create_user(username="normaluser", password="StrongPass12345")
@@ -2608,6 +2749,64 @@ class ApiTests(TestCase):
             ).exists()
         )
 
+    def test_interaction_stage_and_credit_failures_write_failed_audit(self):
+        user = User.objects.create_user(username="interactionfail", email="interactionfail@example.com", password="StrongPass12345")
+        self.client.force_login(user)
+        self.project.stage = ProjectStage.ACTIVE
+        self.project.save(update_fields=["stage", "updated_at"])
+
+        interest_response = self.post_json(
+            f"/api/projects/{self.project.pk}/interest/",
+            {"role": "学生", "available_hours_per_week": 4, "message": "想参与"},
+        )
+        claim_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {"claim_type": "leader", "message": "想认领负责人"},
+        )
+        sponsor_response = self.post_json(
+            f"/api/projects/{self.project.pk}/sponsor/",
+            {"sponsor_type": "compute", "note": "提供算力"},
+        )
+
+        self.assertEqual(interest_response.status_code, 422)
+        self.assertEqual(claim_response.status_code, 422)
+        self.assertEqual(sponsor_response.status_code, 422)
+        self.assertTrue(AuditLog.objects.filter(actor=user, action="interaction.submit_interest", status="failed", error_code="project_not_recruiting").exists())
+        self.assertTrue(AuditLog.objects.filter(actor=user, action="interaction.submit_claim", status="failed", error_code="project_not_recruiting").exists())
+        self.assertTrue(AuditLog.objects.filter(actor=user, action="interaction.submit_sponsor", status="failed", error_code="project_not_recruiting").exists())
+
+        self.project.stage = ProjectStage.OPEN_RECRUITING
+        self.project.save(update_fields=["stage", "updated_at"])
+        user.profile.credit_balance = 0
+        user.profile.save(update_fields=["credit_balance", "updated_at"])
+        insufficient_interest = self.post_json(
+            f"/api/projects/{self.project.pk}/interest/",
+            {"role": "学生", "available_hours_per_week": 4, "message": "积分不足参与"},
+        )
+        insufficient_claim = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {"claim_type": "leader", "message": "积分不足认领"},
+        )
+
+        self.assertEqual(insufficient_interest.status_code, 422)
+        self.assertEqual(insufficient_interest.json()["error"]["code"], "insufficient_credits")
+        self.assertEqual(insufficient_claim.status_code, 422)
+        self.assertEqual(insufficient_claim.json()["error"]["code"], "insufficient_credits")
+        self.assertTrue(AuditLog.objects.filter(actor=user, action="interaction.submit_interest", status="failed", error_code="insufficient_credits").exists())
+        self.assertTrue(AuditLog.objects.filter(actor=user, action="interaction.submit_claim", status="failed", error_code="insufficient_credits").exists())
+
+    def test_project_stage_rolls_back_when_credit_charge_fails(self):
+        self.login_platform_admin()
+        self.client.raise_request_exception = False
+        self.assertEqual(self.project.stage, ProjectStage.OPEN_RECRUITING)
+
+        with patch("api.ninja_api.charge_project_participation_credits_once", side_effect=RuntimeError("charge failed")):
+            response = self.patch_json(f"/api/admin/projects/{self.project.pk}/", {"stage": "active"})
+
+        self.project.refresh_from_db()
+        self.assertGreaterEqual(response.status_code, 400)
+        self.assertEqual(self.project.stage, ProjectStage.OPEN_RECRUITING)
+
     def test_sponsor_approval_does_not_auto_start_project(self):
         doctor = User.objects.create_user(username="readydoctor", email="readydoctor@example.com", password="StrongPass12345")
         student = User.objects.create_user(username="readystudent", email="readystudent@example.com", password="StrongPass12345")
@@ -2894,6 +3093,43 @@ class ApiTests(TestCase):
             self.assertEqual(rejected_response.status_code, 422)
             self.assertEqual(rejected_response.json()["error"]["code"], "validation_error")
 
+    def test_task_result_upload_rejects_fake_pdf_and_writes_failed_audit(self):
+        user = User.objects.create_user(username="fake_pdf_result", email="fake-pdf-result@example.com", password="StrongPass12345")
+        ProjectInterest.objects.create(
+            user=user,
+            project=self.project,
+            role="学生",
+            available_hours_per_week=4,
+            status=InteractionStatus.APPROVED,
+        )
+        self.project.stage = ProjectStage.ACTIVE
+        self.project.save(update_fields=["stage", "updated_at"])
+
+        self.client.force_login(user)
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir) / "media", MEDIA_URL="media/"):
+            response = self.client.post(
+                "/api/me/contributions/upload/",
+                {
+                    "project_id": str(self.project.pk),
+                    "title": "假 PDF 任务结果",
+                    "result_type": "stage",
+                    "file": SimpleUploadedFile("result.pdf", b"not a pdf", content_type="application/pdf"),
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["message"], "PDF 文件格式无法识别。")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=user,
+                action="contribution.submit",
+                target_type="Project",
+                target_id=str(self.project.pk),
+                status="failed",
+                error_code="validation_error",
+            ).exists()
+        )
+
     def test_admin_overview_user_detail_credits_and_audit_logs_are_permissioned(self):
         user = User.objects.create_user(username="detailuser", email="detail@example.com", password="StrongPass12345")
         ProjectFollow.objects.create(user=user, project=self.project)
@@ -3163,6 +3399,25 @@ class ApiTests(TestCase):
         )
         self.assertEqual(invalid_role.status_code, 422)
         self.assertIn("role_type", invalid_role.json()["error"]["details"])
+
+    def test_validation_error_exposes_details_and_errors_alias(self):
+        response = self.post_json(
+            "/api/auth/register/",
+            {
+                "username": "",
+                "email": "bad",
+                "display_name": "",
+                "role_type": "invalid-role",
+                "password1": "x",
+                "password2": "y",
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+        body = response.json()
+        self.assertIn("details", body["error"])
+        self.assertIn("errors", body)
+        self.assertEqual(body["errors"], body["error"]["details"])
 
     def test_profile_contact_email_keeps_global_email_unique(self):
         User.objects.create_user(username="emailowner", email="owner@example.com", password="StrongPass12345")

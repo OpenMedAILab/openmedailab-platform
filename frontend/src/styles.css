@@ -1372,6 +1372,15 @@ textarea:focus {
   align-self: start;
 }
 
+.project-progress-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 168px));
+  justify-content: start;
+  gap: 10px;
+  margin: -2px 0 2px;
+  max-width: 1040px;
+}
+
 .project-progress-summary,
 .project-progress-documents,
 .project-progress-timeline,
@@ -1642,7 +1651,8 @@ textarea:focus {
   color: #6b4804;
 }
 
-.interaction-button[aria-disabled="true"] {
+.interaction-button[aria-disabled="true"],
+.interaction-button.is-disabled {
   opacity: 0.64;
   cursor: not-allowed;
 }
@@ -3027,7 +3037,7 @@ textarea:focus {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-height: 40px;
+  min-height: 44px;
   padding: 0 10px;
   border: 1px solid rgba(217, 231, 233, 0.95);
   border-radius: 8px;
@@ -3872,7 +3882,7 @@ code {
   position: fixed;
   right: 24px;
   bottom: 24px;
-  z-index: 850;
+  z-index: 950;
   max-width: min(420px, calc(100vw - 32px));
   padding: 12px 16px;
   border: 1px solid rgba(15, 159, 154, 0.25);
@@ -3885,7 +3895,7 @@ code {
 .release-modal-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 180;
+  z-index: 320;
   display: grid;
   place-items: center;
   padding: 20px;
@@ -4250,8 +4260,16 @@ code {
   .topbar {
     top: 6px;
     width: calc(100% - 16px);
-    gap: 10px;
+    gap: 8px;
     padding: 10px;
+  }
+
+  .toolbar {
+    gap: 10px;
+  }
+
+  .toolbar .filter-group.optional-mobile {
+    display: none;
   }
 
   .brand {
@@ -4306,6 +4324,7 @@ code {
     grid-template-columns: none;
     grid-auto-flow: column;
     grid-auto-columns: minmax(118px, 42vw);
+    margin-top: 8px;
     overflow-x: auto;
     justify-content: start;
     scroll-snap-type: x proximity;

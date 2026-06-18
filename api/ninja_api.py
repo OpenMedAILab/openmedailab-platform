@@ -133,6 +133,7 @@ SIDEBAR_QR_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp"]
 SIDEBAR_QR_MAX_BYTES = 2 * 1024 * 1024
 CONTRIBUTION_DOCUMENT_EXTENSIONS = {".pdf", ".md", ".markdown"}
 CONTRIBUTION_DOCUMENT_MAX_BYTES = 10 * 1024 * 1024
+PDF_DOCUMENT_MAX_BYTES = 20 * 1024 * 1024
 
 
 class Envelope(Schema):
@@ -151,6 +152,7 @@ class ErrorEnvelope(Schema):
     ok: bool
     request_id: Optional[str] = None
     error: ErrorDetail
+    errors: Optional[Any] = None
 
 
 class RegisterRequest(Schema):
@@ -1509,7 +1511,7 @@ def me_contribution_upload(request):
         return fail("Only one result document can be uploaded at a time.", status=422, code="validation_error")
     file_path, content_hash, error = save_contribution_document(files[0], context["project"], request.user)
     if error:
-        return error
+        return audit_failed_response(request.user, "contribution.submit", "Project", context["project"].id, error)
     contribution = create_contribution_submission(
         request,
         context,
@@ -2134,9 +2136,9 @@ def admin_theme_file_detail_pdf_upload(request, file_id: int):
     uploaded = request.FILES.get("file")
     if not uploaded:
         return fail("No file uploaded.", status=422, code="validation_error")
-    file_name = sanitize_file_name(uploaded.name)
-    if not file_name or Path(file_name).suffix.lower() != ".pdf":
-        return fail("Only PDF files are allowed.", status=422, code="validation_error")
+    file_name, validation_error = validate_uploaded_pdf(uploaded)
+    if validation_error:
+        return audit_failed_response(request.user, "theme_file.detail_pdf_upload", "ThemeFile", file.id, validation_error)
     title = (request.POST.get("title") or Path(file_name).stem or "数据集说明").strip()[:255]
     root = theme_file_detail_pdf_root()
     directory = safe_child_path(root, f"{file.theme.slug}/{file.pk}", root, expect_parent=False)
@@ -2532,7 +2534,7 @@ def admin_project_create(request, payload: ProjectWriteRequest):
     return 201, ok(project_detail_payload(project))
 
 
-@api.patch("/admin/projects/{project_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+@api.patch("/admin/projects/{project_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope, 500: ErrorEnvelope}, tags=["Admin"])
 def admin_project_update(request, project_id: int, payload: ProjectWriteRequest):
     auth_error = require_capability(request, "manage_projects")
     if auth_error:
@@ -2572,8 +2574,32 @@ def admin_project_update(request, project_id: int, payload: ProjectWriteRequest)
             error_message=error[1]["error"]["message"],
         )
         return error
+    charged_entries = []
+    returned_entries = []
     try:
-        project = update_project(project, data, source_label="api-admin", allow_create_theme=False)
+        with transaction.atomic():
+            locked_project = (
+                Project.objects.select_for_update()
+                .select_related("theme", "created_by", "created_by__profile")
+                .prefetch_related("tags", "documents")
+                .get(pk=project.pk)
+            )
+            project = update_project(locked_project, data, source_label="api-admin", allow_create_theme=False)
+            if previous_stage != ProjectStage.ACTIVE and project.stage == ProjectStage.ACTIVE:
+                charged_entries = charge_project_participation_credits_once(project, request.user)
+            if previous_stage == ProjectStage.ACTIVE and project.stage == ProjectStage.ARCHIVED:
+                returned_entries = grant_project_completion_credits_once(project, request.user)
+            project = (
+                Project.objects.select_related("theme", "created_by", "created_by__profile")
+                .prefetch_related("tags", "documents")
+                .get(pk=project.pk)
+            )
+            after_payload = project_detail_payload(project)
+            audit(request.user, "project.update", "Project", project.id, before=before, after=after_payload)
+            for entry in charged_entries:
+                audit(request.user, "credit.project_participation_cost", "CreditLedger", entry.pk, after=credit_ledger_payload(entry))
+            for entry in returned_entries:
+                audit(request.user, "credit.project_completion_return", "CreditLedger", entry.pk, after=credit_ledger_payload(entry))
     except ValueError as exc:
         audit(
             request.user,
@@ -2587,23 +2613,20 @@ def admin_project_update(request, project_id: int, payload: ProjectWriteRequest)
             error_message=str(exc),
         )
         return fail(str(exc), status=422, code="validation_error")
-    charged_entries = []
-    returned_entries = []
-    if previous_stage != ProjectStage.ACTIVE and project.stage == ProjectStage.ACTIVE:
-        with transaction.atomic():
-            locked_project = Project.objects.select_for_update().get(pk=project.pk)
-            charged_entries = charge_project_participation_credits_once(locked_project, request.user)
-    if previous_stage == ProjectStage.ACTIVE and project.stage == ProjectStage.ARCHIVED:
-        with transaction.atomic():
-            locked_project = Project.objects.select_for_update().get(pk=project.pk)
-            returned_entries = grant_project_completion_credits_once(locked_project, request.user)
-    project = get_object_or_404(Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents"), pk=project.pk)
-    audit(request.user, "project.update", "Project", project.id, before=before, after=project_detail_payload(project))
-    for entry in charged_entries:
-        audit(request.user, "credit.project_participation_cost", "CreditLedger", entry.pk, after=credit_ledger_payload(entry))
-    for entry in returned_entries:
-        audit(request.user, "credit.project_completion_return", "CreditLedger", entry.pk, after=credit_ledger_payload(entry))
-    return ok(project_detail_payload(project))
+    except Exception as exc:
+        audit(
+            request.user,
+            "project.update",
+            "Project",
+            project.id,
+            before=before,
+            after=data,
+            status="failed",
+            error_code="project_update_failed",
+            error_message=str(exc),
+        )
+        return fail("Project update failed.", status=500, code="project_update_failed")
+    return ok(after_payload)
 
 
 @api.delete("/admin/projects/{project_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope}, tags=["Admin"])
@@ -2680,11 +2703,9 @@ def save_project_detail_pdf(request, project, audit_action):
 
     saved = []
     for uploaded in files:
-        file_name = sanitize_file_name(uploaded.name)
-        if not file_name:
-            return fail("file name is invalid.", status=422, code="validation_error")
-        if Path(file_name).suffix.lower() != ".pdf":
-            return fail("Project document must be a PDF.", status=422, code="validation_error")
+        file_name, validation_error = validate_uploaded_pdf(uploaded, invalid_name_message="file name is invalid.", invalid_suffix_message="Project document must be a PDF.")
+        if validation_error:
+            return audit_failed_response(request.user, audit_action, "Project", project.id, validation_error)
         destination = unique_project_document_destination(directory, file_name)
         content_hash = write_uploaded_file_with_hash(uploaded, destination)
         old_detail_documents = list(ProjectDocument.objects.filter(project=project, document_kind=ProjectDocument.DocumentKind.DETAIL)) if document_kind == ProjectDocument.DocumentKind.DETAIL else []
@@ -2880,15 +2901,35 @@ def interest_project(request, project_id: int, payload: InterestRequest):
     if auth_error:
         return auth_error
     project = get_object_or_404(Project, pk=project_id, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
-    if project.stage not in RECRUITING_PROJECT_STAGES:
-        return fail("Project is not recruiting.", status=422, code="project_not_recruiting")
-    if not has_required_participation_credits(request.user, project=project):
-        return fail("参与课题需要50积分，当前积分不足。", status=422, code="insufficient_credits")
     form = ProjectInterestForm(payload.model_dump())
     if not form.is_valid():
-        return fail("Interest submit failed.", status=422, code="validation_error", errors=form_errors(form))
+        return audit_failed_response(
+            request.user,
+            "interaction.submit_interest",
+            "Project",
+            project.id,
+            fail("Interest submit failed.", status=422, code="validation_error", errors=form_errors(form)),
+        )
     with transaction.atomic():
-        interest, _ = ProjectInterest.objects.update_or_create(
+        project = Project.objects.select_for_update().get(pk=project.pk)
+        if project.stage not in RECRUITING_PROJECT_STAGES:
+            return audit_failed_response(
+                request.user,
+                "interaction.submit_interest",
+                "Project",
+                project.id,
+                fail("Project is not recruiting.", status=422, code="project_not_recruiting"),
+            )
+        locked_profile = UserProfile.objects.select_for_update().get(user=request.user)
+        if not has_required_participation_credits(request.user, project=project, profile=locked_profile):
+            return audit_failed_response(
+                request.user,
+                "interaction.submit_interest",
+                "Project",
+                project.id,
+                fail("参与课题需要50积分，当前积分不足。", status=422, code="insufficient_credits"),
+            )
+        interest, _ = ProjectInterest.objects.select_for_update().update_or_create(
             user=request.user,
             project=project,
             role=form.cleaned_data["role"],
@@ -2912,31 +2953,45 @@ def claim_project(request, project_id: int, payload: ClaimRequest):
     if auth_error:
         return auth_error
     project = get_object_or_404(Project, pk=project_id, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
-    if project.stage not in RECRUITING_PROJECT_STAGES:
-        return fail("Project is not recruiting.", status=422, code="project_not_recruiting")
-    if not has_required_participation_credits(request.user, project=project):
-        return fail("参与课题需要50积分，当前积分不足。", status=422, code="insufficient_credits")
     form = ProjectClaimIntentForm(payload.model_dump())
     if not form.is_valid():
-        return fail("Claim submit failed.", status=422, code="validation_error", errors=form_errors(form))
+        return audit_failed_response(
+            request.user,
+            "interaction.submit_claim",
+            "Project",
+            project.id,
+            fail("Claim submit failed.", status=422, code="validation_error", errors=form_errors(form)),
+        )
     claim_type = form.cleaned_data["claim_type"]
     requires_review = claim_type in REVIEW_REQUIRED_CLAIM_TYPES
     claimed_unit_name = (form.cleaned_data.get("claimed_unit_name") or "").strip()
     message = (form.cleaned_data.get("message") or "").strip()
     if claim_type == ClaimType.PAPER_FIRST_UNIT:
         if not claimed_unit_name:
-            return fail(
+            return audit_failed_response(
+                request.user,
+                "interaction.submit_claim",
+                "Project",
+                project.id,
+                fail(
                 "请填写拟认领的论文第一单位。",
                 status=422,
                 code="paper_first_unit_required",
                 errors={"claimed_unit_name": ["请填写拟认领的论文第一单位。"]},
+                ),
             )
         if len(claimed_unit_name) < 2:
-            return fail(
+            return audit_failed_response(
+                request.user,
+                "interaction.submit_claim",
+                "Project",
+                project.id,
+                fail(
                 "拟认领的论文第一单位至少需要2个字符。",
                 status=422,
                 code="validation_error",
                 errors={"claimed_unit_name": ["拟认领的论文第一单位至少需要2个字符。"]},
+                ),
             )
         if not message:
             message = f"申请认领论文第一单位：{claimed_unit_name}"
@@ -2946,16 +3001,49 @@ def claim_project(request, project_id: int, payload: ClaimRequest):
         with transaction.atomic():
             project = Project.objects.select_for_update().get(pk=project.pk)
             if project.stage not in RECRUITING_PROJECT_STAGES:
-                return fail("Project is not recruiting.", status=422, code="project_not_recruiting")
+                return audit_failed_response(
+                    request.user,
+                    "interaction.submit_claim",
+                    "Project",
+                    project.id,
+                    fail("Project is not recruiting.", status=422, code="project_not_recruiting"),
+                )
+            locked_profile = UserProfile.objects.select_for_update().get(user=request.user)
+            if not has_required_participation_credits(request.user, project=project, profile=locked_profile):
+                return audit_failed_response(
+                    request.user,
+                    "interaction.submit_claim",
+                    "Project",
+                    project.id,
+                    fail("参与课题需要50积分，当前积分不足。", status=422, code="insufficient_credits"),
+                )
             if requires_review:
                 active_claims = active_claim_slot_queryset(project, claim_type).select_for_update()
                 if active_claims.filter(user=request.user).exists():
-                    return fail("你已提交该认领，不能重复提交。", status=422, code="claim_already_active")
+                    return audit_failed_response(
+                        request.user,
+                        "interaction.submit_claim",
+                        "Project",
+                        project.id,
+                        fail("你已提交该认领，不能重复提交。", status=422, code="claim_already_active"),
+                    )
                 active_count = active_claims.count()
                 if active_count > 1:
-                    return fail("该课题认领数据存在冲突，请联系管理员处理。", status=422, code="claim_data_conflict")
+                    return audit_failed_response(
+                        request.user,
+                        "interaction.submit_claim",
+                        "Project",
+                        project.id,
+                        fail("该课题认领数据存在冲突，请联系管理员处理。", status=422, code="claim_data_conflict"),
+                    )
                 if active_count == 1:
-                    return fail("该认领席位已被占用，暂不能重复认领。", status=409, code="claim_slot_occupied")
+                    return audit_failed_response(
+                        request.user,
+                        "interaction.submit_claim",
+                        "Project",
+                        project.id,
+                        fail("该认领席位已被占用，暂不能重复认领。", status=409, code="claim_slot_occupied"),
+                    )
             claim, _ = ProjectClaimIntent.objects.update_or_create(
                 user=request.user,
                 project=project,
@@ -2975,7 +3063,13 @@ def claim_project(request, project_id: int, payload: ClaimRequest):
             audit_action = "interaction.submit_claim_for_review" if requires_review else "interaction.auto_approve"
             audit(request.user, audit_action, "ProjectClaimIntent", claim.pk, after=claim_payload(claim))
     except IntegrityError:
-        return fail("该认领席位已被占用，暂不能重复认领。", status=409, code="claim_slot_occupied")
+        return audit_failed_response(
+            request.user,
+            "interaction.submit_claim",
+            "Project",
+            project.id,
+            fail("该认领席位已被占用，暂不能重复认领。", status=409, code="claim_slot_occupied"),
+        )
     return 201, ok(claim_payload(claim))
 
 
@@ -2985,15 +3079,25 @@ def sponsor_project(request, project_id: int, payload: SponsorRequest):
     if auth_error:
         return auth_error
     project = get_object_or_404(Project, pk=project_id, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
-    if project.stage not in RECRUITING_PROJECT_STAGES:
-        return fail("Project is not recruiting.", status=422, code="project_not_recruiting")
     form = SponsorIntentForm(payload.model_dump())
     if not form.is_valid():
-        return fail("Sponsor intent submit failed.", status=422, code="validation_error", errors=form_errors(form))
+        return audit_failed_response(
+            request.user,
+            "interaction.submit_sponsor",
+            "Project",
+            project.id,
+            fail("Sponsor intent submit failed.", status=422, code="validation_error", errors=form_errors(form)),
+        )
     with transaction.atomic():
         project = Project.objects.select_for_update().get(pk=project.pk)
         if project.stage not in RECRUITING_PROJECT_STAGES:
-            return fail("Project is not recruiting.", status=422, code="project_not_recruiting")
+            return audit_failed_response(
+                request.user,
+                "interaction.submit_sponsor",
+                "Project",
+                project.id,
+                fail("Project is not recruiting.", status=422, code="project_not_recruiting"),
+            )
         sponsor, created = SponsorIntent.objects.select_for_update().get_or_create(
             user=request.user,
             project=project,
@@ -3032,6 +3136,29 @@ def fail(message, status=400, code="bad_request", errors=None):
     return status, error_payload(message, code, errors)
 
 
+def audit_failed_response(actor, action, target_type, target_id, response_tuple, before=None, after=None):
+    try:
+        _, payload = response_tuple
+        error = payload.get("error", {})
+        error_code = error.get("code", "")
+        error_message = error.get("message", "")
+    except (TypeError, AttributeError, ValueError):
+        error_code = ""
+        error_message = ""
+    audit(
+        actor,
+        action,
+        target_type,
+        target_id,
+        before=before,
+        after=after,
+        status="failed",
+        error_code=error_code,
+        error_message=error_message,
+    )
+    return response_tuple
+
+
 def password_reset_form_errors(form):
     errors = form_errors(form)
     mapped = {}
@@ -3050,6 +3177,7 @@ def error_payload(message, code="bad_request", errors=None):
     payload = {"ok": False, "request_id": request_id, "error": {"code": code, "message": message, "request_id": request_id}}
     if errors is not None:
         payload["error"]["details"] = errors
+        payload["errors"] = errors
     return payload
 
 
@@ -3588,8 +3716,15 @@ def save_contribution_document(uploaded, project, user):
         return "", "", fail("任务结果文档只支持 PDF 或 Markdown。", status=422, code="validation_error")
     if getattr(uploaded, "size", 0) > CONTRIBUTION_DOCUMENT_MAX_BYTES:
         return "", "", fail("任务结果文档不能超过 10MB。", status=422, code="validation_error")
-    if suffix == ".pdf" and not uploaded_file_has_pdf_signature(uploaded):
-        return "", "", fail("PDF 文件格式无法识别。", status=422, code="validation_error")
+    if suffix == ".pdf":
+        _, pdf_error = validate_uploaded_pdf(
+            uploaded,
+            max_bytes=CONTRIBUTION_DOCUMENT_MAX_BYTES,
+            invalid_suffix_message="任务结果文档只支持 PDF 或 Markdown。",
+            too_large_message="任务结果文档不能超过 10MB。",
+        )
+        if pdf_error:
+            return "", "", pdf_error
     root = contribution_document_root()
     try:
         raw_user_uid = user.profile.uid
@@ -4343,16 +4478,16 @@ def reserved_participation_project_ids(user, exclude_project=None):
     return project_ids - charged_project_ids
 
 
-def available_participation_credits(user, exclude_project=None):
-    profile = getattr(user, "profile", None)
+def available_participation_credits(user, exclude_project=None, profile=None):
+    profile = profile or getattr(user, "profile", None)
     if not profile:
         return 0
     reserved = len(reserved_participation_project_ids(user, exclude_project=exclude_project)) * PROJECT_PARTICIPATION_CREDIT_COST
     return profile.credit_balance - reserved
 
 
-def has_required_participation_credits(user, project=None):
-    return available_participation_credits(user, exclude_project=project) >= PROJECT_PARTICIPATION_CREDIT_COST
+def has_required_participation_credits(user, project=None, profile=None):
+    return available_participation_credits(user, exclude_project=project, profile=profile) >= PROJECT_PARTICIPATION_CREDIT_COST
 
 
 def charge_project_participation_credits_once(project, actor):
@@ -4644,6 +4779,26 @@ def write_uploaded_file_with_hash(uploaded, destination):
             hasher.update(chunk)
             output.write(chunk)
     return hasher.hexdigest()
+
+
+def validate_uploaded_pdf(
+    uploaded,
+    *,
+    max_bytes=PDF_DOCUMENT_MAX_BYTES,
+    invalid_name_message="file name is invalid.",
+    invalid_suffix_message="Only PDF files are allowed.",
+    too_large_message="PDF 文件不能超过 20MB。",
+):
+    file_name = sanitize_file_name(uploaded.name)
+    if not file_name:
+        return "", fail(invalid_name_message, status=422, code="validation_error")
+    if Path(file_name).suffix.lower() != ".pdf":
+        return "", fail(invalid_suffix_message, status=422, code="validation_error")
+    if getattr(uploaded, "size", 0) > max_bytes:
+        return "", fail(too_large_message, status=422, code="validation_error")
+    if not uploaded_file_has_pdf_signature(uploaded):
+        return "", fail("PDF 文件格式无法识别。", status=422, code="validation_error")
+    return file_name, None
 
 
 def uploaded_file_has_pdf_signature(uploaded):

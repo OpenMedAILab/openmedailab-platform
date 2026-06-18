@@ -98,6 +98,31 @@ test("auth api does not expose email verification or email password reset method
   assert.equal(api.confirmPasswordReset, undefined);
 });
 
+test("ApiError exposes validation errors alias from top-level or detail payloads", async () => {
+  globalThis.window = { OPENMEDAILAB_API_BASE: "" };
+  globalThis.location = { port: "5173" };
+  globalThis.fetch = async () => jsonResponse(422, {
+    ok: false,
+    error: {
+      code: "validation_error",
+      message: "Validation failed.",
+      details: { email: [{ message: "邮箱格式不正确" }] }
+    },
+    errors: { email: [{ message: "邮箱格式不正确" }] }
+  });
+
+  const { api, ApiError } = await import(`./api.js?api-error-errors-alias=${Date.now()}`);
+
+  await assert.rejects(
+    () => api.register({}),
+    (error) => {
+      assert.ok(error instanceof ApiError);
+      assert.deepEqual(error.errors, { email: [{ message: "邮箱格式不正确" }] });
+      return true;
+    }
+  );
+});
+
 test("workspace lifecycle api wrappers are exposed", async () => {
   globalThis.window = { OPENMEDAILAB_API_BASE: "" };
   globalThis.location = { port: "5173" };

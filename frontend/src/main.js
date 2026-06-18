@@ -414,7 +414,18 @@ const App = {
     const jsonImportJsonFilesInput = ref(null);
     const jsonImportDirectoryInput = ref(null);
     const jsonImportMixedFilesInput = ref(null);
+    const confirmDialogRef = ref(null);
+    const participationModalRef = ref(null);
+    const paperClaimModalRef = ref(null);
+    const sponsorModalRef = ref(null);
+    const releaseModalRef = ref(null);
+    const myProjectFormRef = ref(null);
+    const adminProjectFormRef = ref(null);
+    const adminThemeFormRef = ref(null);
+    const contributionModalRef = ref(null);
+    const taskProjectDetailRef = ref(null);
     let confirmDialogResolver = null;
+    let lastModalTrigger = null;
     const modalOpen = computed(() => Boolean(
       state.releaseModalOpen ||
       state.confirmDialog.open ||
@@ -937,10 +948,17 @@ const App = {
     function taskSubmitHint(task) {
       if (canSubmitProjectTask(task)) return "";
       if (!approvedTaskRelations(task).length) {
+        const nonSponsorRelations = (task?.relations || []).filter((relation) => relation.relation_type !== "sponsor");
+        if (nonSponsorRelations.some((relation) => relation.status === "pending") || task?.status === "pending") {
+          return "参与或认领状态待确认，获批后可提交";
+        }
+        if (nonSponsorRelations.some((relation) => relation.status === "rejected") || task?.status === "rejected") {
+          return "参与或认领未通过，不能提交";
+        }
+        if (nonSponsorRelations.some((relation) => relation.status === "withdrawn") || task?.status === "withdrawn") {
+          return "参与或认领已撤回，不能提交";
+        }
         if (task?.relations?.some((relation) => relation.relation_type === "sponsor")) return "资助意向不产生任务结果提交权限";
-        if (task?.status === "pending") return "申请状态待确认，获批后可提交";
-        if (task?.status === "rejected") return "申请未通过，不能提交";
-        if (task?.status === "withdrawn") return "申请已撤回，不能提交";
         return "获批后可提交";
       }
       const stage = task?.project?.stage;
@@ -1010,6 +1028,7 @@ const App = {
       closeMutuallyExclusiveModals("myProjectForm");
       state.myProjectForm = emptyProjectForm();
       state.myProjectFormOpen = true;
+      openModalWithFocus(myProjectFormRef);
     }
 
     async function editMyProject(project) {
@@ -1019,6 +1038,7 @@ const App = {
         const detail = await api.project(project.id).catch(() => null);
         state.myProjectForm = projectToForm(detail || project);
         state.myProjectFormOpen = true;
+        openModalWithFocus(myProjectFormRef);
       } catch (error) {
         showToast(error.message || "课题读取失败");
       }
@@ -1027,6 +1047,7 @@ const App = {
     function closeMyProjectForm() {
       state.myProjectFormOpen = false;
       state.myProjectForm = emptyProjectForm();
+      restoreLastModalTrigger();
     }
 
     async function saveMyProject({ publish = false } = {}) {
@@ -1194,6 +1215,7 @@ const App = {
       state.contributionModal.project = task.project;
       state.contributionModal.relation = relation;
       state.forms.contribution = emptyContributionForm(null, task.project);
+      openModalWithFocus(contributionModalRef);
     }
 
     function closeContributionModal() {
@@ -1201,6 +1223,7 @@ const App = {
       state.contributionModal.project = null;
       state.contributionModal.relation = null;
       state.forms.contribution = emptyContributionForm();
+      restoreLastModalTrigger();
     }
 
     async function submitContribution() {
@@ -1758,12 +1781,14 @@ const App = {
         authorship_intention: "contribution",
         message: ""
       };
+      openModalWithFocus(participationModalRef);
     }
 
     function closeParticipationModal(force = false) {
       if (state.participationModal.submitting && !force) return;
       state.participationModal.open = false;
       state.participationModal.project = null;
+      restoreLastModalTrigger();
     }
 
     async function submitParticipationModal() {
@@ -1916,6 +1941,7 @@ const App = {
       state.forms.paperClaim = { claimed_unit_name: "", error: "" };
       state.paperClaimModal.open = true;
       state.paperClaimModal.project = project;
+      openModalWithFocus(paperClaimModalRef);
     }
 
     function closePaperClaimModal(force = false) {
@@ -1923,6 +1949,7 @@ const App = {
       state.paperClaimModal.open = false;
       state.paperClaimModal.project = null;
       state.forms.paperClaim.error = "";
+      restoreLastModalTrigger();
     }
 
     async function submitPaperClaimModal() {
@@ -2022,6 +2049,7 @@ const App = {
       state.sponsorModal.open = true;
       state.sponsorModal.project = project;
       state.sponsorModal.returnFocus = event?.currentTarget || null;
+      rememberModalTrigger(event?.currentTarget || null);
       state.sponsorModal.x = popoverPosition.x;
       state.sponsorModal.y = popoverPosition.y;
       nextTick(() => {
@@ -2039,6 +2067,7 @@ const App = {
       if (focusTarget?.focus) {
         window.setTimeout(() => focusTarget.focus(), 0);
       }
+      restoreLastModalTrigger();
     }
 
     async function submitSponsorModal() {
@@ -3105,6 +3134,7 @@ const App = {
             description: ""
           };
       state.admin.themeFormOpen = true;
+      openModalWithFocus(adminThemeFormRef);
     }
 
     async function deactivateTheme(theme) {
@@ -3145,23 +3175,27 @@ const App = {
       state.admin.themeForm = emptyThemeForm();
       state.admin.themeFileForm = emptyThemeFileForm();
       state.admin.themeFormOpen = true;
+      openModalWithFocus(adminThemeFormRef);
     }
 
     function closeThemeForm() {
       state.admin.themeFormOpen = false;
       state.admin.themeForm = emptyThemeForm();
       state.admin.themeFileForm = emptyThemeFileForm();
+      restoreLastModalTrigger();
     }
 
     function newProject() {
       closeMutuallyExclusiveModals("projectForm");
       state.admin.projectForm = emptyProjectForm();
       state.admin.projectFormOpen = true;
+      openModalWithFocus(adminProjectFormRef);
     }
 
     function closeProjectForm() {
       state.admin.projectFormOpen = false;
       state.admin.projectForm = emptyProjectForm();
+      restoreLastModalTrigger();
     }
 
     async function editProject(project) {
@@ -3172,6 +3206,7 @@ const App = {
         state.admin.projectForm = projectToForm(detail);
         state.admin.activeTab = "projects";
         state.admin.projectFormOpen = true;
+        openModalWithFocus(adminProjectFormRef);
       } catch (error) {
         showToast(error.message);
       }
@@ -3684,6 +3719,7 @@ const App = {
       state.admin.taskProjectDetail.project = project;
       state.admin.taskProjectDetail.interactions = [];
       state.admin.taskProjectDetail.contributions = [];
+      openModalWithFocus(taskProjectDetailRef);
       try {
         const detail = await api.adminProject(project.id);
         const [interactions, contributions] = await Promise.all([
@@ -3706,20 +3742,21 @@ const App = {
       state.admin.taskProjectDetail.project = null;
       state.admin.taskProjectDetail.interactions = [];
       state.admin.taskProjectDetail.contributions = [];
+      restoreLastModalTrigger();
     }
 
     async function fetchProjectApprovedInteractions(project) {
       const card = await api.projectStatusCard(project.id);
       return (card.uid_groups?.groups || [])
-        .filter((group) => ["interest", "claim"].includes(group.type) && String(group.label || "").includes("已通过"))
+        .filter((group) => ["interest", "claim", "sponsor"].includes(group.type) && group.status === "approved")
         .map((group) => ({
-          label: group.label,
+          label: group.type === "sponsor" ? "已获批资助" : group.label,
           items: (group.uids || []).map((uid) => ({
             id: `${group.key}-${uid}`,
             type: group.type,
             user: { uid },
-            subtype_label: "",
-            status_label: "已通过"
+            subtype_label: group.subtype_label || (group.type === "sponsor" ? "资助" : ""),
+            status_label: group.status_label || "已通过"
           }))
         }));
     }
@@ -4451,6 +4488,7 @@ const App = {
       if (confirmDialogResolver) {
         confirmDialogResolver(false);
       }
+      rememberModalTrigger();
       state.confirmDialog = {
         open: true,
         title: options.title || "确认操作",
@@ -4461,6 +4499,7 @@ const App = {
       };
       return new Promise((resolve) => {
         confirmDialogResolver = resolve;
+        focusFirstModalControl(confirmDialogRef);
       });
     }
 
@@ -4469,6 +4508,62 @@ const App = {
       const resolver = confirmDialogResolver;
       confirmDialogResolver = null;
       if (resolver) resolver(Boolean(result));
+      restoreLastModalTrigger();
+    }
+
+    function rememberModalTrigger(trigger = null) {
+      const candidate = trigger || document.activeElement;
+      lastModalTrigger = candidate && typeof candidate.focus === "function" ? candidate : null;
+    }
+
+    function restoreLastModalTrigger() {
+      const target = lastModalTrigger;
+      lastModalTrigger = null;
+      if (target && document.contains(target) && typeof target.focus === "function") {
+        target.focus({ preventScroll: true });
+      }
+    }
+
+    function modalElement(modalRef) {
+      return modalRef?.value || modalRef || null;
+    }
+
+    function modalFocusableControls(modalRef) {
+      const modal = modalElement(modalRef);
+      if (!modal?.querySelectorAll) return [];
+      return Array.from(modal.querySelectorAll("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])"))
+        .filter((element) => !element.disabled && element.getAttribute("aria-hidden") !== "true" && element.getClientRects().length > 0);
+    }
+
+    function focusFirstModalControl(modalRef) {
+      nextTick(() => {
+        const controls = modalFocusableControls(modalRef);
+        (controls[0] || modalElement(modalRef))?.focus?.({ preventScroll: true });
+      });
+    }
+
+    function openModalWithFocus(modalRef, trigger = null) {
+      rememberModalTrigger(trigger);
+      focusFirstModalControl(modalRef);
+    }
+
+    function trapModalFocus(event, modalRef) {
+      if (event.key !== "Tab") return;
+      const controls = modalFocusableControls(modalRef);
+      if (!controls.length) {
+        event.preventDefault();
+        modalElement(modalRef)?.focus?.({ preventScroll: true });
+        return;
+      }
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus({ preventScroll: true });
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus({ preventScroll: true });
+      }
     }
 
     function can(capability) {
@@ -4704,10 +4799,12 @@ const App = {
 
     function openReleaseModal() {
       state.releaseModalOpen = true;
+      openModalWithFocus(releaseModalRef);
     }
 
     function closeReleaseModal() {
       state.releaseModalOpen = false;
+      restoreLastModalTrigger();
     }
 
     function toggleReleaseVersion(version) {
@@ -4768,6 +4865,17 @@ const App = {
       jsonImportJsonFilesInput,
       jsonImportDirectoryInput,
       jsonImportMixedFilesInput,
+      confirmDialogRef,
+      participationModalRef,
+      paperClaimModalRef,
+      sponsorModalRef,
+      releaseModalRef,
+      myProjectFormRef,
+      adminProjectFormRef,
+      adminThemeFormRef,
+      contributionModalRef,
+      taskProjectDetailRef,
+      trapModalFocus,
       can,
       navigate,
       applyFilters,
@@ -5006,11 +5114,11 @@ const App = {
             type="button"
             @click="navigate(item.name)"
           >
-            <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'home'">library_books</span>
-            <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'faq'">help</span>
-            <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'dashboard'">space_dashboard</span>
-            <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'favorites'">bookmark</span>
-            <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'admin'">settings</span>
+            <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'home'" aria-hidden="true">library_books</span>
+            <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'faq'" aria-hidden="true">help</span>
+            <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'dashboard'" aria-hidden="true">space_dashboard</span>
+            <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'favorites'" aria-hidden="true">bookmark</span>
+            <span class="material-symbols-rounded" style="font-size: 20px;" v-if="item.name === 'admin'" aria-hidden="true">settings</span>
             {{ item.label }}
           </button>
         </nav>
@@ -5026,7 +5134,7 @@ const App = {
             @focusin="openProfileMenu"
           >
             <button class="text-button profile-trigger" type="button" @click="openProfileMenuFromTrigger($event)" aria-haspopup="dialog" :aria-expanded="state.profileMenuOpen ? 'true' : 'false'">
-              <span class="material-symbols-rounded" style="font-size: 18px;">person</span>
+              <span class="material-symbols-rounded" style="font-size: 18px;" aria-hidden="true">person</span>
               <span>{{ state.user.profile?.display_name || state.user.username }}</span>
             </button>
             <div class="profile-popover" role="dialog" aria-label="个人信息" @mouseenter="openProfileMenu">
@@ -5040,22 +5148,23 @@ const App = {
               <div class="profile-actions">
                 <button class="ghost-button" type="button" @click="state.workspaceTab = 'overview'; navigate('dashboard'); closeProfileMenu(); $event.currentTarget.blur()">个人中心</button>
                 <button class="ghost-button" type="button" @click="state.workspaceTab = 'favorites'; navigate('dashboard'); closeProfileMenu(); $event.currentTarget.blur()">我的关注</button>
-                <button class="ghost-button danger profile-logout" type="button" @click="logout(); closeProfileMenu(); $event.currentTarget.blur()"><span class="material-symbols-rounded" style="font-size: 18px;">logout</span> 退出</button>
+                <button class="ghost-button danger profile-logout" type="button" @click="logout(); closeProfileMenu(); $event.currentTarget.blur()"><span class="material-symbols-rounded" style="font-size: 18px;" aria-hidden="true">logout</span> 退出</button>
               </div>
             </div>
           </div>
           <template v-else>
-            <button class="ghost-button" type="button" @click="navigate('login')"><span class="material-symbols-rounded" style="font-size: 18px;">login</span> 登录</button>
-            <button class="primary-button" type="button" @click="navigate('register')"><span class="material-symbols-rounded" style="font-size: 18px;">person_add</span> 注册</button>
+            <button class="ghost-button" type="button" @click="navigate('login')"><span class="material-symbols-rounded" style="font-size: 18px;" aria-hidden="true">login</span> 登录</button>
+            <button class="primary-button" type="button" @click="navigate('register')"><span class="material-symbols-rounded" style="font-size: 18px;" aria-hidden="true">person_add</span> 注册</button>
           </template>
         </div>
       </header>
 
       <main class="page">
-        <div v-if="state.toast" class="toast">{{ state.toast }}</div>
+        <div v-if="state.toast" class="toast" role="status" aria-live="polite" aria-atomic="true">{{ state.toast }}</div>
         <div
           v-if="state.claimReasonTooltip.visible"
           class="claim-reason-tooltip"
+          data-testid="claim-reason-tooltip"
           :style="{ left: state.claimReasonTooltip.x + 'px', top: state.claimReasonTooltip.y + 'px' }"
           role="tooltip"
         >
@@ -5070,25 +5179,25 @@ const App = {
           <section v-if="activeView === 'home' || activeView === 'projects'" class="library-view">
             <div class="toolbar">
               <label class="search-box">
-                <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">search</span> 搜索</span>
+                <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;" aria-hidden="true">search</span> 搜索</span>
                 <input v-model="state.filters.q" type="search" placeholder="输入疾病、模型、任务或期刊" @keyup.enter="applyFilters" />
               </label>
-              <label>
-                <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">category</span> 主题</span>
+              <label class="filter-group optional-mobile">
+                <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;" aria-hidden="true">category</span> 主题</span>
                 <select v-model="state.filters.theme" @change="applyFilters">
                   <option value="">不限主题</option>
                   <option v-for="theme in state.meta.themes" :key="theme.slug" :value="theme.slug">{{ theme.name }}</option>
                 </select>
               </label>
               <label>
-                <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">moving</span> 阶段</span>
+                <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;" aria-hidden="true">moving</span> 阶段</span>
                 <select v-model="state.filters.stage" @change="applyFilters">
                   <option value="">全部阶段</option>
                   <option v-for="stage in state.meta.project_stages" :key="stage.value" :value="stage.value">{{ stage.label }}</option>
                 </select>
               </label>
               <label>
-                <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;">sort</span> 排序</span>
+                <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;" aria-hidden="true">sort</span> 排序</span>
                 <select v-model="state.filters.sort" @change="applyFilters">
                   <option value="project_id">编号顺序</option>
                   <option value="newest">最新编号</option>
@@ -5097,7 +5206,7 @@ const App = {
                   <option value="likes">点赞</option>
                 </select>
               </label>
-              <button class="primary-button" type="button" @click="applyFilters"><span class="material-symbols-rounded">filter_list</span> 筛选</button>
+              <button class="primary-button" type="button" @click="applyFilters"><span class="material-symbols-rounded" aria-hidden="true">filter_list</span> 筛选</button>
             </div>
 
             <div class="theme-strip topic-theme-strip single-row" :style="{ '--home-theme-columns': homeThemeRowColumnCount }">
@@ -5153,13 +5262,14 @@ const App = {
                 v-for="project in state.projects"
                 :key="project.id"
                 :data-project-id="project.id"
+                data-testid="project-card"
                 :class="['project-card project-list-card project-catalog-card', { 'project-card--self-related': hasSelfRelation(project) }]"
               >
-                <span v-if="primarySelfRelationLabel(project)" class="self-relation-corner">{{ primarySelfRelationLabel(project) }}</span>
+                <span v-if="primarySelfRelationLabel(project)" class="self-relation-corner" data-testid="relation-corner-ribbon">{{ primarySelfRelationLabel(project) }}</span>
                 <div :class="['project-card-headline', { 'project-card-headline--self-related': primarySelfRelationLabel(project) }]">
-                  <div class="project-card-meta">
-                    <span v-for="label in secondarySelfRelationLabels(project)" :key="label" class="self-relation-inline-chip">{{ label }}</span>
-                    <span>{{ topicCode(project) }}</span>
+                  <div class="project-card-meta" data-testid="project-meta-row">
+                    <span v-for="label in secondarySelfRelationLabels(project)" :key="label" class="self-relation-inline-chip" data-testid="my-relation-chip">{{ label }}</span>
+                    <span data-testid="project-topic-chip">{{ topicCode(project) }}</span>
                     <span>{{ project.theme?.name || '未分类' }}</span>
                     <span class="project-stage-chip" :class="projectStageTone(project)">{{ project.stage_label }}</span>
                     <span class="project-funding-chip" :class="{ funded: projectFundingReady(project) }">{{ projectFundingLabel(project) }}</span>
@@ -5180,7 +5290,7 @@ const App = {
                 </div>
                 <div class="project-list-main">
                   <h3>
-                    <a class="project-title-link" :href="projectDetailHref(project)" @click.prevent="navigate('project', { id: project.id })">{{ project.title }}</a>
+                    <a class="project-title-link" data-testid="project-title-link" :href="projectDetailHref(project)" @click.prevent="navigate('project', { id: project.id })">{{ project.title }}</a>
                   </h3>
                   <div class="project-expanded-detail">
                     <section>
@@ -5197,7 +5307,7 @@ const App = {
                     </div>
                   </div>
                 </div>
-                <div class="project-card-bottom project-status-strip">
+                <div class="project-card-bottom project-status-strip" data-testid="project-status-strip">
                   <div class="project-status-row">
                     <strong>招募</strong><span>{{ projectRecruitmentText(project) }}</span>
                   </div>
@@ -5237,11 +5347,11 @@ const App = {
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">groups</span>
                       <span>{{ participationButtonLabel(project) }}</span>
                     </button>
-                    <button class="ghost-button interaction-button claim-action-button" :class="{ 'interaction-active': interactionButtonActive('lead', project) }" type="button" :disabled="!canClickLeadClaim(project)" :aria-disabled="claimButtonAriaDisabled(project, 'leader')" @mouseenter="showClaimReasonTooltip($event, project, 'leader')" @focus="showClaimReasonTooltip($event, project, 'leader')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click.stop="submitLeadClaim(project, $event)">
+                    <button class="ghost-button interaction-button claim-action-button" :class="{ 'interaction-active': interactionButtonActive('lead', project), 'is-disabled': !canClickLeadClaim(project) }" type="button" :aria-disabled="claimButtonAriaDisabled(project, 'leader')" @mouseenter="showClaimReasonTooltip($event, project, 'leader')" @focus="showClaimReasonTooltip($event, project, 'leader')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click.stop="submitLeadClaim(project, $event)">
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">supervisor_account</span>
                       <span>{{ leadClaimButtonLabel(project) }}</span>
                     </button>
-                    <button class="ghost-button interaction-button claim-action-button" :class="{ 'interaction-active': interactionButtonActive('paper', project) }" type="button" :disabled="!canClickPaperClaim(project)" :aria-disabled="claimButtonAriaDisabled(project, 'paper_first_unit')" @mouseenter="showClaimReasonTooltip($event, project, 'paper_first_unit')" @focus="showClaimReasonTooltip($event, project, 'paper_first_unit')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click.stop="submitPaperClaim(project, $event)">
+                    <button class="ghost-button interaction-button claim-action-button" :class="{ 'interaction-active': interactionButtonActive('paper', project), 'is-disabled': !canClickPaperClaim(project) }" type="button" :aria-disabled="claimButtonAriaDisabled(project, 'paper_first_unit')" @mouseenter="showClaimReasonTooltip($event, project, 'paper_first_unit')" @focus="showClaimReasonTooltip($event, project, 'paper_first_unit')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click.stop="submitPaperClaim(project, $event)">
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">workspace_premium</span>
                       <span>{{ paperClaimButtonLabel(project) }}</span>
                     </button>
@@ -5314,7 +5424,7 @@ const App = {
               <div class="faq-qr-grid">
                 <article v-for="entry in faqQrEntries" :key="entry.key" class="faq-qr-card">
                   <header>
-                    <span class="material-symbols-rounded">{{ entry.icon }}</span>
+                    <span class="material-symbols-rounded" aria-hidden="true">{{ entry.icon }}</span>
                     <strong>{{ entry.label }}</strong>
                   </header>
                   <img :src="sidebarQrImageSrc(entry)" :alt="sidebarQrAlt(entry)" />
@@ -5342,6 +5452,33 @@ const App = {
                 </div>
               </div>
 
+              <div class="project-progress-actions project-interaction-actions">
+                <button class="ghost-button interaction-button" :class="{ 'interaction-active': interactionButtonActive('like', state.projectProgress.project) }" type="button" :disabled="isSubmittingLike(state.projectProgress.project)" @click="submitLike(state.projectProgress.project)">
+                  <span class="material-symbols-rounded interaction-icon" aria-hidden="true">thumb_up</span>
+                  <span>{{ likeButtonLabel(state.projectProgress.project) }}</span>
+                </button>
+                <button v-if="shouldShowFollowButton(state.projectProgress.project)" class="ghost-button interaction-button follow-button" :class="{ active: isProjectFollowing(state.projectProgress.project), 'interaction-active': interactionButtonActive('follow', state.projectProgress.project) }" type="button" @click="toggleFollow(state.projectProgress.project)">
+                  <span class="material-symbols-rounded interaction-icon" aria-hidden="true">star</span>
+                  <span>{{ followButtonLabel(state.projectProgress.project) }}</span>
+                </button>
+                <button class="ghost-button interaction-button" :class="{ 'interaction-active': interactionButtonActive('participation', state.projectProgress.project) }" type="button" :disabled="!canClickParticipation(state.projectProgress.project)" @click="handleParticipationAction(state.projectProgress.project)">
+                  <span class="material-symbols-rounded interaction-icon" aria-hidden="true">groups</span>
+                  <span>{{ participationButtonLabel(state.projectProgress.project) }}</span>
+                </button>
+                <button class="ghost-button interaction-button claim-action-button" :class="{ 'interaction-active': interactionButtonActive('lead', state.projectProgress.project), 'is-disabled': !canClickLeadClaim(state.projectProgress.project) }" type="button" :aria-disabled="claimButtonAriaDisabled(state.projectProgress.project, 'leader')" @mouseenter="showClaimReasonTooltip($event, state.projectProgress.project, 'leader')" @focus="showClaimReasonTooltip($event, state.projectProgress.project, 'leader')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click="submitLeadClaim(state.projectProgress.project, $event)">
+                  <span class="material-symbols-rounded interaction-icon" aria-hidden="true">supervisor_account</span>
+                  <span>{{ leadClaimButtonLabel(state.projectProgress.project) }}</span>
+                </button>
+                <button class="ghost-button interaction-button claim-action-button" :class="{ 'interaction-active': interactionButtonActive('paper', state.projectProgress.project), 'is-disabled': !canClickPaperClaim(state.projectProgress.project) }" type="button" :aria-disabled="claimButtonAriaDisabled(state.projectProgress.project, 'paper_first_unit')" @mouseenter="showClaimReasonTooltip($event, state.projectProgress.project, 'paper_first_unit')" @focus="showClaimReasonTooltip($event, state.projectProgress.project, 'paper_first_unit')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click="submitPaperClaim(state.projectProgress.project, $event)">
+                  <span class="material-symbols-rounded interaction-icon" aria-hidden="true">workspace_premium</span>
+                  <span>{{ paperClaimButtonLabel(state.projectProgress.project) }}</span>
+                </button>
+                <button class="ghost-button interaction-button sponsor-action-button" :class="{ 'interaction-active': interactionButtonActive('sponsor', state.projectProgress.project) }" type="button" :disabled="!canClickSponsor(state.projectProgress.project)" aria-controls="sponsor-popover" :aria-expanded="state.sponsorModal.open && state.sponsorModal.project?.id === state.projectProgress.project.id ? 'true' : 'false'" @click="submitSponsor(state.projectProgress.project, $event)">
+                  <span class="material-symbols-rounded interaction-icon" aria-hidden="true">volunteer_activism</span>
+                  <span>{{ sponsorButtonLabel(state.projectProgress.project) }}</span>
+                </button>
+              </div>
+
               <div class="project-progress-layout">
                 <article class="content-panel project-progress-summary">
                   <div class="project-card-meta">
@@ -5367,7 +5504,7 @@ const App = {
                   </div>
                   <div v-if="projectProgressDocuments.length" class="project-document-admin-list">
                     <article class="project-document-admin-row" v-for="document in projectProgressDocuments" :key="document.id">
-                      <span class="material-symbols-rounded">picture_as_pdf</span>
+                      <span class="material-symbols-rounded" aria-hidden="true">picture_as_pdf</span>
                       <div>
                         <strong>{{ documentDisplayTitle(document) }}</strong>
                         <small>{{ document.description || '项目进度文档' }}</small>
@@ -5784,11 +5921,11 @@ const App = {
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">groups</span>
                       <span>{{ participationButtonLabel(project) }}</span>
                     </button>
-                    <button class="ghost-button interaction-button claim-action-button" :class="{ 'interaction-active': interactionButtonActive('lead', project) }" type="button" :disabled="!canClickLeadClaim(project)" :aria-disabled="claimButtonAriaDisabled(project, 'leader')" @mouseenter="showClaimReasonTooltip($event, project, 'leader')" @focus="showClaimReasonTooltip($event, project, 'leader')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click.stop="submitLeadClaim(project, $event)">
+                    <button class="ghost-button interaction-button claim-action-button" :class="{ 'interaction-active': interactionButtonActive('lead', project), 'is-disabled': !canClickLeadClaim(project) }" type="button" :aria-disabled="claimButtonAriaDisabled(project, 'leader')" @mouseenter="showClaimReasonTooltip($event, project, 'leader')" @focus="showClaimReasonTooltip($event, project, 'leader')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click.stop="submitLeadClaim(project, $event)">
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">supervisor_account</span>
                       <span>{{ leadClaimButtonLabel(project) }}</span>
                     </button>
-                    <button class="ghost-button interaction-button claim-action-button" :class="{ 'interaction-active': interactionButtonActive('paper', project) }" type="button" :disabled="!canClickPaperClaim(project)" :aria-disabled="claimButtonAriaDisabled(project, 'paper_first_unit')" @mouseenter="showClaimReasonTooltip($event, project, 'paper_first_unit')" @focus="showClaimReasonTooltip($event, project, 'paper_first_unit')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click.stop="submitPaperClaim(project, $event)">
+                    <button class="ghost-button interaction-button claim-action-button" :class="{ 'interaction-active': interactionButtonActive('paper', project), 'is-disabled': !canClickPaperClaim(project) }" type="button" :aria-disabled="claimButtonAriaDisabled(project, 'paper_first_unit')" @mouseenter="showClaimReasonTooltip($event, project, 'paper_first_unit')" @focus="showClaimReasonTooltip($event, project, 'paper_first_unit')" @mouseleave="hideClaimReasonTooltip" @blur="hideClaimReasonTooltip" @click.stop="submitPaperClaim(project, $event)">
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">workspace_premium</span>
                       <span>{{ paperClaimButtonLabel(project) }}</span>
                     </button>
@@ -5962,7 +6099,7 @@ const App = {
                 <div class="sidebar-qr-admin-grid">
                   <article v-for="entry in sidebarQrEntries" :key="entry.key" class="sidebar-qr-admin-card">
                     <header>
-                      <span class="material-symbols-rounded">{{ entry.icon }}</span>
+                      <span class="material-symbols-rounded" aria-hidden="true">{{ entry.icon }}</span>
                       <div>
                         <h3>{{ entry.label }}</h3>
                         <p>{{ entry.has_image ? '已上传二维码' : '二维码待更新' }}</p>
@@ -6235,7 +6372,7 @@ const App = {
                 </article>
 
                 <div v-if="state.admin.projectFormOpen" class="project-form-modal" @click.self="closeProjectForm">
-                  <section class="project-form-dialog" role="dialog" aria-modal="true" aria-label="课题表单">
+                  <section ref="adminProjectFormRef" class="project-form-dialog" role="dialog" aria-modal="true" aria-label="课题表单" tabindex="-1" @keydown="trapModalFocus($event, adminProjectFormRef)">
                     <header class="project-form-dialog-header">
                       <div>
                         <span class="eyebrow">课题管理</span>
@@ -6283,7 +6420,7 @@ const App = {
                         <template v-if="state.admin.projectForm.id">
                           <div v-if="primaryProjectDocument(state.admin.projectForm)" class="project-document-admin-list">
                             <article class="project-document-admin-row">
-                              <span class="material-symbols-rounded">picture_as_pdf</span>
+                              <span class="material-symbols-rounded" aria-hidden="true">picture_as_pdf</span>
                               <div>
                                 <strong>{{ documentDisplayTitle(primaryProjectDocument(state.admin.projectForm)) }}</strong>
                                 <small>{{ primaryProjectDocument(state.admin.projectForm).description || '课题 PDF 详情' }}</small>
@@ -6320,7 +6457,7 @@ const App = {
                         <template v-if="state.admin.projectForm.id">
                           <div v-if="projectProgressDocumentsFor(state.admin.projectForm).length" class="project-document-admin-list">
                             <article class="project-document-admin-row" v-for="document in projectProgressDocumentsFor(state.admin.projectForm)" :key="document.id">
-                              <span class="material-symbols-rounded">description</span>
+                              <span class="material-symbols-rounded" aria-hidden="true">description</span>
                               <div>
                                 <strong>{{ documentDisplayTitle(document) }}</strong>
                                 <small>{{ document.description || '项目进度文档' }}</small>
@@ -6391,10 +6528,10 @@ const App = {
                       </span>
                       <span>{{ theme.is_active ? '启用' : '停用' }}</span>
                       <span class="button-row">
-                        <button class="icon-button" type="button" title="上移" @click="moveThemeSort(theme, 'up')"><span class="material-symbols-rounded">keyboard_arrow_up</span></button>
-                        <button class="icon-button" type="button" title="下移" @click="moveThemeSort(theme, 'down')"><span class="material-symbols-rounded">keyboard_arrow_down</span></button>
-                        <button class="icon-button" type="button" title="置顶" @click="moveThemeSort(theme, 'top')"><span class="material-symbols-rounded">vertical_align_top</span></button>
-                        <button class="icon-button" type="button" title="置底" @click="moveThemeSort(theme, 'bottom')"><span class="material-symbols-rounded">vertical_align_bottom</span></button>
+                        <button class="icon-button" type="button" title="上移" @click="moveThemeSort(theme, 'up')"><span class="material-symbols-rounded" aria-hidden="true">keyboard_arrow_up</span></button>
+                        <button class="icon-button" type="button" title="下移" @click="moveThemeSort(theme, 'down')"><span class="material-symbols-rounded" aria-hidden="true">keyboard_arrow_down</span></button>
+                        <button class="icon-button" type="button" title="置顶" @click="moveThemeSort(theme, 'top')"><span class="material-symbols-rounded" aria-hidden="true">vertical_align_top</span></button>
+                        <button class="icon-button" type="button" title="置底" @click="moveThemeSort(theme, 'bottom')"><span class="material-symbols-rounded" aria-hidden="true">vertical_align_bottom</span></button>
                         <button class="ghost-button" type="button" @click="editTheme(theme)">编辑</button>
                         <a v-if="adminThemeDatasetFile(theme)?.detail_pdf_path" class="ghost-button" :href="themeFileDetailPdfHref(adminThemeDatasetFile(theme))" download>下载PDF</a>
                         <button class="ghost-button" type="button" @click="deactivateTheme(theme)">{{ theme.is_active ? '停用' : '启用' }}</button>
@@ -6405,7 +6542,7 @@ const App = {
                 </article>
 
                 <div v-if="state.admin.themeFormOpen" class="project-form-modal" @click.self="closeThemeForm">
-                  <section class="project-form-dialog" role="dialog" aria-modal="true" aria-label="主题表单">
+                  <section ref="adminThemeFormRef" class="project-form-dialog" role="dialog" aria-modal="true" aria-label="主题表单" tabindex="-1" @keydown="trapModalFocus($event, adminThemeFormRef)">
                     <header class="project-form-dialog-header">
                       <div>
                         <span class="eyebrow">主题管理</span>
@@ -6435,7 +6572,7 @@ const App = {
                         </div>
                         <div v-if="state.admin.themeFileForm.detail_pdf_path" class="project-document-admin-list">
                           <article class="project-document-admin-row">
-                            <span class="material-symbols-rounded">picture_as_pdf</span>
+                            <span class="material-symbols-rounded" aria-hidden="true">picture_as_pdf</span>
                             <div>
                               <strong>{{ state.admin.themeFileForm.detail_pdf_title || state.admin.themeFileForm.title || '数据集说明 PDF' }}</strong>
                               <small>{{ state.admin.themeFileForm.description || '数据集说明文件' }}</small>
@@ -6526,7 +6663,7 @@ const App = {
                 <span>密码</span>
                 <input id="login-password" v-model="state.forms.login.password" name="password" type="password" placeholder="密码" autocomplete="current-password" />
               </label>
-              <button class="primary-button" type="submit"><span class="material-symbols-rounded" style="font-size: 18px;">login</span> 登录</button>
+              <button class="primary-button" type="submit"><span class="material-symbols-rounded" style="font-size: 18px;" aria-hidden="true">login</span> 登录</button>
               <button class="text-button auth-link" type="button" @click="navigate('password-reset')">忘记密码</button>
             </form>
           </section>
@@ -6571,7 +6708,7 @@ const App = {
                 </div>
               </label>
               <button class="primary-button" type="submit" :disabled="state.formState.passwordChangeSubmitting">
-                <span class="material-symbols-rounded" style="font-size: 18px;">lock_reset</span>
+                <span class="material-symbols-rounded" style="font-size: 18px;" aria-hidden="true">lock_reset</span>
                 {{ state.formState.passwordChangeSubmitting ? '正在修改' : '修改并重新登录' }}
               </button>
               <button class="text-button auth-link" type="button" @click="logout">退出登录</button>
@@ -6680,7 +6817,7 @@ const App = {
                 </div>
               </label>
               <button class="primary-button" type="submit" :disabled="state.formState.registerSubmitting">
-                <span class="material-symbols-rounded" style="font-size: 18px;">person_add</span>
+                <span class="material-symbols-rounded" style="font-size: 18px;" aria-hidden="true">person_add</span>
                 {{ state.formState.registerSubmitting ? '正在创建' : '创建账号' }}
               </button>
             </form>
@@ -6697,7 +6834,7 @@ const App = {
         </template>
 
         <div v-if="state.participationModal.open" class="form-modal-backdrop" @click.self="closeParticipationModal">
-          <section class="form-modal compact-form-modal" role="dialog" aria-modal="true" aria-label="参与课题">
+          <section ref="participationModalRef" class="form-modal compact-form-modal" role="dialog" aria-modal="true" aria-label="参与课题" tabindex="-1" @keydown="trapModalFocus($event, participationModalRef)">
             <header class="modal-header">
               <div>
                 <span class="eyebrow">参与课题</span>
@@ -6728,7 +6865,7 @@ const App = {
         </div>
 
         <div v-if="state.paperClaimModal.open" class="form-modal-backdrop" @click.self="closePaperClaimModal">
-          <section class="form-modal compact-form-modal" role="dialog" aria-modal="true" aria-label="认领课题（论文第一单位）">
+          <section ref="paperClaimModalRef" class="form-modal compact-form-modal" role="dialog" aria-modal="true" aria-label="认领课题（论文第一单位）" tabindex="-1" @keydown="trapModalFocus($event, paperClaimModalRef)">
             <header class="modal-header">
               <div>
                 <span class="eyebrow">认领课题（论文第一单位）</span>
@@ -6754,7 +6891,7 @@ const App = {
         </div>
 
         <div v-if="state.sponsorModal.open" class="form-modal-backdrop sponsor-popover-backdrop" @click.self="closeSponsorModal">
-          <section id="sponsor-popover" class="sponsor-popover" :style="{ left: state.sponsorModal.x + 'px', top: state.sponsorModal.y + 'px' }" role="dialog" aria-modal="true" aria-label="选择资助类型">
+          <section id="sponsor-popover" ref="sponsorModalRef" class="sponsor-popover" data-testid="sponsor-popover" :style="{ left: state.sponsorModal.x + 'px', top: state.sponsorModal.y + 'px' }" role="dialog" aria-modal="true" aria-label="选择资助类型" tabindex="-1" @keydown="trapModalFocus($event, sponsorModalRef)">
             <header class="modal-header">
               <div>
                 <span class="eyebrow">选择资助类型</span>
@@ -6784,7 +6921,7 @@ const App = {
         </div>
 
         <div v-if="state.releaseModalOpen" class="release-modal-backdrop" @click.self="closeReleaseModal">
-          <section class="release-modal" role="dialog" aria-modal="true" aria-label="更新日志">
+          <section ref="releaseModalRef" class="release-modal" role="dialog" aria-modal="true" aria-label="更新日志" tabindex="-1" @keydown="trapModalFocus($event, releaseModalRef)">
             <header class="release-modal-header">
               <div>
                 <span class="eyebrow">系统版本</span>
@@ -6807,7 +6944,7 @@ const App = {
               <div class="release-history-item" v-for="item in releaseHistoryItems" :key="item.version">
                 <button class="text-button release-history-trigger" type="button" @click="toggleReleaseVersion(item.version)">
                   v{{ item.version }} · {{ item.date }}
-                  <span class="material-symbols-rounded" style="font-size: 18px;">{{ isReleaseVersionExpanded(item.version) ? 'expand_less' : 'expand_more' }}</span>
+                  <span class="material-symbols-rounded" style="font-size: 18px;" aria-hidden="true">{{ isReleaseVersionExpanded(item.version) ? 'expand_less' : 'expand_more' }}</span>
                 </button>
                 <div v-if="isReleaseVersionExpanded(item.version)" class="release-history-detail">
                   <div class="release-section" v-for="[section, items] in sectionEntries(item.sections)" :key="section">
@@ -6823,7 +6960,7 @@ const App = {
         </div>
 
         <div v-if="state.myProjectFormOpen" class="project-form-modal user-project-form-modal" @click.self="closeMyProjectForm">
-          <section class="project-form-dialog user-project-form-dialog" role="dialog" aria-modal="true" aria-label="我的课题表单">
+          <section ref="myProjectFormRef" class="project-form-dialog user-project-form-dialog" role="dialog" aria-modal="true" aria-label="我的课题表单" tabindex="-1" @keydown="trapModalFocus($event, myProjectFormRef)">
             <header class="project-form-dialog-header">
               <div>
                 <span class="eyebrow">我的上传</span>
@@ -6871,7 +7008,7 @@ const App = {
                 </div>
                 <div v-if="primaryProjectDocument(state.myProjectForm)" class="project-document-admin-list">
                   <article class="project-document-admin-row">
-                    <span class="material-symbols-rounded">picture_as_pdf</span>
+                    <span class="material-symbols-rounded" aria-hidden="true">picture_as_pdf</span>
                     <div>
                       <strong>{{ documentDisplayTitle(primaryProjectDocument(state.myProjectForm)) }}</strong>
                       <small>{{ primaryProjectDocument(state.myProjectForm).description || '课题 PDF 详情' }}</small>
@@ -6904,7 +7041,7 @@ const App = {
         </div>
 
         <div v-if="state.contributionModal.open" class="project-form-modal task-result-modal" @click.self="closeContributionModal">
-          <section class="project-form-dialog task-result-dialog" role="dialog" aria-modal="true" aria-label="提交任务结果">
+          <section ref="contributionModalRef" class="project-form-dialog task-result-dialog" role="dialog" aria-modal="true" aria-label="提交任务结果" tabindex="-1" @keydown="trapModalFocus($event, contributionModalRef)">
             <header class="project-form-dialog-header">
               <div>
                 <span class="eyebrow">我的任务</span>
@@ -6949,7 +7086,7 @@ const App = {
         </div>
 
         <div v-if="state.admin.taskProjectDetail.open" class="project-form-modal task-detail-modal" @click.self="closeTaskProjectDetail">
-          <section class="project-form-dialog task-detail-dialog" role="dialog" aria-modal="true" aria-label="任务管理详情">
+          <section ref="taskProjectDetailRef" class="project-form-dialog task-detail-dialog" role="dialog" aria-modal="true" aria-label="任务管理详情" tabindex="-1" @keydown="trapModalFocus($event, taskProjectDetailRef)">
             <header class="project-form-dialog-header">
               <div>
                 <span class="eyebrow">任务管理</span>
@@ -7062,7 +7199,7 @@ const App = {
         </div>
 
         <div v-if="state.confirmDialog.open" class="confirm-modal-backdrop" @click.self="resolveConfirmDialog(false)">
-          <section class="confirm-modal" :class="'confirm-modal--' + state.confirmDialog.tone" role="dialog" aria-modal="true" aria-label="确认操作">
+          <section ref="confirmDialogRef" class="confirm-modal" :class="'confirm-modal--' + state.confirmDialog.tone" role="dialog" aria-modal="true" aria-label="确认操作" tabindex="-1" @keydown="trapModalFocus($event, confirmDialogRef)">
             <h2>{{ state.confirmDialog.title }}</h2>
             <p>{{ state.confirmDialog.message }}</p>
             <div class="button-row">

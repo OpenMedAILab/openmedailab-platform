@@ -9,7 +9,7 @@ const indexSource = readFileSync(new URL("../index.html", import.meta.url), "utf
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
 test("legacy project detail modal state and styles are removed", () => {
-  assert.match(mainSource, /<div v-if="state\.toast" class="toast">/);
+  assert.match(mainSource, /<div v-if="state\.toast" class="toast" role="status" aria-live="polite" aria-atomic="true">/);
   assert.doesNotMatch(mainSource, /state\.preview/);
   assert.doesNotMatch(mainSource, /state\.currentProject/);
   assert.doesNotMatch(mainSource, /openProjectPreview/);
@@ -30,7 +30,7 @@ test("project title opens progress page while pdf actions still open documents",
   assert.match(mainSource, /parts\[0\] === "project"/);
   assert.match(mainSource, /api\.projectProgress/);
   assert.match(mainSource, /function projectPdfHref\(project\)/);
-  assert.match(mainSource, /class="project-title-link" :href="projectDetailHref\(project\)"/);
+  assert.match(mainSource, /class="project-title-link"[^>]*:href="projectDetailHref\(project\)"/);
   assert.match(mainSource, />查看PDF</);
   assert.match(mainSource, />下载PDF</);
   assert.match(mainSource, /target="_blank"\s+rel="noopener"/);
@@ -799,13 +799,47 @@ test("business modals use an explicit z-index scale and close competing overlays
   assert.match(mainSource, /closeMutuallyExclusiveModals\("taskProjectDetail"\)/);
   assert.match(mainSource, /closeMutuallyExclusiveModals\("projectForm"\)/);
   assert.match(mainSource, /closeMutuallyExclusiveModals\("myProjectForm"\)/);
-  assert.match(stylesSource, /\.toast\s*\{[\s\S]*?z-index:\s*850;/);
+  assert.match(stylesSource, /\.toast\s*\{[\s\S]*?z-index:\s*950;/);
   assert.doesNotMatch(stylesSource, /\.project-modal-backdrop\s*\{/);
   assert.match(stylesSource, /\.project-form-modal\s*\{[\s\S]*?z-index:\s*300;/);
   assert.match(stylesSource, /\.task-result-modal,\s*\.task-detail-modal\s*\{[\s\S]*?z-index:\s*320;/);
   assert.match(stylesSource, /\.confirm-modal-backdrop\s*\{[\s\S]*?z-index:\s*900;/);
   assert.match(indexSource, new RegExp(`href="/src/styles\\.css\\?v=${packageJson.version}(?:-[^"]+)?"`));
   assert.match(indexSource, new RegExp(`src="/src/main\\.js\\?v=${packageJson.version}(?:-[^"]+)?"`));
+});
+
+test("modal accessibility hooks keep focus inside dialogs and restore triggers", () => {
+  assert.match(mainSource, /const confirmDialogRef = ref\(null\)/);
+  assert.match(mainSource, /let lastModalTrigger = null/);
+  assert.match(mainSource, /function focusFirstModalControl\(modalRef\)/);
+  assert.match(mainSource, /function trapModalFocus\(event, modalRef\)/);
+  assert.match(mainSource, /function restoreLastModalTrigger\(\)/);
+  assert.match(mainSource, /ref="confirmDialogRef"[\s\S]*?@keydown="trapModalFocus\(\$event, confirmDialogRef\)"/);
+  assert.match(mainSource, /ref="participationModalRef"[\s\S]*?@keydown="trapModalFocus\(\$event, participationModalRef\)"/);
+  assert.match(mainSource, /ref="paperClaimModalRef"[\s\S]*?@keydown="trapModalFocus\(\$event, paperClaimModalRef\)"/);
+  assert.match(mainSource, /ref="sponsorModalRef"[\s\S]*?@keydown="trapModalFocus\(\$event, sponsorModalRef\)"/);
+  assert.match(mainSource, /ref="contributionModalRef"[\s\S]*?@keydown="trapModalFocus\(\$event, contributionModalRef\)"/);
+});
+
+test("visual e2e hooks and decorative icon semantics are present", () => {
+  assert.match(mainSource, /data-testid="project-card"/);
+  assert.match(mainSource, /data-testid="relation-corner-ribbon"/);
+  assert.match(mainSource, /data-testid="my-relation-chip"/);
+  assert.match(mainSource, /data-testid="project-topic-chip"/);
+  assert.match(mainSource, /data-testid="project-meta-row"/);
+  assert.match(mainSource, /data-testid="project-title-link"/);
+  assert.match(mainSource, /data-testid="project-status-strip"/);
+  assert.match(mainSource, /data-testid="sponsor-popover"/);
+  assert.match(mainSource, /data-testid="claim-reason-tooltip"/);
+  assert.doesNotMatch(mainSource, /<span class="material-symbols-rounded"(?![^>]*aria-hidden)/);
+});
+
+test("small-screen controls keep touch targets and avoid duplicate theme controls", () => {
+  assert.match(mainSource, /class="filter-group optional-mobile"/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.topbar\s*\{[\s\S]*?gap:\s*8px;/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.toolbar \.filter-group\.optional-mobile\s*\{[\s\S]*?display:\s*none;/);
+  assert.match(stylesSource, /\.checkbox-chip\s*\{[\s\S]*?min-height:\s*44px;/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.topic-theme-strip\.single-row\s*\{[\s\S]*?margin-top:\s*8px;/);
 });
 
 test("legacy approved-project handoff helpers are not returned as product entry points", () => {
