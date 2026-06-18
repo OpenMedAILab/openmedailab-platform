@@ -619,11 +619,30 @@ test("project cards no longer keep hover status-card state after lifecycle write
   assert.doesNotMatch(mainSource, /课题状态读取失败/);
   assert.doesNotMatch(mainSource, /uid_groups:\s*\{\s*uids_visible:\s*false,\s*groups:\s*\[\]\s*\}/);
   assert.match(mainSource, /async function fetchProjectApprovedInteractions\(project\)[\s\S]*?api\.projectStatusCard\(project\.id\)/);
-  assert.match(mainSource, /\["interest",\s*"claim"\]\.includes\(group\.type\)/);
+  assert.match(mainSource, /\["interest",\s*"claim",\s*"sponsor"\]\.includes\(group\.type\)/);
+  assert.match(mainSource, /group\.status === "approved"/);
+  assert.match(mainSource, /已获批资助/);
   assert.match(mainSource, /function invalidateProjectStatusCard\(\)\s*\{\s*return null;/);
   assert.doesNotMatch(mainSource, /invalidateProjectStatusCard\(projectId\)/);
   assert.match(mainSource, /invalidateProjectStatusCard\(item\.project\?\.id\)/);
   assert.match(mainSource, /invalidateProjectStatusCard\(project\.id\)/);
+});
+
+test("project progress page exposes the same core interaction actions as project cards", () => {
+  assert.match(mainSource, /class="project-progress-actions project-interaction-actions"/);
+  assert.match(mainSource, /submitLike\(state\.projectProgress\.project\)/);
+  assert.match(mainSource, /toggleFollow\(state\.projectProgress\.project\)/);
+  assert.match(mainSource, /handleParticipationAction\(state\.projectProgress\.project\)/);
+  assert.match(mainSource, /submitLeadClaim\(state\.projectProgress\.project,\s*\$event\)/);
+  assert.match(mainSource, /submitPaperClaim\(state\.projectProgress\.project,\s*\$event\)/);
+  assert.match(mainSource, /submitSponsor\(state\.projectProgress\.project,\s*\$event\)/);
+});
+
+test("claim reason controls remain focusable when unavailable", () => {
+  assert.doesNotMatch(mainSource, /:disabled="!canClickLeadClaim\(project\)"/);
+  assert.doesNotMatch(mainSource, /:disabled="!canClickPaperClaim\(project\)"/);
+  assert.match(mainSource, /'is-disabled': !canClickLeadClaim\(project\)/);
+  assert.match(mainSource, /'is-disabled': !canClickPaperClaim\(project\)/);
 });
 
 test("task result submission supports documents without admin review actions", () => {

@@ -1329,7 +1329,7 @@ def admin_interaction_list(
 
 @api.patch(
     "/admin/interactions/{type}/{interaction_id}/status/",
-    response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope},
+    response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 409: ErrorEnvelope, 422: ErrorEnvelope},
     tags=["Admin"],
 )
 def admin_interaction_update_status(request, type: str, interaction_id: int, payload: InteractionStatusRequest):
@@ -1354,11 +1354,12 @@ def admin_interaction_update_status(request, type: str, interaction_id: int, pay
             if active_claims.count() > 1:
                 return fail("该课题认领数据存在冲突，请联系管理员处理。", status=422, code="claim_data_conflict")
             if active_claims.exists():
-                return fail("该认领席位已被占用，暂不能通过重复认领。", status=422, code="claim_slot_occupied")
+                audit(request.user, "interaction.review", item.__class__.__name__, item.pk, status="failed", error_code="claim_slot_occupied", error_message="该认领席位已被占用，暂不能通过重复认领。")
+                return fail("该认领席位已被占用，暂不能通过重复认领。", status=409, code="claim_slot_occupied")
         previous_project_stage = project.stage
         item.status = payload.status
         update_fields = ["status", "updated_at"]
-        if type == "claim":
+        if type in {"claim", "sponsor"}:
             item.review_comment = payload.review_note or ""
             item.reviewed_by = request.user
             item.reviewed_at = timezone.now()
@@ -1379,17 +1380,46 @@ def admin_interaction_update_status(request, type: str, interaction_id: int, pay
     return ok(after)
 
 
-@api.patch("/me/interactions/{type}/{interaction_id}/withdraw/", response={200: Envelope, 401: ErrorEnvelope, 404: ErrorEnvelope}, tags=["Me"])
+@api.patch("/me/interactions/{type}/{interaction_id}/withdraw/", response={200: Envelope, 401: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Me"])
 def me_interaction_withdraw(request, type: str, interaction_id: int, payload: InteractionWithdrawRequest):
     auth_error = require_login(request)
     if auth_error:
         return auth_error
-    item = get_interaction_or_404(type, interaction_id, user=request.user)
-    before = interaction_payload(type, item)
-    item.status = InteractionStatus.WITHDRAWN
-    item.save(update_fields=["status", "updated_at"])
-    after = interaction_payload(type, item)
-    audit(request.user, "interaction.withdraw", item.__class__.__name__, item.pk, before=before, after={**after, "reason": payload.reason or ""})
+    with transaction.atomic():
+        item = get_object_or_404(
+            interaction_queryset(type).select_for_update().filter(user=request.user),
+            pk=interaction_id,
+        )
+        before = interaction_payload(type, item)
+        if type == "claim" and getattr(item, "claim_type", "") in REVIEW_REQUIRED_CLAIM_TYPES:
+            if item.status == InteractionStatus.PENDING:
+                audit(
+                    request.user,
+                    "interaction.withdraw",
+                    item.__class__.__name__,
+                    item.pk,
+                    before=before,
+                    status="failed",
+                    error_code="claim_pending_cannot_withdraw",
+                    error_message="认领正在审批中，审批通过后才可撤回。",
+                )
+                return fail("认领正在审批中，审批通过后才可撤回。", status=422, code="claim_pending_cannot_withdraw")
+            if item.status != InteractionStatus.APPROVED:
+                audit(
+                    request.user,
+                    "interaction.withdraw",
+                    item.__class__.__name__,
+                    item.pk,
+                    before=before,
+                    status="failed",
+                    error_code="interaction_not_withdrawable",
+                    error_message="当前认领状态不可撤回。",
+                )
+                return fail("当前认领状态不可撤回。", status=422, code="interaction_not_withdrawable")
+        item.status = InteractionStatus.WITHDRAWN
+        item.save(update_fields=["status", "updated_at"])
+        after = interaction_payload(type, item)
+        audit(request.user, "interaction.withdraw", item.__class__.__name__, item.pk, before=before, after={**after, "reason": payload.reason or ""})
     return ok(after)
 
 
@@ -2876,7 +2906,7 @@ def interest_project(request, project_id: int, payload: InterestRequest):
     return 201, ok(interest_payload(interest))
 
 
-@api.post("/projects/{project_id}/claim/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Interactions"])
+@api.post("/projects/{project_id}/claim/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 409: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Interactions"])
 def claim_project(request, project_id: int, payload: ClaimRequest):
     auth_error = require_login(request)
     if auth_error:
@@ -2925,7 +2955,7 @@ def claim_project(request, project_id: int, payload: ClaimRequest):
                 if active_count > 1:
                     return fail("该课题认领数据存在冲突，请联系管理员处理。", status=422, code="claim_data_conflict")
                 if active_count == 1:
-                    return fail("该认领席位已被占用，暂不能重复认领。", status=422, code="claim_slot_occupied")
+                    return fail("该认领席位已被占用，暂不能重复认领。", status=409, code="claim_slot_occupied")
             claim, _ = ProjectClaimIntent.objects.update_or_create(
                 user=request.user,
                 project=project,
@@ -2945,11 +2975,11 @@ def claim_project(request, project_id: int, payload: ClaimRequest):
             audit_action = "interaction.submit_claim_for_review" if requires_review else "interaction.auto_approve"
             audit(request.user, audit_action, "ProjectClaimIntent", claim.pk, after=claim_payload(claim))
     except IntegrityError:
-        return fail("该认领席位已被占用，暂不能重复认领。", status=422, code="claim_slot_occupied")
+        return fail("该认领席位已被占用，暂不能重复认领。", status=409, code="claim_slot_occupied")
     return 201, ok(claim_payload(claim))
 
 
-@api.post("/projects/{project_id}/sponsor/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Interactions"])
+@api.post("/projects/{project_id}/sponsor/", response={200: Envelope, 201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Interactions"])
 def sponsor_project(request, project_id: int, payload: SponsorRequest):
     auth_error = require_login(request)
     if auth_error:
@@ -2960,14 +2990,38 @@ def sponsor_project(request, project_id: int, payload: SponsorRequest):
     form = SponsorIntentForm(payload.model_dump())
     if not form.is_valid():
         return fail("Sponsor intent submit failed.", status=422, code="validation_error", errors=form_errors(form))
-    sponsor, _ = SponsorIntent.objects.update_or_create(
-        user=request.user,
-        project=project,
-        sponsor_type=form.cleaned_data["sponsor_type"],
-        defaults={"note": form.cleaned_data.get("note", ""), "status": InteractionStatus.PENDING},
-    )
-    audit(request.user, "interaction.submit_sponsor", "SponsorIntent", sponsor.pk, after=sponsor_payload(sponsor))
-    return 201, ok(sponsor_payload(sponsor))
+    with transaction.atomic():
+        project = Project.objects.select_for_update().get(pk=project.pk)
+        if project.stage not in RECRUITING_PROJECT_STAGES:
+            return fail("Project is not recruiting.", status=422, code="project_not_recruiting")
+        sponsor, created = SponsorIntent.objects.select_for_update().get_or_create(
+            user=request.user,
+            project=project,
+            sponsor_type=form.cleaned_data["sponsor_type"],
+            defaults={"note": form.cleaned_data.get("note", ""), "status": InteractionStatus.PENDING},
+        )
+        if created:
+            action = "interaction.submit_sponsor"
+            status_code = 201
+        else:
+            before = sponsor_payload(sponsor)
+            sponsor.note = form.cleaned_data.get("note", "")
+            if sponsor.status in {InteractionStatus.REJECTED, InteractionStatus.WITHDRAWN}:
+                sponsor.status = InteractionStatus.PENDING
+                sponsor.review_comment = ""
+                sponsor.reviewed_by = None
+                sponsor.reviewed_at = None
+                action = "interaction.sponsor_resubmit"
+                status_code = 201
+            else:
+                action = "interaction.sponsor_update_note"
+                status_code = 200
+            sponsor.save(update_fields=["note", "status", "review_comment", "reviewed_by", "reviewed_at", "updated_at"])
+            sponsor.refresh_from_db()
+            audit(request.user, action, "SponsorIntent", sponsor.pk, before=before, after=sponsor_payload(sponsor))
+            return status_code, ok(sponsor_payload(sponsor))
+        audit(request.user, action, "SponsorIntent", sponsor.pk, after=sponsor_payload(sponsor))
+    return status_code, ok(sponsor_payload(sponsor))
 
 
 def ok(data=None):
@@ -3641,7 +3695,7 @@ def status_uid_groups_for_project(project, authenticated):
         except UserProfile.DoesNotExist:
             return None
 
-    def add_uid(group_type, key, label, uid, sort_key):
+    def add_uid(group_type, key, label, uid, sort_key, status="", status_label="", subtype="", subtype_label=""):
         if not uid:
             return
         group = grouped.setdefault(
@@ -3650,6 +3704,10 @@ def status_uid_groups_for_project(project, authenticated):
                 "key": key,
                 "type": group_type,
                 "label": label,
+                "status": status,
+                "status_label": status_label,
+                "subtype": subtype,
+                "subtype_label": subtype_label,
                 "uids": set(),
                 "sort_key": sort_key,
             },
@@ -3664,7 +3722,17 @@ def status_uid_groups_for_project(project, authenticated):
     for interest in interest_rows:
         key = f"interest-{interest.role}-{interest.status}"
         label = f"参与：{interest.get_role_display()}（{interest.get_status_display()}）"
-        add_uid("interest", key, label, profile_uid_for(interest.user), (1, status_order.get(interest.status, 99), label))
+        add_uid(
+            "interest",
+            key,
+            label,
+            profile_uid_for(interest.user),
+            (1, status_order.get(interest.status, 99), label),
+            status=interest.status,
+            status_label=interest.get_status_display(),
+            subtype=interest.role,
+            subtype_label=interest.get_role_display(),
+        )
 
     claim_rows = ProjectClaimIntent.objects.filter(project=project).select_related("user__profile").order_by("status", "claim_type")
     for claim in claim_rows:
@@ -3672,13 +3740,33 @@ def status_uid_groups_for_project(project, authenticated):
         label = f"{claim.get_claim_type_display()}（{claim.get_status_display()}）"
         if claim.claim_type == ClaimType.PAPER_FIRST_UNIT and claim.claimed_unit_name:
             label = f"{claim.get_claim_type_display()}：{claim.claimed_unit_name}（{claim.get_status_display()}）"
-        add_uid("claim", key, label, profile_uid_for(claim.user), (2, status_order.get(claim.status, 99), label))
+        add_uid(
+            "claim",
+            key,
+            label,
+            profile_uid_for(claim.user),
+            (2, status_order.get(claim.status, 99), label),
+            status=claim.status,
+            status_label=claim.get_status_display(),
+            subtype=claim.claim_type,
+            subtype_label=claim.get_claim_type_display(),
+        )
 
     sponsor_rows = SponsorIntent.objects.filter(project=project).select_related("user__profile").order_by("status", "sponsor_type")
     for sponsor in sponsor_rows:
         key = f"sponsor-{sponsor.sponsor_type}-{sponsor.status}"
         label = f"资助：{sponsor.get_sponsor_type_display()}（{sponsor.get_status_display()}）"
-        add_uid("sponsor", key, label, profile_uid_for(sponsor.user), (3, status_order.get(sponsor.status, 99), label))
+        add_uid(
+            "sponsor",
+            key,
+            label,
+            profile_uid_for(sponsor.user),
+            (3, status_order.get(sponsor.status, 99), label),
+            status=sponsor.status,
+            status_label=sponsor.get_status_display(),
+            subtype=sponsor.sponsor_type,
+            subtype_label=sponsor.get_sponsor_type_display(),
+        )
 
     groups = []
     for group in sorted(grouped.values(), key=lambda item: item["sort_key"]):
@@ -3688,6 +3776,10 @@ def status_uid_groups_for_project(project, authenticated):
                 "key": group["key"],
                 "type": group["type"],
                 "label": group["label"],
+                "status": group["status"],
+                "status_label": group["status_label"],
+                "subtype": group["subtype"],
+                "subtype_label": group["subtype_label"],
                 "count": len(uids),
                 "uids": uids,
             }
@@ -3876,7 +3968,15 @@ def interaction_payload(kind, item):
         subtype = item.sponsor_type
         subtype_label = item.get_sponsor_type_display()
         message = item.note
-        detail = {}
+        reviewed_by_payload = uid_only_user_payload(item.reviewed_by) if getattr(item, "reviewed_by_id", None) else None
+        detail = {
+            "sponsor_type": getattr(item, "sponsor_type", ""),
+            "sponsor_type_label": item.get_sponsor_type_display(),
+            "review_comment": getattr(item, "review_comment", ""),
+            "reviewed_by": reviewed_by_payload,
+            "reviewed_at": getattr(item, "reviewed_at", None),
+        }
+    reviewed_by_payload = uid_only_user_payload(item.reviewed_by) if getattr(item, "reviewed_by_id", None) else None
     return {
         "id": item.id,
         "type": kind,
@@ -3888,6 +3988,8 @@ def interaction_payload(kind, item):
         "status": item.status,
         "status_label": item.get_status_display(),
         "review_comment": getattr(item, "review_comment", ""),
+        "reviewed_by": reviewed_by_payload,
+        "reviewed_at": getattr(item, "reviewed_at", None),
         "user": uid_only_user_payload(item.user),
         "project": project_summary_payload(item.project),
         "created_at": item.created_at,
@@ -4075,16 +4177,19 @@ def collaboration_display_name(user):
     return user.username or ""
 
 
-def collaboration_contact_payload(user, include_wechat=False):
+def collaboration_contact_payload(user, include_name=True, include_wechat=False):
     if not user:
         return None
     profile = getattr(user, "profile", None)
-    return {
+    payload = {
         "uid": getattr(profile, "uid", None),
-        "name": collaboration_display_name(user),
-        "wechat": getattr(profile, "contact_wechat", "") if include_wechat else "",
-        "wechat_visible": bool(include_wechat and getattr(profile, "contact_wechat", "")),
     }
+    if include_name:
+        payload["name"] = collaboration_display_name(user)
+    if include_wechat:
+        payload["wechat"] = getattr(profile, "contact_wechat", "")
+        payload["wechat_visible"] = bool(getattr(profile, "contact_wechat", ""))
+    return payload
 
 
 def interest_team_role_key(interest):
@@ -4147,7 +4252,11 @@ def project_team_contact_groups(project, include_wechat=False):
 
 def enrich_project_collaboration_payload(payload, project, user):
     include_contacts = bool(getattr(user, "is_authenticated", False))
-    payload["created_by_display"] = collaboration_contact_payload(project.created_by, include_wechat=include_contacts)
+    payload["created_by_display"] = collaboration_contact_payload(
+        project.created_by,
+        include_name=include_contacts,
+        include_wechat=include_contacts,
+    )
     payload["team_contact_groups"] = project_team_contact_groups(project, include_wechat=include_contacts) if include_contacts else []
     return payload
 

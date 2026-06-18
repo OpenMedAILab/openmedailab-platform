@@ -172,6 +172,15 @@ class SponsorIntent(models.Model):
     sponsor_type = models.CharField(max_length=40, choices=SponsorType.choices)
     note = models.TextField(blank=True)
     status = models.CharField(max_length=32, choices=InteractionStatus.choices, default=InteractionStatus.PENDING)
+    review_comment = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_sponsor_intents",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
