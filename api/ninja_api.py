@@ -14,7 +14,7 @@ from django.contrib.auth.forms import SetPasswordForm
 from django.contrib.auth.models import User
 from django.core.paginator import Paginator
 from django.db import IntegrityError, transaction
-from django.db.models import Case, IntegerField, Q, Value, When
+from django.db.models import Case, Exists, IntegerField, OuterRef, Q, Value, When
 from django.http import Http404, HttpResponse
 from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404
@@ -111,6 +111,8 @@ REVIEWABLE_INTERACTION_STATUSES = {InteractionStatus.APPROVED, InteractionStatus
 REVIEW_REQUIRED_CLAIM_TYPES = {ClaimType.LEADER, ClaimType.PAPER_FIRST_UNIT}
 REVIEWABLE_CONTRIBUTION_STATUSES = {ContributionStatus.APPROVED, ContributionStatus.REJECTED}
 ACTIVE_VIEWER_INTERACTION_STATUSES = {InteractionStatus.APPROVED, InteractionStatus.PENDING}
+ACTIVE_CLAIM_SLOT_STATUSES = {InteractionStatus.APPROVED, InteractionStatus.PENDING}
+CLAIM_AVAILABILITY_TYPES = (ClaimType.LEADER, ClaimType.PAPER_FIRST_UNIT)
 PROJECT_PARTICIPATION_CREDIT_COST = 50
 PROJECT_COMPLETION_CREDIT_RETURN = 100
 PROFILE_COMPLETION_BONUS = 5
@@ -195,6 +197,7 @@ class InterestRequest(Schema):
 class ClaimRequest(Schema):
     claim_type: str
     message: Optional[str] = ""
+    claimed_unit_name: Optional[str] = ""
 
 
 class SponsorRequest(Schema):
@@ -704,6 +707,40 @@ def profile_put(request, payload: ProfilePatchRequest):
     return ok(user_payload(request.user))
 
 
+def with_self_relation_rank(projects, user):
+    if not getattr(user, "is_authenticated", False):
+        return projects
+    active_statuses = ACTIVE_VIEWER_INTERACTION_STATUSES
+    claim_exists = ProjectClaimIntent.objects.filter(
+        project=OuterRef("pk"),
+        user=user,
+        claim_type__in=[ClaimType.LEADER, ClaimType.PAPER_FIRST_UNIT],
+        status__in=active_statuses,
+    )
+    interest_exists = ProjectInterest.objects.filter(
+        project=OuterRef("pk"),
+        user=user,
+        status__in=active_statuses,
+    )
+    sponsor_exists = SponsorIntent.objects.filter(
+        project=OuterRef("pk"),
+        user=user,
+        status__in=active_statuses,
+    )
+    return projects.annotate(
+        self_has_claim=Exists(claim_exists),
+        self_has_interest=Exists(interest_exists),
+        self_has_sponsor=Exists(sponsor_exists),
+        self_relation_rank=Case(
+            When(self_has_claim=True, then=Value(0)),
+            When(self_has_interest=True, then=Value(1)),
+            When(self_has_sponsor=True, then=Value(2)),
+            default=Value(3),
+            output_field=IntegerField(),
+        ),
+    )
+
+
 @api.get("/projects/", response={200: Envelope}, tags=["Projects"], auth=None)
 def project_list(
     request,
@@ -740,7 +777,12 @@ def project_list(
         "newest": ("-topic_id", "-id"),
         "project_id": ("topic_id", "id"),
     }
-    projects = projects.order_by(*sort_map.get(sort, sort_map["project_id"]))
+    sort_fields = sort_map.get(sort, sort_map["project_id"])
+    projects = with_self_relation_rank(projects, request.user)
+    if getattr(request.user, "is_authenticated", False):
+        projects = projects.order_by("self_relation_rank", *sort_fields)
+    else:
+        projects = projects.order_by(*sort_fields)
 
     page_size = max(1, min(page_size, 100))
     paginator = Paginator(projects, page_size)
@@ -772,6 +814,7 @@ def project_detail(request, project_id: int):
         pk=project_id,
     )
     data = public_project_detail_payload(project)
+    data["claim_availability"] = claim_availability_payload(request.user, project)
     if request.user.is_authenticated:
         data["viewer_state"] = viewer_state(request.user, project)
     return ok(data)
@@ -810,6 +853,7 @@ def project_status_card(request, project_id: int):
         {
             "project": project_list_payload(project, request.user),
             "viewer_state": viewer_state_payload,
+            "claim_availability": claim_availability_payload(request.user, project),
             "participants": {
                 "count": len(participant_uids),
                 "uids_visible": bool(request.user.is_authenticated),
@@ -1301,6 +1345,12 @@ def admin_interaction_update_status(request, type: str, interaction_id: int, pay
         before = interaction_payload(type, item)
         if item.status != InteractionStatus.PENDING:
             return fail("Only pending interactions can be reviewed.", status=422, code="interaction_not_pending")
+        if type == "claim" and payload.status == InteractionStatus.APPROVED and item.claim_type in REVIEW_REQUIRED_CLAIM_TYPES:
+            active_claims = active_claim_slot_queryset(project, item.claim_type).select_for_update().exclude(pk=item.pk)
+            if active_claims.count() > 1:
+                return fail("该课题认领数据存在冲突，请联系管理员处理。", status=422, code="claim_data_conflict")
+            if active_claims.exists():
+                return fail("该认领席位已被占用，暂不能通过重复认领。", status=422, code="claim_slot_occupied")
         previous_project_stage = project.stage
         item.status = payload.status
         update_fields = ["status", "updated_at"]
@@ -2837,24 +2887,61 @@ def claim_project(request, project_id: int, payload: ClaimRequest):
         return fail("Claim submit failed.", status=422, code="validation_error", errors=form_errors(form))
     claim_type = form.cleaned_data["claim_type"]
     requires_review = claim_type in REVIEW_REQUIRED_CLAIM_TYPES
-    with transaction.atomic():
-        claim, _ = ProjectClaimIntent.objects.update_or_create(
-            user=request.user,
-            project=project,
-            claim_type=claim_type,
-            defaults={
-                "message": form.cleaned_data.get("message", ""),
-                "status": InteractionStatus.PENDING if requires_review else InteractionStatus.APPROVED,
-                "review_comment": "",
-                "reviewed_by": None,
-                "reviewed_at": None,
-            },
-        )
-        if claim.status == InteractionStatus.APPROVED:
-            maybe_advance_project_stage_after_interaction(project, request.user)
-        claim.refresh_from_db()
-        audit_action = "interaction.submit_claim_for_review" if requires_review else "interaction.auto_approve"
-        audit(request.user, audit_action, "ProjectClaimIntent", claim.pk, after=claim_payload(claim))
+    claimed_unit_name = (form.cleaned_data.get("claimed_unit_name") or "").strip()
+    message = (form.cleaned_data.get("message") or "").strip()
+    if claim_type == ClaimType.PAPER_FIRST_UNIT:
+        if not claimed_unit_name:
+            return fail(
+                "请填写拟认领的论文第一单位。",
+                status=422,
+                code="paper_first_unit_required",
+                errors={"claimed_unit_name": ["请填写拟认领的论文第一单位。"]},
+            )
+        if len(claimed_unit_name) < 2:
+            return fail(
+                "拟认领的论文第一单位至少需要2个字符。",
+                status=422,
+                code="validation_error",
+                errors={"claimed_unit_name": ["拟认领的论文第一单位至少需要2个字符。"]},
+            )
+        if not message:
+            message = f"申请认领论文第一单位：{claimed_unit_name}"
+    else:
+        claimed_unit_name = ""
+    try:
+        with transaction.atomic():
+            project = Project.objects.select_for_update().get(pk=project.pk)
+            if project.stage not in RECRUITING_PROJECT_STAGES:
+                return fail("Project is not recruiting.", status=422, code="project_not_recruiting")
+            if requires_review:
+                active_claims = active_claim_slot_queryset(project, claim_type).select_for_update()
+                if active_claims.filter(user=request.user).exists():
+                    return fail("你已提交该认领，不能重复提交。", status=422, code="claim_already_active")
+                active_count = active_claims.count()
+                if active_count > 1:
+                    return fail("该课题认领数据存在冲突，请联系管理员处理。", status=422, code="claim_data_conflict")
+                if active_count == 1:
+                    return fail("该认领席位已被占用，暂不能重复认领。", status=422, code="claim_slot_occupied")
+            claim, _ = ProjectClaimIntent.objects.update_or_create(
+                user=request.user,
+                project=project,
+                claim_type=claim_type,
+                defaults={
+                    "claimed_unit_name": claimed_unit_name,
+                    "message": message,
+                    "status": InteractionStatus.PENDING if requires_review else InteractionStatus.APPROVED,
+                    "review_comment": "",
+                    "reviewed_by": None,
+                    "reviewed_at": None,
+                },
+            )
+            if claim.status == InteractionStatus.APPROVED:
+                maybe_advance_project_stage_after_interaction(project, request.user)
+            claim.refresh_from_db()
+            audit_action = "interaction.submit_claim_for_review" if requires_review else "interaction.auto_approve"
+            audit(request.user, audit_action, "ProjectClaimIntent", claim.pk, after=claim_payload(claim))
+    except IntegrityError:
+        return fail("该认领席位已被占用，暂不能重复认领。", status=422, code="claim_slot_occupied")
     return 201, ok(claim_payload(claim))
 
 
@@ -3579,6 +3666,8 @@ def status_uid_groups_for_project(project, authenticated):
     for claim in claim_rows:
         key = f"claim-{claim.claim_type}-{claim.status}"
         label = f"{claim.get_claim_type_display()}（{claim.get_status_display()}）"
+        if claim.claim_type == ClaimType.PAPER_FIRST_UNIT and claim.claimed_unit_name:
+            label = f"{claim.get_claim_type_display()}：{claim.claimed_unit_name}（{claim.get_status_display()}）"
         add_uid("claim", key, label, profile_uid_for(claim.user), (2, status_order.get(claim.status, 99), label))
 
     sponsor_rows = SponsorIntent.objects.filter(project=project).select_related("user__profile").order_by("status", "sponsor_type")
@@ -3774,6 +3863,7 @@ def interaction_payload(kind, item):
         subtype_label = item.get_claim_type_display()
         message = item.message
         detail = {
+            "claimed_unit_name": getattr(item, "claimed_unit_name", ""),
             "review_comment": getattr(item, "review_comment", ""),
             "reviewed_by": uid_only_user_payload(item.reviewed_by) if getattr(item, "reviewed_by_id", None) else None,
             "reviewed_at": getattr(item, "reviewed_at", None),
@@ -3875,6 +3965,83 @@ def viewer_state(user, project):
     }
 
 
+def claim_type_label(claim_type):
+    return dict(ClaimType.choices).get(claim_type, claim_type)
+
+
+def active_claim_slot_queryset(project, claim_type):
+    return ProjectClaimIntent.objects.filter(
+        project=project,
+        claim_type=claim_type,
+        status__in=ACTIVE_CLAIM_SLOT_STATUSES,
+    )
+
+
+def claim_availability_for_type(user, project, claim_type):
+    label = claim_type_label(claim_type)
+    authenticated = bool(getattr(user, "is_authenticated", False))
+    own_active = None
+    if authenticated:
+        own_active = active_claim_slot_queryset(project, claim_type).filter(user=user).first()
+    if own_active:
+        return {
+            "available": False,
+            "action": "withdraw",
+            "reason_code": "own_active",
+            "reason": f"你已有{label}，可撤回后重新提交。",
+        }
+    if not authenticated:
+        return {
+            "available": False,
+            "action": "unavailable",
+            "reason_code": "login_required",
+            "reason": f"登录后才能提交{label}。",
+        }
+    if project.stage not in RECRUITING_PROJECT_STAGES:
+        return {
+            "available": False,
+            "action": "unavailable",
+            "reason_code": "stage_not_recruiting",
+            "reason": f"当前课题阶段不接受{label}。",
+        }
+    active_slots = active_claim_slot_queryset(project, claim_type)
+    active_count = active_slots.count()
+    if active_count > 1:
+        return {
+            "available": False,
+            "action": "unavailable",
+            "reason_code": "data_conflict",
+            "reason": f"该课题的{label}数据存在冲突，请联系管理员处理。",
+        }
+    if active_count == 1:
+        return {
+            "available": False,
+            "action": "unavailable",
+            "reason_code": "slot_occupied",
+            "reason": f"该课题已有{label}，暂不能重复认领。",
+        }
+    if not has_required_participation_credits(user, project=project):
+        return {
+            "available": False,
+            "action": "unavailable",
+            "reason_code": "insufficient_credits",
+            "reason": "参与或认领课题需要50积分，当前积分不足。",
+        }
+    return {
+        "available": True,
+        "action": "submit",
+        "reason_code": "available",
+        "reason": f"可以提交{label}。",
+    }
+
+
+def claim_availability_payload(user, project):
+    return {
+        claim_type: claim_availability_for_type(user, project, claim_type)
+        for claim_type in CLAIM_AVAILABILITY_TYPES
+    }
+
+
 def collaboration_display_name(user):
     if not user:
         return ""
@@ -3964,6 +4131,7 @@ def enrich_project_collaboration_payload(payload, project, user):
 def project_list_payload(project, user):
     payload = project_summary_payload(project)
     enrich_project_collaboration_payload(payload, project, user)
+    payload["claim_availability"] = claim_availability_payload(user, project)
     if getattr(user, "is_authenticated", False):
         payload["viewer_state"] = viewer_state(user, project)
     return payload

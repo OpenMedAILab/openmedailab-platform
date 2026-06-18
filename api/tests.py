@@ -2085,6 +2085,203 @@ class ApiTests(TestCase):
         self.assertIn("已通过", audit_entry["summary"])
         self.assertNotIn('{"id"', audit_entry["summary"])
 
+    def test_claim_slots_are_unique_and_first_unit_is_structured(self):
+        leader_user = User.objects.create_user(username="leaderclaimant", email="leaderclaimant@example.com", password="StrongPass12345")
+        first_unit_user = User.objects.create_user(username="firstunitclaimant", email="firstunitclaimant@example.com", password="StrongPass12345")
+        next_user = User.objects.create_user(username="nextclaimant", email="nextclaimant@example.com", password="StrongPass12345")
+
+        self.client.force_login(leader_user)
+        leader_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {"claim_type": "leader", "message": "申请担任项目负责人"},
+        )
+        self.assertEqual(leader_response.status_code, 201)
+        leader_claim = ProjectClaimIntent.objects.get(user=leader_user, project=self.project, claim_type="leader")
+        self.assertEqual(leader_claim.status, InteractionStatus.PENDING)
+
+        duplicate_own_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {"claim_type": "leader", "message": "重复申请负责人"},
+        )
+        self.assertEqual(duplicate_own_response.status_code, 422)
+        self.assertEqual(duplicate_own_response.json()["error"]["code"], "claim_already_active")
+
+        self.client.force_login(first_unit_user)
+        occupied_leader_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {"claim_type": "leader", "message": "另一个负责人申请"},
+        )
+        self.assertEqual(occupied_leader_response.status_code, 422)
+        self.assertEqual(occupied_leader_response.json()["error"]["code"], "claim_slot_occupied")
+
+        missing_unit_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {"claim_type": "paper_first_unit", "message": "申请第一单位"},
+        )
+        self.assertEqual(missing_unit_response.status_code, 422)
+        self.assertEqual(missing_unit_response.json()["error"]["code"], "paper_first_unit_required")
+
+        first_unit_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {
+                "claim_type": "paper_first_unit",
+                "claimed_unit_name": "中山大学附属第一医院",
+            },
+        )
+        self.assertEqual(first_unit_response.status_code, 201)
+        first_unit_payload = first_unit_response.json()["data"]
+        self.assertEqual(first_unit_payload["claimed_unit_name"], "中山大学附属第一医院")
+        self.assertIn("中山大学附属第一医院", first_unit_payload["message"])
+
+        self.client.force_login(next_user)
+        occupied_unit_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {
+                "claim_type": "paper_first_unit",
+                "claimed_unit_name": "北京协和医院",
+            },
+        )
+        self.assertEqual(occupied_unit_response.status_code, 422)
+        self.assertEqual(occupied_unit_response.json()["error"]["code"], "claim_slot_occupied")
+
+        self.client.force_login(leader_user)
+        withdraw_response = self.patch_json(
+            f"/api/me/interactions/claim/{leader_claim.pk}/withdraw/",
+            {"reason": "用户主动撤回项目负责人认领"},
+        )
+        self.assertEqual(withdraw_response.status_code, 200)
+        leader_claim.refresh_from_db()
+        self.assertEqual(leader_claim.status, InteractionStatus.WITHDRAWN)
+
+        self.client.force_login(next_user)
+        released_leader_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {"claim_type": "leader", "message": "释放后申请负责人"},
+        )
+        self.assertEqual(released_leader_response.status_code, 201)
+
+        admin = self.login_platform_admin()
+        first_unit_claim = ProjectClaimIntent.objects.get(
+            user=first_unit_user,
+            project=self.project,
+            claim_type="paper_first_unit",
+        )
+        list_response = self.client.get("/api/admin/interactions/?status=pending&type=claim")
+        self.assertEqual(list_response.status_code, 200)
+        first_unit_row = next(row for row in list_response.json()["data"]["results"] if row["id"] == first_unit_claim.pk)
+        self.assertEqual(first_unit_row["detail"]["claimed_unit_name"], "中山大学附属第一医院")
+
+        reject_response = self.patch_json(
+            f"/api/admin/interactions/claim/{first_unit_claim.pk}/status/",
+            {"status": "rejected", "review_note": "第一单位信息需重新提交"},
+        )
+        self.assertEqual(reject_response.status_code, 200)
+        first_unit_claim.refresh_from_db()
+        self.assertEqual(first_unit_claim.status, InteractionStatus.REJECTED)
+        self.assertEqual(first_unit_claim.reviewed_by, admin)
+
+        self.client.force_login(next_user)
+        released_unit_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {
+                "claim_type": "paper_first_unit",
+                "claimed_unit_name": "北京协和医院",
+            },
+        )
+        self.assertEqual(released_unit_response.status_code, 201)
+        self.assertEqual(released_unit_response.json()["data"]["claimed_unit_name"], "北京协和医院")
+
+    def test_claim_availability_reports_action_and_reason_codes(self):
+        anonymous_response = self.client.get("/api/projects/?page_size=10")
+        self.assertEqual(anonymous_response.status_code, 200)
+        anonymous_project = anonymous_response.json()["data"]["results"][0]
+        self.assertEqual(anonymous_project["claim_availability"]["leader"]["action"], "unavailable")
+        self.assertEqual(anonymous_project["claim_availability"]["leader"]["reason_code"], "login_required")
+
+        claimant = User.objects.create_user(username="availabilityowner", email="availabilityowner@example.com", password="StrongPass12345")
+        ProjectClaimIntent.objects.create(
+            user=claimant,
+            project=self.project,
+            claim_type="leader",
+            status=InteractionStatus.PENDING,
+        )
+        self.client.force_login(claimant)
+        own_response = self.client.get(f"/api/projects/{self.project.pk}/status-card/")
+        self.assertEqual(own_response.status_code, 200)
+        own_availability = own_response.json()["data"]["claim_availability"]["leader"]
+        self.assertEqual(own_availability["action"], "withdraw")
+        self.assertEqual(own_availability["reason_code"], "own_active")
+
+        other = User.objects.create_user(username="availabilityother", email="availabilityother@example.com", password="StrongPass12345")
+        self.client.force_login(other)
+        occupied_response = self.client.get("/api/projects/?page_size=10")
+        occupied_availability = occupied_response.json()["data"]["results"][0]["claim_availability"]["leader"]
+        self.assertEqual(occupied_availability["action"], "unavailable")
+        self.assertEqual(occupied_availability["reason_code"], "slot_occupied")
+
+        no_credit_project = Project.objects.create(
+            topic_id=2,
+            title="积分不足课题",
+            summary="无占用席位时展示积分不足原因。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        other.profile.credit_balance = 0
+        other.profile.save(update_fields=["credit_balance", "updated_at"])
+        insufficient_response = self.client.get(f"/api/projects/{no_credit_project.pk}/status-card/")
+        self.assertEqual(insufficient_response.status_code, 200)
+        self.assertEqual(
+            insufficient_response.json()["data"]["claim_availability"]["leader"]["reason_code"],
+            "insufficient_credits",
+        )
+
+        no_credit_project.stage = ProjectStage.ACTIVE
+        no_credit_project.save(update_fields=["stage", "updated_at"])
+        stage_response = self.client.get(f"/api/projects/{no_credit_project.pk}/status-card/")
+        self.assertEqual(stage_response.status_code, 200)
+        self.assertEqual(
+            stage_response.json()["data"]["claim_availability"]["leader"]["reason_code"],
+            "stage_not_recruiting",
+        )
+
+    def test_project_list_prioritizes_self_relations_before_pagination(self):
+        user = User.objects.create_user(username="selfsort", email="selfsort@example.com", password="StrongPass12345")
+        low_project = Project.objects.create(
+            topic_id=2,
+            title="无本人关系的低编号课题",
+            summary="用于验证分页前排序。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        claimed_project = Project.objects.create(
+            topic_id=9905,
+            title="高编号但本人认领课题",
+            summary="本人关系应优先。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        sponsored_project = Project.objects.create(
+            topic_id=9906,
+            title="高编号但本人资助课题",
+            summary="本人资助应优先于无关系。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        ProjectClaimIntent.objects.create(user=user, project=claimed_project, claim_type="leader", status=InteractionStatus.PENDING)
+        SponsorIntent.objects.create(user=user, project=sponsored_project, sponsor_type="compute", status=InteractionStatus.PENDING)
+
+        self.client.force_login(user)
+        response = self.client.get("/api/projects/?page_size=2&sort=project_id")
+
+        self.assertEqual(response.status_code, 200)
+        topic_ids = [row["topic_id"] for row in response.json()["data"]["results"]]
+        self.assertEqual(topic_ids, [9905, 9906])
+        self.assertNotIn(low_project.topic_id, topic_ids)
+
     def test_credit_rules_cover_profile_transfer_reserve_and_completion_return(self):
         donor = User.objects.create_user(username="creditdonor", email="creditdonor@example.com", password="StrongPass12345")
         receiver = User.objects.create_user(username="creditreceiver", email="creditreceiver@example.com", password="StrongPass12345")

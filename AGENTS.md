@@ -6,7 +6,7 @@
 
 代码基准：以当前仓库代码为准；若本文档与当前代码冲突，必须先核对代码，再同步修正文档。
 
-当前产品版本文件：`VERSION = 0.12.1`
+当前产品版本文件：`VERSION = 0.13.0`
 
 本文档用途：后续任何 agent 在执行任何任务前，必须先读本文档，再按“任务定位索引”打开必要代码文件。目标是避免每次从零通读完整仓库，同时保证生命周期、API、数据库、权限和前端入口不被改乱。
 
@@ -129,9 +129,9 @@
 | 关系模型 | `interactions/models.py` | `ProjectFollow`、`ProjectScore`、`ProjectInterest`、`ProjectClaimIntent`、`ClaimType` |
 | 关系服务 | `interactions/services.py` | 自动通过、状态变更、约束逻辑 |
 | 关系 API | `api/ninja_api.py` | `follow_project`、`unfollow_project`、`score_project`、`unscore_project`、`interest_project`、`claim_project`、`sponsor_project`、`me_interaction_withdraw`、`admin_interaction_list`、`admin_interaction_update_status` |
-| 状态辅助 | `api/ninja_api.py` | `maybe_advance_project_stage_after_interaction`、`user_has_approved_project_relation`、`viewer_state` |
+| 状态辅助 | `api/ninja_api.py` | `maybe_advance_project_stage_after_interaction`、`user_has_approved_project_relation`、`viewer_state`、`claim_availability_payload` |
 | 关系序列化 | `api/serializers.py` | `interest_payload`、`claim_payload`、`sponsor_payload`、`follow_payload`、`dashboard_payload` |
-| 前端操作 | `frontend/src/main.js` | `submitLike`、`submitInterest`、`submitParticipationRequest`、`submitClaim`、`submitLeadClaim`、`submitSponsor`、`withdrawInteraction` |
+| 前端操作 | `frontend/src/main.js` | `submitLike`、`submitInterest`、`submitParticipationRequest`、`submitClaim`、`submitLeadClaim`、`submitPaperClaim`、`submitSponsor`、`withdrawInteraction` |
 | 测试 | `api/tests.py`、`interactions/tests.py` | 自动通过、资助审批、撤回、阶段限制、UID 展示 |
 
 产品规则：
@@ -140,12 +140,17 @@
 - 点赞是轻量反馈，不推进课题生命周期。
 - 普通参与提交后自动 `approved`，不进入管理员审批；参与时必须选择论文署名意向。
 - 认领项目负责人和认领课题（论文第一单位）提交后为 `pending`，需要管理员审批，审核意见必须返回给申请人；其他兼容认领类型仍按旧逻辑自动通过。
-- 首页课题卡参与按钮文案为“参与/取消参与”；取消参与不弹确认，参与、取消参与、认领项目负责人/论文第一单位和撤回认领成功后必须局部刷新该课题组队状态，不刷新整个页面。未知身份或旧 `role=其他` 的参与记录按学生组队桶兜底展示，避免用户点击参与后组队数量无变化。
-- 资助意向提交后为 `pending`，只由管理员审批为 `approved` 或 `rejected`；前端主入口只展示资助算力、资助 token、资助劳务费三类。
+- 同一课题同一时间最多只能有 1 个 active 项目负责人认领和 1 个 active 论文第一单位认领；active 指 `pending` 或 `approved`，`withdrawn` 和 `rejected` 不占用席位。提交和管理员审批都必须校验该规则，数据库也应有条件唯一约束兜底。
+- 论文第一单位认领必须填写结构化字段 `claimed_unit_name`，不能只把第一单位名称写入自由文本 `message`；历史旧数据可兼容展示，但新提交必须保存结构化字段。
+- 首页课题卡参与按钮文案为“参与/取消参与”；取消参与不弹确认，参与、取消参与、认领项目负责人/论文第一单位和撤回具体认领成功后必须局部刷新该课题组队状态，不刷新整个页面。未知身份或旧 `role=其他` 的参与记录按学生组队桶兜底展示，避免用户点击参与后组队数量无变化。
+- 面向用户的认领撤回文案必须写清具体类型：`撤回项目负责人认领`、`撤回论文第一单位认领`，不能只写“撤回认领”或“撤回第一单位”。
+- 无法认领时，前端必须展示鼠标/焦点附近的小提示或移动端 toast，原因来自 `claim_availability`，覆盖未登录、阶段原因、已有认领、积分不足和数据冲突。
+- 资助意向提交后为 `pending`，只由管理员审批为 `approved` 或 `rejected`；课题卡主入口使用贴近按钮的多选 popover，主选项为资助劳务费和资助算力，可多选；资助 token 仍需保留用户可到达入口。
 - 用户可撤回自己的关系，撤回状态为 `withdrawn`。
 - 参与/认领/资助只允许在开放招募和组队中提交。
 - 任一参与或认领通过后，课题可进入组队中；当前自动推进逻辑集中在后端辅助函数中，改动前必须确认产品需求。
 - 参与和认领提交前必须检查可用积分额度：余额扣除未启动但已占用的 50 分参与额度后，仍需至少剩余 50 分。
+- 登录用户公开课题库按本人关系优先展示：后端必须在分页前按 `我已认领`、`我已参与`、`我已资助`、无关系的优先级排序，再应用当前编号/更新/热度排序；多关系时首页课题库卡片只显示一个金色斜角主标签，其余本人关系以金色小标签显示在课题编号前。本人相关课题 hover 顶线为金色。
 
 ### 2.5 个人中心、我的任务、任务结果
 
@@ -372,7 +377,7 @@ flowchart LR
 | 收藏 | 用户 | 已收藏 | 否 | 否 | 状态卡收藏 UID 分组 |
 | 点赞 | 用户 | 已点赞 | 否 | 否 | 轻量反馈，不进入协作主流程 |
 | 参与 | 用户 | `approved` | 否 | 可触发组队中 | 状态卡参与 UID 分组；记录署名意向 |
-| 认领项目负责人/论文第一单位 | 用户 | `pending` | 是 | 通过后可触发组队中 | 状态卡认领 UID 分组；审核意见返回申请人 |
+| 认领项目负责人/论文第一单位 | 用户 | `pending` | 是 | 通过后可触发组队中 | 状态卡认领 UID 分组；审核意见返回申请人；每个席位同课题只能有 1 个 active 记录 |
 | 其他兼容认领 | 用户 | `approved` | 否 | 可触发组队中 | 状态卡认领 UID 分组 |
 | 资助 | 用户 | `pending` | 是 | 不自动进入进行中 | 管理员资助审批、状态卡资助 UID 分组 |
 | 撤回 | 用户 | `withdrawn` | 否 | 不自动回退阶段 | 个人中心和状态卡反映 |
@@ -445,10 +450,10 @@ stateDiagram-v2
 | `GET` | `/api/meta/` | 元数据、阶段、版本、平台聚合统计 |
 | `GET` | `/api/sidebar-qrs/` | 常见问答底部二维码配置；公开读取，缺失图片不展示 |
 | `GET` | `/api/project-schema/` | 课题字段契约 |
-| `GET` | `/api/projects/` | 公开课题列表；登录态返回每个课题的 `viewer_state` |
-| `GET` | `/api/projects/{id}/` | 公开课题详情 |
+| `GET` | `/api/projects/` | 公开课题列表；登录态返回每个课题的 `viewer_state`，所有用户都返回 `claim_availability` |
+| `GET` | `/api/projects/{id}/` | 公开课题详情；返回 `claim_availability` |
 | `GET` | `/api/projects/{id}/progress/` | 公开课题进度页数据，返回进度正文、进度 PDF、时间线 |
-| `GET` | `/api/projects/{id}/status-card/` | 课题状态卡 |
+| `GET` | `/api/projects/{id}/status-card/` | 课题状态卡；返回 `claim_availability` 和 UID 分组 |
 | `GET/POST` | `/api/projects/{id}/discussions/` | 公开读取讨论；登录用户发起主讨论或回复 |
 | `PATCH/DELETE` | `/api/project-discussions/{id}/` | 作者或管理员编辑、删除讨论 |
 | `GET` | `/api/themes/{slug}/datasets/` | 公开主题数据集说明 PDF |
@@ -474,7 +479,7 @@ stateDiagram-v2
 | `POST` | `/api/projects/{id}/score/` | 点赞 |
 | `POST` | `/api/projects/{id}/unscore/` | 取消点赞 |
 | `POST` | `/api/projects/{id}/interest/` | 参与，自动通过；必须提交署名意向 |
-| `POST` | `/api/projects/{id}/claim/` | 认领；项目负责人和论文第一单位待管理员审批，其他兼容认领自动通过 |
+| `POST` | `/api/projects/{id}/claim/` | 认领；项目负责人和论文第一单位待管理员审批，论文第一单位必须提交 `claimed_unit_name`，其他兼容认领自动通过 |
 | `POST` | `/api/projects/{id}/sponsor/` | 资助意向，待审批 |
 | `PATCH` | `/api/me/interactions/{type}/{id}/withdraw/` | 撤回 |
 | `POST` | `/api/me/credits/transfer/` | 用户转赠积分，单次最多 50 分 |
@@ -580,13 +585,14 @@ stateDiagram-v2
 - `ProjectFollow`: 收藏。
 - `ProjectScore`: 点赞。
 - `ProjectInterest`: 参与，包含论文署名意向 `authorship_intention`。
-- `ProjectClaimIntent`: 认领意向，项目负责人和论文第一单位会记录审核意见、审核人和审核时间。
+- `ProjectClaimIntent`: 认领意向，项目负责人和论文第一单位会记录审核意见、审核人和审核时间；论文第一单位使用 `claimed_unit_name` 保存拟认领第一单位；项目负责人和论文第一单位按同课题同类型 active 记录做唯一席位约束。
 - `SponsorIntent`: 资助意向。
 
 当前产品口径：
 
 - 普通参与自动通过。
 - 认领项目负责人和认领课题（论文第一单位）待管理员审批；其他兼容认领类型自动通过。
+- 项目负责人和论文第一单位是两个独立席位；每个席位同一课题只能有一个 `pending` 或 `approved` 记录，撤回或拒绝后释放。
 - 资助意向待管理员审批。
 - 访客关系展示只暴露 UID；登录用户首页可在组队悬浮卡查看成员姓名和微信，邮箱不暴露。
 

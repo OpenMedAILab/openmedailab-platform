@@ -311,6 +311,7 @@ def claim_payload(claim):
         "project": project_summary_payload(claim.project),
         "claim_type": claim.claim_type,
         "claim_type_label": claim.get_claim_type_display(),
+        "claimed_unit_name": getattr(claim, "claimed_unit_name", ""),
         "message": claim.message,
         "status": claim.status,
         "status_label": claim.get_status_display(),

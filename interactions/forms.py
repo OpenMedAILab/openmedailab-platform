@@ -28,10 +28,11 @@ class ProjectInterestForm(forms.ModelForm):
 
 class ProjectClaimIntentForm(forms.ModelForm):
     claim_type = forms.ChoiceField(choices=ClaimType.choices)
+    claimed_unit_name = forms.CharField(required=False, max_length=100)
 
     class Meta:
         model = ProjectClaimIntent
-        fields = ("claim_type", "message")
+        fields = ("claim_type", "message", "claimed_unit_name")
         widgets = {"message": forms.Textarea(attrs={"rows": 3})}
 
 
