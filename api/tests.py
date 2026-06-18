@@ -2114,6 +2114,16 @@ class ApiTests(TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "permission_denied")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=user,
+                action="permission.denied",
+                target_type="Capability",
+                target_id="manage_themes",
+                status="failed",
+                error_code="permission_denied",
+            ).exists()
+        )
 
     def test_project_status_card_exposes_uid_and_contact_groups_for_authenticated_viewer(self):
         student = User.objects.create_user(username="studentuid", email="studentuid@example.com", password="StrongPass12345")
@@ -2303,6 +2313,33 @@ class ApiTests(TestCase):
         )
         self.assertEqual(invalid_review_response.status_code, 422)
         self.assertEqual(invalid_review_response.json()["error"]["code"], "invalid_interaction_type")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="interaction.review",
+                target_type="Interaction",
+                target_id=str(interest.pk),
+                status="failed",
+                error_code="invalid_interaction_type",
+            ).exists()
+        )
+
+        invalid_status_response = self.patch_json(
+            f"/api/admin/interactions/sponsor/{sponsor.pk}/status/",
+            {"status": "pending", "review_note": "非法状态"},
+        )
+        self.assertEqual(invalid_status_response.status_code, 422)
+        self.assertEqual(invalid_status_response.json()["error"]["code"], "validation_error")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="interaction.review",
+                target_type="SponsorIntent",
+                target_id=str(sponsor.pk),
+                status="failed",
+                error_code="validation_error",
+            ).exists()
+        )
 
         claim_review_response = self.patch_json(
             f"/api/admin/interactions/claim/{claim.pk}/status/",
@@ -2352,6 +2389,16 @@ class ApiTests(TestCase):
         rereview_response = self.patch_json(f"/api/admin/interactions/sponsor/{sponsor.pk}/status/", {"status": "rejected"})
         self.assertEqual(rereview_response.status_code, 422)
         self.assertEqual(rereview_response.json()["error"]["code"], "interaction_not_pending")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="interaction.review",
+                target_type="SponsorIntent",
+                target_id=str(sponsor.pk),
+                status="failed",
+                error_code="interaction_not_pending",
+            ).exists()
+        )
         audit_response = self.client.get("/api/admin/audit-logs/?action=interaction.review")
         self.assertEqual(audit_response.status_code, 200)
         audit_entry = audit_response.json()["data"]["results"][0]
@@ -3708,3 +3755,237 @@ class ApiTests(TestCase):
         response = self.post_json("/api/auth/login/", {"username": "loginuser", "password": "StrongPass12345"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data"]["username"], "loginuser")
+
+
+class InteractionConcurrencyTests(TransactionTestCase):
+    reset_sequences = True
+
+    def setUp(self):
+        self.theme = Theme.objects.create(name="并发验收", slug="concurrency-acceptance")
+        self.project = Project.objects.create(
+            topic_id=9901,
+            title="并发测试课题",
+            summary="并发测试",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        self.other_project = Project.objects.create(
+            topic_id=9902,
+            title="并发测试课题 B",
+            summary="并发测试 B",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+
+    def _user(self, username, credits=200):
+        user = User.objects.create_user(
+            username=username,
+            email=f"{username}@example.com",
+            password="StrongPass12345",
+        )
+        user.profile.credit_balance = credits
+        user.profile.save(update_fields=["credit_balance", "updated_at"])
+        return user
+
+    def _client_for(self, user):
+        client = Client()
+        client.raise_request_exception = False
+        client.force_login(user)
+        return client
+
+    def _post_as(self, user, path, payload):
+        client = self._client_for(user)
+        return self._post_with_client(client, path, payload)
+
+    def _patch_as(self, user, path, payload):
+        client = self._client_for(user)
+        return self._patch_with_client(client, path, payload)
+
+    def _post_with_client(self, client, path, payload):
+        response = client.post(path, data=json.dumps(payload), content_type="application/json")
+        return self._response_tuple(response)
+
+    def _patch_with_client(self, client, path, payload):
+        response = client.patch(path, data=json.dumps(payload), content_type="application/json")
+        return self._response_tuple(response)
+
+    def _response_tuple(self, response):
+        try:
+            body = response.json()
+        except ValueError:
+            body = response.content.decode("utf-8", errors="replace")[:500]
+        return response.status_code, body
+
+    def _parallel(self, *callables):
+        barrier = threading.Barrier(len(callables))
+        results = [None] * len(callables)
+        errors = [None] * len(callables)
+
+        def runner(index, func):
+            close_old_connections()
+            try:
+                barrier.wait(timeout=5)
+                results[index] = func()
+            except Exception as exc:  # pragma: no cover - surfaced by assertion below
+                errors[index] = exc
+            finally:
+                close_old_connections()
+
+        threads = [threading.Thread(target=runner, args=(index, func)) for index, func in enumerate(callables)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        for thread in threads:
+            self.assertFalse(thread.is_alive(), "并发测试线程未能按时结束")
+        for error in errors:
+            if error is not None:
+                raise error
+        return results
+
+    def _assert_no_server_errors(self, results):
+        for status_code, body in results:
+            self.assertLess(status_code, 500, body)
+            self.assertNotIn("database is locked", json.dumps(body, ensure_ascii=False).lower())
+            self.assertNotIn("integrityerror", json.dumps(body, ensure_ascii=False).lower())
+
+    def test_concurrent_leader_claim_allows_only_one_active_claim(self):
+        first = self._user("leader_claim_a")
+        second = self._user("leader_claim_b")
+        first_client = self._client_for(first)
+        second_client = self._client_for(second)
+
+        results = self._parallel(
+            lambda: self._post_with_client(first_client, f"/api/projects/{self.project.pk}/claim/", {"claim_type": "leader", "message": "并发负责人 A"}),
+            lambda: self._post_with_client(second_client, f"/api/projects/{self.project.pk}/claim/", {"claim_type": "leader", "message": "并发负责人 B"}),
+        )
+
+        self._assert_no_server_errors(results)
+        statuses = [status for status, _ in results]
+        self.assertEqual(statuses.count(201), 1, results)
+        self.assertEqual(statuses.count(409), 1, results)
+        active_count = ProjectClaimIntent.objects.filter(
+            project=self.project,
+            claim_type="leader",
+            status__in=[InteractionStatus.PENDING, InteractionStatus.APPROVED],
+        ).count()
+        self.assertEqual(active_count, 1)
+
+    def test_concurrent_paper_first_unit_claim_allows_only_one_active_claim(self):
+        first = self._user("paper_claim_a")
+        second = self._user("paper_claim_b")
+        first_client = self._client_for(first)
+        second_client = self._client_for(second)
+
+        results = self._parallel(
+            lambda: self._post_with_client(
+                first_client,
+                f"/api/projects/{self.project.pk}/claim/",
+                {"claim_type": "paper_first_unit", "claimed_unit_name": "第一单位A", "message": "申请第一单位 A"},
+            ),
+            lambda: self._post_with_client(
+                second_client,
+                f"/api/projects/{self.project.pk}/claim/",
+                {"claim_type": "paper_first_unit", "claimed_unit_name": "第一单位B", "message": "申请第一单位 B"},
+            ),
+        )
+
+        self._assert_no_server_errors(results)
+        statuses = [status for status, _ in results]
+        self.assertEqual(statuses.count(201), 1, results)
+        self.assertEqual(statuses.count(409), 1, results)
+        active_count = ProjectClaimIntent.objects.filter(
+            project=self.project,
+            claim_type="paper_first_unit",
+            status__in=[InteractionStatus.PENDING, InteractionStatus.APPROVED],
+        ).count()
+        self.assertEqual(active_count, 1)
+
+    def test_concurrent_sponsor_resubmit_does_not_duplicate_active_intent(self):
+        sponsor = self._user("sponsor_concurrent")
+        first_client = self._client_for(sponsor)
+        second_client = self._client_for(sponsor)
+
+        results = self._parallel(
+            lambda: self._post_with_client(first_client, f"/api/projects/{self.project.pk}/sponsor/", {"sponsor_type": "compute", "note": "第一次"}),
+            lambda: self._post_with_client(second_client, f"/api/projects/{self.project.pk}/sponsor/", {"sponsor_type": "compute", "note": "第二次"}),
+        )
+
+        self._assert_no_server_errors(results)
+        statuses = [status for status, _ in results]
+        self.assertIn(201, statuses, results)
+        self.assertTrue(set(statuses).issubset({200, 201}), results)
+        self.assertEqual(
+            SponsorIntent.objects.filter(user=sponsor, project=self.project, sponsor_type="compute").count(),
+            1,
+        )
+
+    def test_stage_change_blocks_in_flight_interaction_submit(self):
+        participant = self._user("stage_race_participant")
+        call_command(
+            "ensure_platform_admin",
+            username="platform_admin",
+            email="admin@example.com",
+            password="StrongPass12345",
+        )
+        admin = User.objects.get(username="platform_admin")
+        admin_client = self._client_for(admin)
+        participant_client = self._client_for(participant)
+
+        results = self._parallel(
+            lambda: self._patch_with_client(admin_client, f"/api/admin/projects/{self.project.pk}/", {"stage": ProjectStage.ACTIVE}),
+            lambda: self._post_with_client(
+                participant_client,
+                f"/api/projects/{self.project.pk}/interest/",
+                {"role": "学生", "available_hours_per_week": 4, "message": "阶段并发参与"},
+            ),
+        )
+
+        self._assert_no_server_errors(results)
+        admin_status, _ = results[0]
+        interaction_status, interaction_body = results[1]
+        self.assertEqual(admin_status, 200, results)
+        self.assertIn(interaction_status, {201, 422}, results)
+        if interaction_status == 422:
+            self.assertEqual(interaction_body["error"]["code"], "project_not_recruiting")
+            self.assertFalse(ProjectInterest.objects.filter(user=participant, project=self.project).exists())
+        else:
+            self.assertTrue(
+                ProjectInterest.objects.filter(
+                    user=participant,
+                    project=self.project,
+                    status=InteractionStatus.APPROVED,
+                ).exists()
+            )
+
+    def test_participation_credit_precheck_uses_locked_profile_balance(self):
+        participant = self._user("credit_race_participant", credits=50)
+        first_client = self._client_for(participant)
+        second_client = self._client_for(participant)
+
+        results = self._parallel(
+            lambda: self._post_with_client(
+                first_client,
+                f"/api/projects/{self.project.pk}/interest/",
+                {"role": "学生", "available_hours_per_week": 4, "message": "并发参与 A"},
+            ),
+            lambda: self._post_with_client(
+                second_client,
+                f"/api/projects/{self.other_project.pk}/interest/",
+                {"role": "学生", "available_hours_per_week": 4, "message": "并发参与 B"},
+            ),
+        )
+
+        self._assert_no_server_errors(results)
+        statuses = [status for status, _ in results]
+        self.assertLessEqual(statuses.count(201), 1, results)
+        self.assertIn(422, statuses, results)
+        for status_code, body in results:
+            if status_code == 422:
+                self.assertEqual(body["error"]["code"], "insufficient_credits")
+        self.assertLessEqual(
+            ProjectInterest.objects.filter(user=participant, status=InteractionStatus.APPROVED).count(),
+            1,
+        )

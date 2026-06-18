@@ -248,6 +248,7 @@
 - 成功和失败都应能关联到操作者、对象、时间、请求来源和 request_id。
 - 不能吞异常或静默失败。
 - API 错误结构要稳定，至少有 `code` 和 `message`；字段错误处于双写过渡期，必须同时返回 `error.details` 和顶层 `errors`。
+- 并发写入出现短暂数据库锁时必须重试；重试耗尽后返回稳定业务错误（如 `409 database_busy` 或领域内冲突码），不能把数据库异常原文暴露成 500。
 - 前端要展示用户能理解的错误，不只显示“失败”。
 - 不记录密码、密钥、完整敏感文件内容。
 
@@ -564,6 +565,7 @@ stateDiagram-v2
 - `/api/meta/` 的 `platform_stats.registered_user_count` 统计 active user profile。
 - `/api/meta/` 的 `platform_stats.online_user_count` 统计最近 5 分钟活跃的已登录用户。
 - `last_seen_at` 由 `LastSeenMiddleware` 节流更新，不写审计日志，不进入任何用户详情响应。
+- `last_seen_at` 是非关键心跳；并发锁冲突时允许跳过本次更新，不得影响当前业务请求成功或失败结果。
 
 ### 5.2 课题、主题和文件
 

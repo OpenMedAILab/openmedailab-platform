@@ -199,4 +199,21 @@ test("secondary token sponsor flow is reachable and reviewable", async ({ page }
   await page.goto("/#/dashboard");
   await page.getByRole("button", { name: "我的任务", exact: true }).click();
   await expect(page.getByText(/token 额度确认|已通过|资助 token/).first()).toBeVisible();
+
+  await page.goto(`/#/project/${data.projects.public_id}`);
+  const updatedDetailActions = page.locator(".project-progress-actions");
+  await updatedDetailActions.getByRole("button", { name: /管理资助|资助/ }).click();
+  const updatedPopover = page.getByTestId("sponsor-popover");
+  await expect(updatedPopover).toBeVisible();
+  await updatedPopover.getByRole("button", { name: /更多资助类型/ }).click();
+  const tokenCheckbox = updatedPopover.getByLabel("资助 token");
+  await expect(tokenCheckbox).toBeChecked();
+  await tokenCheckbox.uncheck();
+  await updatedPopover.getByRole("button", { name: /提交资助意向/ }).click();
+  await expect(page.getByRole("status")).toContainText(/资助意向已记录|撤回资助 token|已撤回资助/);
+
+  await page.goto("/#/dashboard");
+  await page.getByRole("button", { name: "我的任务", exact: true }).click();
+  await expect(page.getByText(/资助 token|token/).first()).toBeVisible();
+  await expect(page.getByText(/已撤回/).first()).toBeVisible();
 });
