@@ -400,38 +400,49 @@ class ApiTests(TestCase):
         self.assertNotIn("name", project["created_by_display"])
         self.assertNotIn("wechat", project["created_by_display"])
 
-    def test_project_list_sorts_by_topic_id_by_default_and_newest_number(self):
+    def test_project_list_default_sort_prioritizes_self_relation_then_engagement(self):
         popular_user = User.objects.create_user(username="popularsort", email="popularsort@example.com", password="StrongPass12345")
-        Project.objects.create(
+        third = Project.objects.create(
             topic_id=3,
             title="第三个公开课题",
-            summary="默认排序不应被热度影响。",
+            summary="默认排序应考虑热度。",
             theme=self.theme,
             stage=ProjectStage.OPEN_RECRUITING,
             is_public=True,
         )
-        Project.objects.create(
+        second = Project.objects.create(
             topic_id=2,
             title="第二个公开课题",
-            summary="默认排序按编号。",
+            summary="登录后本人相关课题应优先。",
             theme=self.theme,
             stage=ProjectStage.OPEN_RECRUITING,
             is_public=True,
         )
-        ProjectFollow.objects.create(user=popular_user, project=Project.objects.get(topic_id=3))
+        ProjectFollow.objects.create(user=popular_user, project=third)
         self.project.title = "最近更新但编号最小"
         self.project.save(update_fields=["title", "updated_at"])
 
         default_response = self.client.get("/api/projects/?page_size=10")
+        project_id_response = self.client.get("/api/projects/?sort=project_id&page_size=10")
         newest_response = self.client.get("/api/projects/?sort=newest&page_size=10")
         updated_response = self.client.get("/api/projects/?sort=updated&page_size=10")
 
         self.assertEqual(default_response.status_code, 200)
+        self.assertEqual(project_id_response.status_code, 200)
         self.assertEqual(newest_response.status_code, 200)
         self.assertEqual(updated_response.status_code, 200)
-        self.assertEqual([row["topic_id"] for row in default_response.json()["data"]["results"][:3]], [1, 2, 3])
+        self.assertEqual([row["topic_id"] for row in default_response.json()["data"]["results"][:3]], [3, 1, 2])
+        self.assertEqual([row["topic_id"] for row in project_id_response.json()["data"]["results"][:3]], [1, 2, 3])
         self.assertEqual([row["topic_id"] for row in newest_response.json()["data"]["results"][:3]], [3, 2, 1])
         self.assertEqual(updated_response.json()["data"]["results"][0]["topic_id"], 1)
+
+        related_user = User.objects.create_user(username="relatedsort", email="relatedsort@example.com", password="StrongPass12345")
+        ProjectInterest.objects.create(user=related_user, project=second, role="学生", status=InteractionStatus.APPROVED)
+        self.client.force_login(related_user)
+        related_response = self.client.get("/api/projects/?page_size=10")
+
+        self.assertEqual(related_response.status_code, 200)
+        self.assertEqual([row["topic_id"] for row in related_response.json()["data"]["results"][:3]], [2, 3, 1])
 
     def test_project_list_likes_sort_happens_before_pagination(self):
         low_like = Project.objects.create(
@@ -3102,7 +3113,7 @@ class ApiTests(TestCase):
             "stage_not_recruiting",
         )
 
-    def test_project_list_prioritizes_self_relations_before_pagination(self):
+    def test_project_list_default_sort_prioritizes_self_relations_before_pagination(self):
         user = User.objects.create_user(username="selfsort", email="selfsort@example.com", password="StrongPass12345")
         low_project = Project.objects.create(
             topic_id=2,
@@ -3132,12 +3143,15 @@ class ApiTests(TestCase):
         SponsorIntent.objects.create(user=user, project=sponsored_project, sponsor_type="compute", status=InteractionStatus.PENDING)
 
         self.client.force_login(user)
-        response = self.client.get("/api/projects/?page_size=2&sort=project_id")
+        response = self.client.get("/api/projects/?page_size=2")
+        project_id_response = self.client.get("/api/projects/?page_size=2&sort=project_id")
 
         self.assertEqual(response.status_code, 200)
         topic_ids = [row["topic_id"] for row in response.json()["data"]["results"]]
         self.assertEqual(topic_ids, [9905, 9906])
         self.assertNotIn(low_project.topic_id, topic_ids)
+        self.assertEqual(project_id_response.status_code, 200)
+        self.assertEqual([row["topic_id"] for row in project_id_response.json()["data"]["results"]], [1, 2])
 
     def test_credit_rules_cover_profile_transfer_reserve_and_completion_return(self):
         donor = User.objects.create_user(username="creditdonor", email="creditdonor@example.com", password="StrongPass12345")

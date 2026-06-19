@@ -32,6 +32,45 @@ const RELATION_STATUS_LABELS = {
   withdrawn: "已撤回"
 };
 
+function materialSymbolLigatureReady() {
+  if (typeof document === "undefined" || !document.body) return true;
+  const probe = document.createElement("span");
+  probe.textContent = "thumb_up";
+  Object.assign(probe.style, {
+    position: "absolute",
+    left: "-9999px",
+    top: "-9999px",
+    visibility: "hidden",
+    pointerEvents: "none",
+    whiteSpace: "nowrap",
+    fontFamily: '"Material Symbols Rounded"',
+    fontSize: "24px",
+    lineHeight: "1"
+  });
+  document.body.appendChild(probe);
+  const ready = probe.getBoundingClientRect().width < 48;
+  probe.remove();
+  return ready;
+}
+
+function updateMaterialSymbolReadinessClass() {
+  if (typeof document === "undefined" || !document.documentElement) return;
+  document.documentElement.classList.toggle("material-symbols-ready", materialSymbolLigatureReady());
+}
+
+function installMaterialSymbolReadinessWatcher() {
+  if (typeof document === "undefined") return;
+  const check = () => updateMaterialSymbolReadinessClass();
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", check, { once: true });
+  } else {
+    check();
+  }
+  document.fonts?.ready?.then(check).catch(check);
+}
+
+installMaterialSymbolReadinessWatcher();
+
 function clampNumber(value, min, max) {
   return Math.min(Math.max(value, min), Math.max(min, max));
 }
@@ -140,7 +179,7 @@ const state = reactive({
     theme: "",
     tag: "",
     stage: "",
-    sort: "project_id",
+    sort: "recommended",
     page: 1,
     page_size: PAGE_SIZE
   },
@@ -601,15 +640,23 @@ const App = {
 
     function sortProjectsForCurrentFilter(projects = []) {
       const rows = [...projects];
+      if (state.filters.sort === "recommended") {
+        return rows.sort((a, b) => (
+          compareSelfRelation(a, b) ||
+          projectEngagementCount(b) - projectEngagementCount(a) ||
+          numericProjectField(b, "score_count") - numericProjectField(a, "score_count") ||
+          numericProjectField(b, "follow_count") - numericProjectField(a, "follow_count") ||
+          projectTopicSortValue(a) - projectTopicSortValue(b)
+        ));
+      }
       if (state.filters.sort === "updated") {
-        return rows.sort((a, b) => compareSelfRelation(a, b) || projectUpdatedTime(b) - projectUpdatedTime(a) || projectTopicSortValue(b) - projectTopicSortValue(a));
+        return rows.sort((a, b) => projectUpdatedTime(b) - projectUpdatedTime(a) || projectTopicSortValue(b) - projectTopicSortValue(a));
       }
       if (state.filters.sort === "newest") {
-        return rows.sort((a, b) => compareSelfRelation(a, b) || projectTopicSortValue(b) - projectTopicSortValue(a));
+        return rows.sort((a, b) => projectTopicSortValue(b) - projectTopicSortValue(a));
       }
       if (state.filters.sort === "likes") {
         return rows.sort((a, b) => (
-          compareSelfRelation(a, b) ||
           numericProjectField(b, "score_count") - numericProjectField(a, "score_count") ||
           numericProjectField(b, "follow_count") - numericProjectField(a, "follow_count") ||
           projectUpdatedTime(b) - projectUpdatedTime(a) ||
@@ -618,14 +665,13 @@ const App = {
       }
       if (state.filters.sort === "follows") {
         return rows.sort((a, b) => (
-          compareSelfRelation(a, b) ||
           numericProjectField(b, "follow_count") - numericProjectField(a, "follow_count") ||
           numericProjectField(b, "score_count") - numericProjectField(a, "score_count") ||
           projectUpdatedTime(b) - projectUpdatedTime(a) ||
           projectTopicSortValue(a) - projectTopicSortValue(b)
         ));
       }
-      return rows.sort((a, b) => compareSelfRelation(a, b) || projectTopicSortValue(a) - projectTopicSortValue(b));
+      return rows.sort((a, b) => projectTopicSortValue(a) - projectTopicSortValue(b));
     }
 
     async function loadMoreProjects() {
@@ -5660,6 +5706,7 @@ const App = {
               <label class="filter-group optional-mobile">
                 <span style="display: flex; align-items: center; gap: 4px;"><span class="material-symbols-rounded" style="font-size: 16px;" aria-hidden="true">sort</span> 排序</span>
                 <select v-model="state.filters.sort" @change="applyFilters">
+                  <option value="recommended">默认</option>
                   <option value="project_id">编号顺序</option>
                   <option value="newest">最新编号</option>
                   <option value="updated">最近更新</option>
@@ -8067,6 +8114,10 @@ function displayScore(value) {
 function numericProjectField(project, field) {
   const value = Number(project?.[field] || 0);
   return Number.isFinite(value) ? value : 0;
+}
+
+function projectEngagementCount(project) {
+  return numericProjectField(project, "score_count") + numericProjectField(project, "follow_count");
 }
 
 function projectUpdatedTime(project) {

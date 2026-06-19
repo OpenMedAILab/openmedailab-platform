@@ -183,13 +183,23 @@ test("project interaction buttons use a compact responsive grid without stretchi
   assert.match(mainSource, /项目负责人审批中/);
   assert.match(mainSource, /claim-action-button/);
   assert.match(mainSource, /sponsor-action-button/);
-  assert.match(stylesSource, /\.project-interaction-actions\s*\{[\s\S]*?display:\s*grid;[\s\S]*?grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(118px,\s*154px\)\);[\s\S]*?justify-content:\s*start;/);
+  assert.match(stylesSource, /\.project-interaction-actions\s*\{[\s\S]*?display:\s*grid;[\s\S]*?grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(104px,\s*142px\)\);[\s\S]*?justify-content:\s*start;/);
   assert.match(stylesSource, /\.project-interaction-actions button\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?white-space:\s*normal;/);
   assert.match(stylesSource, /\.project-interaction-actions \.sponsor-action-button\s*\{[\s\S]*?border-color:\s*rgba\(217,\s*154,\s*24,\s*0\.4\);/);
   assert.match(stylesSource, /\.interaction-button > span:last-child\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?overflow-wrap:\s*anywhere;/);
   assert.match(stylesSource, /\.interaction-icon\s*\{[\s\S]*?flex:\s*0 0 auto;/);
+  assert.match(stylesSource, /@media \(max-width:\s*980px\)\s*\{[\s\S]*?\.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\);/);
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card-footer\s*\{[\s\S]*?align-items:\s*stretch;[\s\S]*?flex-direction:\s*column;/);
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/);
+  assert.match(stylesSource, /@media \(max-width:\s*380px\)\s*\{[\s\S]*?\.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*1fr;/);
+});
+
+test("project interaction icons do not leak ligature text when the icon font is unavailable", () => {
+  assert.match(mainSource, /installMaterialSymbolReadinessWatcher\(\);/);
+  assert.match(mainSource, /material-symbols-ready/);
+  assert.match(mainSource, /thumb_up[\s\S]*?getBoundingClientRect\(\)\.width\s*<\s*48/);
+  assert.match(stylesSource, /html:not\(\.material-symbols-ready\) \.interaction-icon\s*\{[\s\S]*?width:\s*0;[\s\S]*?font-size:\s*0;[\s\S]*?visibility:\s*hidden;/);
+  assert.match(stylesSource, /html:not\(\.material-symbols-ready\) \.project-interaction-actions button\s*\{[\s\S]*?gap:\s*0;/);
 });
 
 test("small-screen tab and chip rows wrap instead of hiding content horizontally", () => {
@@ -261,15 +271,17 @@ test("admin backup restore is exposed as a dedicated management tab", () => {
 });
 
 test("homepage search toolbar is lifted and visually emphasized", () => {
-  assert.match(mainSource, /sort:\s*"project_id"/);
+  assert.match(mainSource, /sort:\s*"recommended"/);
+  assert.match(mainSource, /<option value="recommended">默认<\/option>/);
   assert.match(mainSource, /<option value="project_id">编号顺序<\/option>/);
   assert.match(mainSource, /<option value="newest">最新编号<\/option>/);
   assert.match(mainSource, /<option value="updated">最近更新<\/option>/);
   assert.match(mainSource, /function projectListRequestParams\(\)\s*\{\s*return \{\s*\.\.\.state\.filters\s*\};\s*\}/);
   assert.doesNotMatch(mainSource, /params\.sort === "likes"[\s\S]*?params\.sort = "follows"/);
+  assert.match(mainSource, /state\.filters\.sort === "recommended"[\s\S]*?projectEngagementCount\(b\) - projectEngagementCount\(a\)/);
   assert.match(mainSource, /state\.filters\.sort === "newest"[\s\S]*?projectTopicSortValue\(b\) - projectTopicSortValue\(a\)/);
   assert.match(mainSource, /state\.filters\.sort === "likes"[\s\S]*?numericProjectField\(b,\s*"score_count"\) - numericProjectField\(a,\s*"score_count"\)/);
-  assert.match(mainSource, /return rows\.sort\(\(a, b\) => compareSelfRelation\(a,\s*b\) \|\| projectTopicSortValue\(a\) - projectTopicSortValue\(b\)\);/);
+  assert.match(mainSource, /return rows\.sort\(\(a, b\) => projectTopicSortValue\(a\) - projectTopicSortValue\(b\)\);/);
   assert.match(stylesSource, /\.toolbar\s*\{[\s\S]*?margin:\s*-4px 0 22px;[\s\S]*?padding:\s*16px;[\s\S]*?border-radius:\s*12px;/);
   assert.match(stylesSource, /\.toolbar input,\s*\.toolbar select\s*\{[\s\S]*?min-height:\s*46px;[\s\S]*?border-radius:\s*10px;/);
   assert.match(stylesSource, /\.toolbar \.primary-button\s*\{[\s\S]*?min-height:\s*58px;[\s\S]*?border-radius:\s*10px;/);

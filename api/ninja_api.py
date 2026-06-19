@@ -15,7 +15,7 @@ from django.contrib.auth.forms import SetPasswordForm
 from django.contrib.auth.models import User
 from django.core.paginator import Paginator
 from django.db import IntegrityError, OperationalError, close_old_connections, transaction
-from django.db.models import Case, Exists, IntegerField, OuterRef, Q, Value, When
+from django.db.models import Case, Exists, F, IntegerField, OuterRef, Q, Value, When
 from django.http import Http404, HttpResponse
 from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404
@@ -753,7 +753,7 @@ def project_list(
     theme: str = "",
     tag: str = "",
     stage: str = "",
-    sort: str = "project_id",
+    sort: str = "recommended",
     page: int = 1,
     page_size: int = 20,
 ):
@@ -775,17 +775,19 @@ def project_list(
         projects = projects.filter(Q(tags__slug=tag) | Q(tags__name=tag))
     if stage:
         projects = projects.filter(stage=stage)
+    projects = projects.annotate(default_engagement_count=F("score_count") + F("follow_count"))
     sort_map = {
-        "recommended": ("topic_id", "id"),
+        "recommended": ("-default_engagement_count", "-score_count", "-follow_count", "topic_id", "id"),
         "follows": ("-follow_count", "-interest_count", "topic_id"),
         "likes": ("-score_count", "-follow_count", "-interest_count", "topic_id"),
         "updated": ("-updated_at", "-topic_id"),
         "newest": ("-topic_id", "-id"),
         "project_id": ("topic_id", "id"),
     }
-    sort_fields = sort_map.get(sort, sort_map["project_id"])
-    projects = with_self_relation_rank(projects, request.user)
-    if getattr(request.user, "is_authenticated", False):
+    sort = sort if sort in sort_map else "recommended"
+    sort_fields = sort_map[sort]
+    if sort == "recommended" and getattr(request.user, "is_authenticated", False):
+        projects = with_self_relation_rank(projects, request.user)
         projects = projects.order_by("self_relation_rank", *sort_fields)
     else:
         projects = projects.order_by(*sort_fields)

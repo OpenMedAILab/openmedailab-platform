@@ -1539,7 +1539,7 @@ textarea:focus {
 
 .project-interaction-actions {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(118px, 154px));
+  grid-template-columns: repeat(auto-fit, minmax(104px, 142px));
   justify-content: start;
   align-items: stretch;
   gap: 8px;
@@ -1551,8 +1551,8 @@ textarea:focus {
 .project-interaction-actions button {
   width: 100%;
   min-width: 0;
-  min-height: 46px;
-  padding: 6px 12px;
+  min-height: 44px;
+  padding: 6px 10px;
   justify-content: center;
   text-align: center;
   font-size: 12px;
@@ -1572,11 +1572,26 @@ textarea:focus {
 }
 
 .interaction-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 auto;
   width: 17px;
   font-size: 17px;
   line-height: 1;
+  overflow: hidden;
   font-variation-settings: "FILL" 0, "wght" 500, "GRAD" 0, "opsz" 20;
+}
+
+html:not(.material-symbols-ready) .interaction-icon {
+  width: 0;
+  max-width: 0;
+  font-size: 0;
+  visibility: hidden;
+}
+
+html:not(.material-symbols-ready) .project-interaction-actions button {
+  gap: 0;
 }
 
 .interaction-button.interaction-active .interaction-icon,
@@ -1590,6 +1605,7 @@ textarea:focus {
   white-space: normal;
   line-height: 1.18;
   overflow-wrap: anywhere;
+  word-break: keep-all;
 }
 
 .primary-button,
@@ -4420,6 +4436,19 @@ code {
     margin-left: 0;
   }
 
+  .project-interaction-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+    justify-content: stretch;
+  }
+
+  .project-interaction-actions button {
+    min-height: 42px;
+    padding: 6px 8px;
+  }
+
   .workspace-overview-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -4683,16 +4712,31 @@ code {
 
   .project-interaction-actions {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    width: 100%;
-    max-width: none;
-    min-width: 0;
-    justify-content: stretch;
   }
 
   .project-interaction-actions button {
-    min-height: 44px;
-    padding: 6px 8px;
+    min-height: 40px;
+    padding: 5px 7px;
     font-size: 12px;
+    gap: 5px;
+  }
+
+  .interaction-icon {
+    width: 16px;
+    font-size: 16px;
+  }
+}
+
+@media (max-width: 380px) {
+  .project-interaction-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .project-interaction-actions button {
+    justify-content: flex-start;
+    min-height: 38px;
+    padding: 6px 10px;
+    text-align: left;
   }
 }
 
