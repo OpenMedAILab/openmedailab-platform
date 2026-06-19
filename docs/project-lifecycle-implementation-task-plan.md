@@ -1,5 +1,7 @@
 # 课题生命周期重建执行任务文档
 
+> 历史归档说明：本文档记录旧版生命周期重构计划，部分接口语义已被当前产品基准替换。当前有效规则以根目录 `AGENTS.md` 为准：管理员归档通过 `PATCH /api/admin/projects/{id}/` 设置 `stage=archived,is_public=false`，不需要确认；`DELETE /api/admin/projects/{id}/` 为物理删除，前端必须弹确认。
+
 生成日期：2026-06-10
 
 本文基于 [课题生命周期产品设计文档](./project-lifecycle-product-design.md)、当前 Django 模型、Django Ninja API 和 Vue 前端实现，定义本轮课题生命周期重建的执行任务、API 规范和严格验收标准。
@@ -63,7 +65,7 @@
 | 管理员课题列表 | `GET /api/admin/projects/` | 保留 |
 | 管理员创建课题 | `POST /api/admin/projects/` | 保留，强制创建为草稿且不公开 |
 | 管理员编辑课题 | `PATCH /api/admin/projects/{id}/` | 保留，用于发布、暂停、进入进行中和字段编辑 |
-| 管理员归档课题 | `DELETE /api/admin/projects/{id}/` | 保留，语义固定为归档 |
+| 管理员归档课题 | `PATCH /api/admin/projects/{id}/` | 当前有效语义：设置 `stage=archived,is_public=false`；历史 `DELETE` 归档口径已失效 |
 | 管理员协作审核 | `GET /api/admin/interactions/` | 保留，列表聚合申请/认领/资助 |
 | 管理员审核意向 | `PATCH /api/admin/interactions/{type}/{id}/status/` | 保留，限制状态并补课题阶段联动 |
 | 管理员任务结果审核 | `GET /api/admin/contributions/` | 保留，产品文案改为任务结果审核 |
@@ -234,7 +236,7 @@ stateDiagram-v2
 3. 管理员发布草稿时，前端调用 `PATCH /api/admin/projects/{id}/`，写入 `stage=open_recruiting`、`is_public=true`。
 4. 管理员进入进行中时，前端调用同一 `PATCH`，写入 `stage=active`。
 5. 管理员暂停时，前端调用同一 `PATCH`，写入 `stage=paused`。
-6. 管理员归档时，继续调用 `DELETE /api/admin/projects/{id}/`，后端设置 `stage=archived`、`is_public=false`。
+6. 管理员归档时，调用 `PATCH /api/admin/projects/{id}/`，后端设置 `stage=archived`、`is_public=false`；历史 `DELETE` 归档口径已失效。
 7. 公开课题列表和公开课题详情不得展示草稿和归档课题。
 8. 公开主题文件空间 `GET /api/themes/{slug}/space/` 中的关联课题同样不得展示草稿和归档课题。
 9. 公开接口只展示 `open_recruiting/team_building/active/paused` 中 `is_public=true` 的课题。
@@ -531,7 +533,7 @@ stateDiagram-v2
 - 旧阶段数据迁移规则明确且测试覆盖。
 - 历史 `recorded` 意向迁移为 `approved` 或新写入被 422 拦截。
 - `POST /api/admin/projects/` 创建结果永远是草稿且不公开。
-- `DELETE /api/admin/projects/{id}/` 是归档，不物理删除。
+- 历史旧口径：`DELETE /api/admin/projects/{id}/` 曾表示归档；当前已失效，现为物理删除。
 - `/api/projects/`、`/api/projects/{id}/`、`/api/themes/{slug}/space/` 都不会暴露草稿和归档课题。
 - 用户只能在开放招募或组队中提交申请/认领/资助。
 - 用户只能在开放招募、组队中或进行中收藏课题；暂停和归档不允许新收藏。

@@ -311,6 +311,7 @@ def claim_payload(claim):
         "project": project_summary_payload(claim.project),
         "claim_type": claim.claim_type,
         "claim_type_label": claim.get_claim_type_display(),
+        "claimed_unit_name": getattr(claim, "claimed_unit_name", ""),
         "message": claim.message,
         "status": claim.status,
         "status_label": claim.get_status_display(),
@@ -331,6 +332,9 @@ def sponsor_payload(sponsor):
         "note": sponsor.note,
         "status": sponsor.status,
         "status_label": sponsor.get_status_display(),
+        "review_comment": getattr(sponsor, "review_comment", ""),
+        "reviewed_by": uid_only_user_payload(sponsor.reviewed_by) if getattr(sponsor, "reviewed_by_id", None) else None,
+        "reviewed_at": getattr(sponsor, "reviewed_at", None),
         "created_at": sponsor.created_at,
         "updated_at": sponsor.updated_at,
     }

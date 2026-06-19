@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import re
+import time
 import zipfile
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -13,8 +14,8 @@ from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.forms import SetPasswordForm
 from django.contrib.auth.models import User
 from django.core.paginator import Paginator
-from django.db import IntegrityError, transaction
-from django.db.models import Case, IntegerField, Q, Value, When
+from django.db import IntegrityError, OperationalError, close_old_connections, transaction
+from django.db.models import Case, Exists, F, IntegerField, OuterRef, Q, Value, When
 from django.http import Http404, HttpResponse
 from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404
@@ -111,11 +112,15 @@ REVIEWABLE_INTERACTION_STATUSES = {InteractionStatus.APPROVED, InteractionStatus
 REVIEW_REQUIRED_CLAIM_TYPES = {ClaimType.LEADER, ClaimType.PAPER_FIRST_UNIT}
 REVIEWABLE_CONTRIBUTION_STATUSES = {ContributionStatus.APPROVED, ContributionStatus.REJECTED}
 ACTIVE_VIEWER_INTERACTION_STATUSES = {InteractionStatus.APPROVED, InteractionStatus.PENDING}
+ACTIVE_CLAIM_SLOT_STATUSES = {InteractionStatus.APPROVED, InteractionStatus.PENDING}
+CLAIM_AVAILABILITY_TYPES = (ClaimType.LEADER, ClaimType.PAPER_FIRST_UNIT)
 PROJECT_PARTICIPATION_CREDIT_COST = 50
 PROJECT_COMPLETION_CREDIT_RETURN = 100
 PROFILE_COMPLETION_BONUS = 5
 CREDIT_TRANSFER_MAX_AMOUNT = 50
 USER_PROJECT_ALLOWED_STAGES = {ProjectStage.DRAFT, ProjectStage.OPEN_RECRUITING}
+DATABASE_LOCK_RETRY_ATTEMPTS = 5
+DATABASE_LOCK_RETRY_DELAY_SECONDS = 0.05
 DAILY_USER_PROJECT_UPLOAD_LIMIT = 10
 AUDIT_ACTION_MAX_LENGTH = 120
 AUDIT_TARGET_TYPE_MAX_LENGTH = 120
@@ -130,7 +135,8 @@ SIDEBAR_QR_DEFINITIONS = [
 SIDEBAR_QR_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp"]
 SIDEBAR_QR_MAX_BYTES = 2 * 1024 * 1024
 CONTRIBUTION_DOCUMENT_EXTENSIONS = {".pdf", ".md", ".markdown"}
-CONTRIBUTION_DOCUMENT_MAX_BYTES = 10 * 1024 * 1024
+CONTRIBUTION_DOCUMENT_MAX_BYTES = 20 * 1024 * 1024
+PDF_DOCUMENT_MAX_BYTES = 20 * 1024 * 1024
 
 
 class Envelope(Schema):
@@ -149,6 +155,7 @@ class ErrorEnvelope(Schema):
     ok: bool
     request_id: Optional[str] = None
     error: ErrorDetail
+    errors: Optional[Any] = None
 
 
 class RegisterRequest(Schema):
@@ -195,6 +202,7 @@ class InterestRequest(Schema):
 class ClaimRequest(Schema):
     claim_type: str
     message: Optional[str] = ""
+    claimed_unit_name: Optional[str] = ""
 
 
 class SponsorRequest(Schema):
@@ -704,6 +712,40 @@ def profile_put(request, payload: ProfilePatchRequest):
     return ok(user_payload(request.user))
 
 
+def with_self_relation_rank(projects, user):
+    if not getattr(user, "is_authenticated", False):
+        return projects
+    active_statuses = ACTIVE_VIEWER_INTERACTION_STATUSES
+    claim_exists = ProjectClaimIntent.objects.filter(
+        project=OuterRef("pk"),
+        user=user,
+        claim_type__in=[ClaimType.LEADER, ClaimType.PAPER_FIRST_UNIT],
+        status__in=active_statuses,
+    )
+    interest_exists = ProjectInterest.objects.filter(
+        project=OuterRef("pk"),
+        user=user,
+        status__in=active_statuses,
+    )
+    sponsor_exists = SponsorIntent.objects.filter(
+        project=OuterRef("pk"),
+        user=user,
+        status__in=active_statuses,
+    )
+    return projects.annotate(
+        self_has_claim=Exists(claim_exists),
+        self_has_interest=Exists(interest_exists),
+        self_has_sponsor=Exists(sponsor_exists),
+        self_relation_rank=Case(
+            When(self_has_claim=True, then=Value(0)),
+            When(self_has_interest=True, then=Value(1)),
+            When(self_has_sponsor=True, then=Value(2)),
+            default=Value(3),
+            output_field=IntegerField(),
+        ),
+    )
+
+
 @api.get("/projects/", response={200: Envelope}, tags=["Projects"], auth=None)
 def project_list(
     request,
@@ -711,7 +753,7 @@ def project_list(
     theme: str = "",
     tag: str = "",
     stage: str = "",
-    sort: str = "project_id",
+    sort: str = "recommended",
     page: int = 1,
     page_size: int = 20,
 ):
@@ -733,14 +775,22 @@ def project_list(
         projects = projects.filter(Q(tags__slug=tag) | Q(tags__name=tag))
     if stage:
         projects = projects.filter(stage=stage)
+    projects = projects.annotate(default_engagement_count=F("score_count") + F("follow_count"))
     sort_map = {
-        "recommended": ("topic_id", "id"),
+        "recommended": ("-default_engagement_count", "-score_count", "-follow_count", "topic_id", "id"),
         "follows": ("-follow_count", "-interest_count", "topic_id"),
+        "likes": ("-score_count", "-follow_count", "-interest_count", "topic_id"),
         "updated": ("-updated_at", "-topic_id"),
         "newest": ("-topic_id", "-id"),
         "project_id": ("topic_id", "id"),
     }
-    projects = projects.order_by(*sort_map.get(sort, sort_map["project_id"]))
+    sort = sort if sort in sort_map else "recommended"
+    sort_fields = sort_map[sort]
+    if sort == "recommended" and getattr(request.user, "is_authenticated", False):
+        projects = with_self_relation_rank(projects, request.user)
+        projects = projects.order_by("self_relation_rank", *sort_fields)
+    else:
+        projects = projects.order_by(*sort_fields)
 
     page_size = max(1, min(page_size, 100))
     paginator = Paginator(projects, page_size)
@@ -772,6 +822,7 @@ def project_detail(request, project_id: int):
         pk=project_id,
     )
     data = public_project_detail_payload(project)
+    data["claim_availability"] = claim_availability_payload(request.user, project)
     if request.user.is_authenticated:
         data["viewer_state"] = viewer_state(request.user, project)
     return ok(data)
@@ -785,7 +836,11 @@ def project_progress(request, project_id: int):
     include_private = can_view_project_private_content(request.user, project)
     documents = project_progress_documents_queryset(project, include_private)
     timeline = project_progress_entries_queryset(project, include_private)
-    return ok(project_progress_payload(project, documents, timeline))
+    data = project_progress_payload(project, documents, timeline)
+    data["project"]["claim_availability"] = claim_availability_payload(request.user, project)
+    if request.user.is_authenticated:
+        data["project"]["viewer_state"] = viewer_state(request.user, project)
+    return ok(data)
 
 
 @api.get("/projects/{project_id}/status-card/", response={200: Envelope, 404: ErrorEnvelope}, tags=["Projects"], auth=None)
@@ -810,6 +865,7 @@ def project_status_card(request, project_id: int):
         {
             "project": project_list_payload(project, request.user),
             "viewer_state": viewer_state_payload,
+            "claim_availability": claim_availability_payload(request.user, project),
             "participants": {
                 "count": len(participant_uids),
                 "uids_visible": bool(request.user.is_authenticated),
@@ -1274,14 +1330,32 @@ def admin_interaction_list(
                 | Q(user__username__icontains=q)
                 | Q(user__profile__uid__icontains=q)
             )
-        rows.extend(interaction_payload(kind, item) for item in query[:500])
-    rows.sort(key=lambda item: item["updated_at"], reverse=True)
+        rows.extend(interaction_payload(kind, item) for item in ordered_review_interactions(query))
+
+    def interaction_list_sort_key(item):
+        status_rank = 0 if item.get("status") == InteractionStatus.PENDING else 1
+        created_at = item.get("created_at")
+        updated_at = item.get("updated_at")
+        created_ts = created_at.timestamp() if hasattr(created_at, "timestamp") else 0
+        updated_ts = updated_at.timestamp() if hasattr(updated_at, "timestamp") else 0
+        return (status_rank, created_ts if status_rank == 0 else -updated_ts)
+
+    rows.sort(key=interaction_list_sort_key)
     return ok(paginated_list(rows, page, page_size))
+
+
+def ordered_review_interactions(query, limit=500):
+    pending_items = list(query.filter(status=InteractionStatus.PENDING).order_by("created_at", "pk")[:limit])
+    remaining = max(0, limit - len(pending_items))
+    if not remaining:
+        return pending_items
+    processed_items = list(query.exclude(status=InteractionStatus.PENDING).order_by("-updated_at", "-pk")[:remaining])
+    return pending_items + processed_items
 
 
 @api.patch(
     "/admin/interactions/{type}/{interaction_id}/status/",
-    response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope},
+    response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 409: ErrorEnvelope, 422: ErrorEnvelope},
     tags=["Admin"],
 )
 def admin_interaction_update_status(request, type: str, interaction_id: int, payload: InteractionStatusRequest):
@@ -1289,23 +1363,77 @@ def admin_interaction_update_status(request, type: str, interaction_id: int, pay
     if auth_error:
         return auth_error
     if type not in {"claim", "sponsor"}:
-        return fail("管理员只审批认领和资助意向。", status=422, code="invalid_interaction_type")
+        return audit_failed_response(
+            request.user,
+            "interaction.review",
+            "Interaction",
+            interaction_id,
+            fail("管理员只审批认领和资助意向。", status=422, code="invalid_interaction_type"),
+        )
+    review_note = (payload.review_note or "").strip()
     if payload.status not in REVIEWABLE_INTERACTION_STATUSES:
-        return fail("Invalid interaction status.", status=422, code="validation_error")
+        return audit_failed_response(
+            request.user,
+            "interaction.review",
+            interaction_model(type).__name__,
+            interaction_id,
+            fail("审核状态不合法。", status=422, code="validation_error"),
+        )
     with transaction.atomic():
         item = get_interaction_or_404(type, interaction_id)
         item = item.__class__.objects.select_for_update().select_related("user", "user__profile", "project", "project__theme").get(pk=item.pk)
         if type == "claim" and item.claim_type not in REVIEW_REQUIRED_CLAIM_TYPES:
-            return fail("该认领类型不需要管理员审核。", status=422, code="invalid_interaction_type")
+            return audit_failed_response(
+                request.user,
+                "interaction.review",
+                item.__class__.__name__,
+                item.pk,
+                fail("该认领类型不需要管理员审核。", status=422, code="invalid_interaction_type"),
+            )
         project = Project.objects.select_for_update().get(pk=item.project_id)
         before = interaction_payload(type, item)
         if item.status != InteractionStatus.PENDING:
-            return fail("Only pending interactions can be reviewed.", status=422, code="interaction_not_pending")
+            return audit_failed_response(
+                request.user,
+                "interaction.review",
+                item.__class__.__name__,
+                item.pk,
+                fail("只有待处理申请可以审核。", status=422, code="interaction_not_pending"),
+                before=before,
+            )
+        if payload.status == InteractionStatus.REJECTED and not review_note:
+            return audit_failed_response(
+                request.user,
+                "interaction.review",
+                item.__class__.__name__,
+                item.pk,
+                fail(
+                    "拒绝申请时必须填写审核意见。",
+                    status=422,
+                    code="review_note_required",
+                    errors={"review_note": ["拒绝申请时必须填写审核意见。"]},
+                ),
+                before=before,
+            )
+        if type == "claim" and payload.status == InteractionStatus.APPROVED and item.claim_type in REVIEW_REQUIRED_CLAIM_TYPES:
+            active_claims = active_claim_slot_queryset(project, item.claim_type).select_for_update().exclude(pk=item.pk)
+            if active_claims.count() > 1:
+                return audit_failed_response(
+                    request.user,
+                    "interaction.review",
+                    item.__class__.__name__,
+                    item.pk,
+                    fail("该课题认领数据存在冲突，请联系管理员处理。", status=422, code="claim_data_conflict"),
+                    before=before,
+                )
+            if active_claims.exists():
+                audit(request.user, "interaction.review", item.__class__.__name__, item.pk, status="failed", error_code="claim_slot_occupied", error_message="该认领席位已被占用，暂不能通过重复认领。")
+                return fail("该认领席位已被占用，暂不能通过重复认领。", status=409, code="claim_slot_occupied")
         previous_project_stage = project.stage
         item.status = payload.status
         update_fields = ["status", "updated_at"]
-        if type == "claim":
-            item.review_comment = payload.review_note or ""
+        if type in {"claim", "sponsor"}:
+            item.review_comment = review_note
             item.reviewed_by = request.user
             item.reviewed_at = timezone.now()
             update_fields.extend(["review_comment", "reviewed_by", "reviewed_at"])
@@ -1320,22 +1448,51 @@ def admin_interaction_update_status(request, type: str, interaction_id: int, pay
             item.__class__.__name__,
             item.pk,
             before=before,
-            after={**after, "review_note": payload.review_note or "", "previous_project_stage": previous_project_stage},
+            after={**after, "review_note": review_note, "previous_project_stage": previous_project_stage},
         )
     return ok(after)
 
 
-@api.patch("/me/interactions/{type}/{interaction_id}/withdraw/", response={200: Envelope, 401: ErrorEnvelope, 404: ErrorEnvelope}, tags=["Me"])
+@api.patch("/me/interactions/{type}/{interaction_id}/withdraw/", response={200: Envelope, 401: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Me"])
 def me_interaction_withdraw(request, type: str, interaction_id: int, payload: InteractionWithdrawRequest):
     auth_error = require_login(request)
     if auth_error:
         return auth_error
-    item = get_interaction_or_404(type, interaction_id, user=request.user)
-    before = interaction_payload(type, item)
-    item.status = InteractionStatus.WITHDRAWN
-    item.save(update_fields=["status", "updated_at"])
-    after = interaction_payload(type, item)
-    audit(request.user, "interaction.withdraw", item.__class__.__name__, item.pk, before=before, after={**after, "reason": payload.reason or ""})
+    with transaction.atomic():
+        item = get_object_or_404(
+            interaction_queryset(type).select_for_update().filter(user=request.user),
+            pk=interaction_id,
+        )
+        before = interaction_payload(type, item)
+        if type == "claim" and getattr(item, "claim_type", "") in REVIEW_REQUIRED_CLAIM_TYPES:
+            if item.status == InteractionStatus.PENDING:
+                audit(
+                    request.user,
+                    "interaction.withdraw",
+                    item.__class__.__name__,
+                    item.pk,
+                    before=before,
+                    status="failed",
+                    error_code="claim_pending_cannot_withdraw",
+                    error_message="认领正在审批中，审批通过后才可撤回。",
+                )
+                return fail("认领正在审批中，审批通过后才可撤回。", status=422, code="claim_pending_cannot_withdraw")
+            if item.status != InteractionStatus.APPROVED:
+                audit(
+                    request.user,
+                    "interaction.withdraw",
+                    item.__class__.__name__,
+                    item.pk,
+                    before=before,
+                    status="failed",
+                    error_code="interaction_not_withdrawable",
+                    error_message="当前认领状态不可撤回。",
+                )
+                return fail("当前认领状态不可撤回。", status=422, code="interaction_not_withdrawable")
+        item.status = InteractionStatus.WITHDRAWN
+        item.save(update_fields=["status", "updated_at"])
+        after = interaction_payload(type, item)
+        audit(request.user, "interaction.withdraw", item.__class__.__name__, item.pk, before=before, after={**after, "reason": payload.reason or ""})
     return ok(after)
 
 
@@ -1425,7 +1582,7 @@ def me_contribution_upload(request):
         return fail("Only one result document can be uploaded at a time.", status=422, code="validation_error")
     file_path, content_hash, error = save_contribution_document(files[0], context["project"], request.user)
     if error:
-        return error
+        return audit_failed_response(request.user, "contribution.submit", "Project", context["project"].id, error)
     contribution = create_contribution_submission(
         request,
         context,
@@ -2050,9 +2207,9 @@ def admin_theme_file_detail_pdf_upload(request, file_id: int):
     uploaded = request.FILES.get("file")
     if not uploaded:
         return fail("No file uploaded.", status=422, code="validation_error")
-    file_name = sanitize_file_name(uploaded.name)
-    if not file_name or Path(file_name).suffix.lower() != ".pdf":
-        return fail("Only PDF files are allowed.", status=422, code="validation_error")
+    file_name, validation_error = validate_uploaded_pdf(uploaded)
+    if validation_error:
+        return audit_failed_response(request.user, "theme_file.detail_pdf_upload", "ThemeFile", file.id, validation_error)
     title = (request.POST.get("title") or Path(file_name).stem or "数据集说明").strip()[:255]
     root = theme_file_detail_pdf_root()
     directory = safe_child_path(root, f"{file.theme.slug}/{file.pk}", root, expect_parent=False)
@@ -2448,13 +2605,18 @@ def admin_project_create(request, payload: ProjectWriteRequest):
     return 201, ok(project_detail_payload(project))
 
 
-@api.patch("/admin/projects/{project_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Admin"])
+@api.patch("/admin/projects/{project_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope, 409: ErrorEnvelope, 422: ErrorEnvelope, 500: ErrorEnvelope}, tags=["Admin"])
 def admin_project_update(request, project_id: int, payload: ProjectWriteRequest):
     auth_error = require_capability(request, "manage_projects")
     if auth_error:
         return auth_error
     project = get_object_or_404(Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents"), pk=project_id)
-    before = project_detail_payload(project)
+    try:
+        before = run_with_database_lock_retry(lambda: project_detail_payload(project))
+    except OperationalError as exc:
+        if not is_database_lock_error(exc):
+            raise
+        return fail("Project update conflict, please retry.", status=409, code="database_busy")
     previous_stage = project.stage
     patch_data = payload.model_dump(exclude_unset=True, exclude_none=True)
     normalize_project_identity_alias(patch_data)
@@ -2488,8 +2650,36 @@ def admin_project_update(request, project_id: int, payload: ProjectWriteRequest)
             error_message=error[1]["error"]["message"],
         )
         return error
+    charged_entries = []
+    returned_entries = []
     try:
-        project = update_project(project, data, source_label="api-admin", allow_create_theme=False)
+        def update_admin_project():
+            with transaction.atomic():
+                locked_project = (
+                    Project.objects.select_for_update()
+                    .select_related("theme", "created_by", "created_by__profile")
+                    .prefetch_related("tags", "documents")
+                    .get(pk=project.pk)
+                )
+                updated_project = update_project(locked_project, data, source_label="api-admin", allow_create_theme=False)
+                if previous_stage != ProjectStage.ACTIVE and updated_project.stage == ProjectStage.ACTIVE:
+                    charged_entries[:] = charge_project_participation_credits_once(updated_project, request.user)
+                if previous_stage == ProjectStage.ACTIVE and updated_project.stage == ProjectStage.ARCHIVED:
+                    returned_entries[:] = grant_project_completion_credits_once(updated_project, request.user)
+                refreshed_project = (
+                    Project.objects.select_related("theme", "created_by", "created_by__profile")
+                    .prefetch_related("tags", "documents")
+                    .get(pk=updated_project.pk)
+                )
+                after_payload = project_detail_payload(refreshed_project)
+                audit(request.user, "project.update", "Project", refreshed_project.id, before=before, after=after_payload)
+                for entry in charged_entries:
+                    audit(request.user, "credit.project_participation_cost", "CreditLedger", entry.pk, after=credit_ledger_payload(entry))
+                for entry in returned_entries:
+                    audit(request.user, "credit.project_completion_return", "CreditLedger", entry.pk, after=credit_ledger_payload(entry))
+            return after_payload
+
+        after_payload = run_with_database_lock_retry(update_admin_project)
     except ValueError as exc:
         audit(
             request.user,
@@ -2503,23 +2693,32 @@ def admin_project_update(request, project_id: int, payload: ProjectWriteRequest)
             error_message=str(exc),
         )
         return fail(str(exc), status=422, code="validation_error")
-    charged_entries = []
-    returned_entries = []
-    if previous_stage != ProjectStage.ACTIVE and project.stage == ProjectStage.ACTIVE:
-        with transaction.atomic():
-            locked_project = Project.objects.select_for_update().get(pk=project.pk)
-            charged_entries = charge_project_participation_credits_once(locked_project, request.user)
-    if previous_stage == ProjectStage.ACTIVE and project.stage == ProjectStage.ARCHIVED:
-        with transaction.atomic():
-            locked_project = Project.objects.select_for_update().get(pk=project.pk)
-            returned_entries = grant_project_completion_credits_once(locked_project, request.user)
-    project = get_object_or_404(Project.objects.select_related("theme", "created_by", "created_by__profile").prefetch_related("tags", "documents"), pk=project.pk)
-    audit(request.user, "project.update", "Project", project.id, before=before, after=project_detail_payload(project))
-    for entry in charged_entries:
-        audit(request.user, "credit.project_participation_cost", "CreditLedger", entry.pk, after=credit_ledger_payload(entry))
-    for entry in returned_entries:
-        audit(request.user, "credit.project_completion_return", "CreditLedger", entry.pk, after=credit_ledger_payload(entry))
-    return ok(project_detail_payload(project))
+    except OperationalError as exc:
+        if not is_database_lock_error(exc):
+            raise
+        return audit_failed_response(
+            request.user,
+            "project.update",
+            "Project",
+            project.id,
+            fail("Project update conflict, please retry.", status=409, code="database_busy"),
+            before=before,
+            after=data,
+        )
+    except Exception as exc:
+        audit(
+            request.user,
+            "project.update",
+            "Project",
+            project.id,
+            before=before,
+            after=data,
+            status="failed",
+            error_code="project_update_failed",
+            error_message=str(exc),
+        )
+        return fail("Project update failed.", status=500, code="project_update_failed")
+    return ok(after_payload)
 
 
 @api.delete("/admin/projects/{project_id}/", response={200: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 404: ErrorEnvelope}, tags=["Admin"])
@@ -2596,11 +2795,9 @@ def save_project_detail_pdf(request, project, audit_action):
 
     saved = []
     for uploaded in files:
-        file_name = sanitize_file_name(uploaded.name)
-        if not file_name:
-            return fail("file name is invalid.", status=422, code="validation_error")
-        if Path(file_name).suffix.lower() != ".pdf":
-            return fail("Project document must be a PDF.", status=422, code="validation_error")
+        file_name, validation_error = validate_uploaded_pdf(uploaded, invalid_name_message="file name is invalid.", invalid_suffix_message="Project document must be a PDF.")
+        if validation_error:
+            return audit_failed_response(request.user, audit_action, "Project", project.id, validation_error)
         destination = unique_project_document_destination(directory, file_name)
         content_hash = write_uploaded_file_with_hash(uploaded, destination)
         old_detail_documents = list(ProjectDocument.objects.filter(project=project, document_kind=ProjectDocument.DocumentKind.DETAIL)) if document_kind == ProjectDocument.DocumentKind.DETAIL else []
@@ -2790,93 +2987,270 @@ def unscore_project(request, project_id: int):
     return ok({"is_liked": False, "score": None})
 
 
-@api.post("/projects/{project_id}/interest/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Interactions"])
+@api.post("/projects/{project_id}/interest/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 409: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Interactions"])
 def interest_project(request, project_id: int, payload: InterestRequest):
     auth_error = require_login(request)
     if auth_error:
         return auth_error
     project = get_object_or_404(Project, pk=project_id, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
-    if project.stage not in RECRUITING_PROJECT_STAGES:
-        return fail("Project is not recruiting.", status=422, code="project_not_recruiting")
-    if not has_required_participation_credits(request.user, project=project):
-        return fail("参与课题需要50积分，当前积分不足。", status=422, code="insufficient_credits")
     form = ProjectInterestForm(payload.model_dump())
     if not form.is_valid():
-        return fail("Interest submit failed.", status=422, code="validation_error", errors=form_errors(form))
-    with transaction.atomic():
-        interest, _ = ProjectInterest.objects.update_or_create(
-            user=request.user,
-            project=project,
-            role=form.cleaned_data["role"],
-            defaults={
-                "available_hours_per_week": form.cleaned_data["available_hours_per_week"],
-                "experience": form.cleaned_data.get("experience", ""),
-                "message": form.cleaned_data.get("message", ""),
-                "authorship_intention": form.cleaned_data["authorship_intention"],
-                "status": InteractionStatus.APPROVED,
-            },
+        return audit_failed_response(
+            request.user,
+            "interaction.submit_interest",
+            "Project",
+            project.id,
+            fail("Interest submit failed.", status=422, code="validation_error", errors=form_errors(form)),
         )
-        maybe_advance_project_stage_after_interaction(project, request.user)
-        interest.refresh_from_db()
-        audit(request.user, "interaction.auto_approve", "ProjectInterest", interest.pk, after=interest_payload(interest))
-    return 201, ok(interest_payload(interest))
+    try:
+        def submit_interest():
+            with transaction.atomic():
+                locked_project = Project.objects.select_for_update().get(pk=project.pk)
+                if locked_project.stage not in RECRUITING_PROJECT_STAGES:
+                    return audit_failed_response(
+                        request.user,
+                        "interaction.submit_interest",
+                        "Project",
+                        locked_project.id,
+                        fail("Project is not recruiting.", status=422, code="project_not_recruiting"),
+                    )
+                locked_profile = UserProfile.objects.select_for_update().get(user=request.user)
+                if not has_required_participation_credits(request.user, project=locked_project, profile=locked_profile):
+                    return audit_failed_response(
+                        request.user,
+                        "interaction.submit_interest",
+                        "Project",
+                        locked_project.id,
+                        fail("参与课题需要50积分，当前积分不足。", status=422, code="insufficient_credits"),
+                    )
+                interest, _ = ProjectInterest.objects.select_for_update().update_or_create(
+                    user=request.user,
+                    project=locked_project,
+                    role=form.cleaned_data["role"],
+                    defaults={
+                        "available_hours_per_week": form.cleaned_data["available_hours_per_week"],
+                        "experience": form.cleaned_data.get("experience", ""),
+                        "message": form.cleaned_data.get("message", ""),
+                        "authorship_intention": form.cleaned_data["authorship_intention"],
+                        "status": InteractionStatus.APPROVED,
+                    },
+                )
+                maybe_advance_project_stage_after_interaction(locked_project, request.user)
+                interest.refresh_from_db()
+                audit(request.user, "interaction.auto_approve", "ProjectInterest", interest.pk, after=interest_payload(interest))
+            return 201, ok(interest_payload(interest))
+
+        return run_with_database_lock_retry(submit_interest)
+    except OperationalError as exc:
+        if not is_database_lock_error(exc):
+            raise
+        return audit_failed_response(
+            request.user,
+            "interaction.submit_interest",
+            "Project",
+            project.id,
+            fail("请求冲突，请稍后重试。", status=409, code="database_busy"),
+        )
 
 
-@api.post("/projects/{project_id}/claim/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Interactions"])
+@api.post("/projects/{project_id}/claim/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 409: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Interactions"])
 def claim_project(request, project_id: int, payload: ClaimRequest):
     auth_error = require_login(request)
     if auth_error:
         return auth_error
     project = get_object_or_404(Project, pk=project_id, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
-    if project.stage not in RECRUITING_PROJECT_STAGES:
-        return fail("Project is not recruiting.", status=422, code="project_not_recruiting")
-    if not has_required_participation_credits(request.user, project=project):
-        return fail("参与课题需要50积分，当前积分不足。", status=422, code="insufficient_credits")
     form = ProjectClaimIntentForm(payload.model_dump())
     if not form.is_valid():
-        return fail("Claim submit failed.", status=422, code="validation_error", errors=form_errors(form))
+        return audit_failed_response(
+            request.user,
+            "interaction.submit_claim",
+            "Project",
+            project.id,
+            fail("Claim submit failed.", status=422, code="validation_error", errors=form_errors(form)),
+        )
     claim_type = form.cleaned_data["claim_type"]
     requires_review = claim_type in REVIEW_REQUIRED_CLAIM_TYPES
-    with transaction.atomic():
-        claim, _ = ProjectClaimIntent.objects.update_or_create(
-            user=request.user,
-            project=project,
-            claim_type=claim_type,
-            defaults={
-                "message": form.cleaned_data.get("message", ""),
-                "status": InteractionStatus.PENDING if requires_review else InteractionStatus.APPROVED,
-                "review_comment": "",
-                "reviewed_by": None,
-                "reviewed_at": None,
-            },
+    claimed_unit_name = (form.cleaned_data.get("claimed_unit_name") or "").strip()
+    message = (form.cleaned_data.get("message") or "").strip()
+    if claim_type == ClaimType.PAPER_FIRST_UNIT:
+        if not claimed_unit_name:
+            return audit_failed_response(
+                request.user,
+                "interaction.submit_claim",
+                "Project",
+                project.id,
+                fail(
+                "请填写拟认领的论文第一单位。",
+                status=422,
+                code="paper_first_unit_required",
+                errors={"claimed_unit_name": ["请填写拟认领的论文第一单位。"]},
+                ),
+            )
+        if len(claimed_unit_name) < 2:
+            return audit_failed_response(
+                request.user,
+                "interaction.submit_claim",
+                "Project",
+                project.id,
+                fail(
+                "拟认领的论文第一单位至少需要2个字符。",
+                status=422,
+                code="validation_error",
+                errors={"claimed_unit_name": ["拟认领的论文第一单位至少需要2个字符。"]},
+                ),
+            )
+        if not message:
+            message = f"申请认领论文第一单位：{claimed_unit_name}"
+    else:
+        claimed_unit_name = ""
+    try:
+        def submit_claim():
+            with transaction.atomic():
+                locked_project = Project.objects.select_for_update().get(pk=project.pk)
+                if locked_project.stage not in RECRUITING_PROJECT_STAGES:
+                    return audit_failed_response(
+                        request.user,
+                        "interaction.submit_claim",
+                        "Project",
+                        locked_project.id,
+                        fail("Project is not recruiting.", status=422, code="project_not_recruiting"),
+                    )
+                locked_profile = UserProfile.objects.select_for_update().get(user=request.user)
+                if not has_required_participation_credits(request.user, project=locked_project, profile=locked_profile):
+                    return audit_failed_response(
+                        request.user,
+                        "interaction.submit_claim",
+                        "Project",
+                        locked_project.id,
+                        fail("参与课题需要50积分，当前积分不足。", status=422, code="insufficient_credits"),
+                    )
+                if requires_review:
+                    active_claims = active_claim_slot_queryset(locked_project, claim_type).select_for_update()
+                    if active_claims.filter(user=request.user).exists():
+                        return audit_failed_response(
+                            request.user,
+                            "interaction.submit_claim",
+                            "Project",
+                            locked_project.id,
+                            fail("你已提交该认领，不能重复提交。", status=422, code="claim_already_active"),
+                        )
+                    active_count = active_claims.count()
+                    if active_count > 1:
+                        return audit_failed_response(
+                            request.user,
+                            "interaction.submit_claim",
+                            "Project",
+                            locked_project.id,
+                            fail("该课题认领数据存在冲突，请联系管理员处理。", status=422, code="claim_data_conflict"),
+                        )
+                    if active_count == 1:
+                        return audit_failed_response(
+                            request.user,
+                            "interaction.submit_claim",
+                            "Project",
+                            locked_project.id,
+                            fail("该认领席位已被占用，暂不能重复认领。", status=409, code="claim_slot_occupied"),
+                        )
+                claim, _ = ProjectClaimIntent.objects.update_or_create(
+                    user=request.user,
+                    project=locked_project,
+                    claim_type=claim_type,
+                    defaults={
+                        "claimed_unit_name": claimed_unit_name,
+                        "message": message,
+                        "status": InteractionStatus.PENDING if requires_review else InteractionStatus.APPROVED,
+                        "review_comment": "",
+                        "reviewed_by": None,
+                        "reviewed_at": None,
+                    },
+                )
+                if claim.status == InteractionStatus.APPROVED:
+                    maybe_advance_project_stage_after_interaction(locked_project, request.user)
+                claim.refresh_from_db()
+                audit_action = "interaction.submit_claim_for_review" if requires_review else "interaction.auto_approve"
+                audit(request.user, audit_action, "ProjectClaimIntent", claim.pk, after=claim_payload(claim))
+            return 201, ok(claim_payload(claim))
+
+        return run_with_database_lock_retry(submit_claim)
+    except (IntegrityError, OperationalError) as exc:
+        if isinstance(exc, OperationalError) and not is_database_lock_error(exc):
+            raise
+        return audit_failed_response(
+            request.user,
+            "interaction.submit_claim",
+            "Project",
+            project.id,
+            fail("该认领席位已被占用，暂不能重复认领。", status=409, code="claim_slot_occupied"),
         )
-        if claim.status == InteractionStatus.APPROVED:
-            maybe_advance_project_stage_after_interaction(project, request.user)
-        claim.refresh_from_db()
-        audit_action = "interaction.submit_claim_for_review" if requires_review else "interaction.auto_approve"
-        audit(request.user, audit_action, "ProjectClaimIntent", claim.pk, after=claim_payload(claim))
-    return 201, ok(claim_payload(claim))
 
 
-@api.post("/projects/{project_id}/sponsor/", response={201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Interactions"])
+@api.post("/projects/{project_id}/sponsor/", response={200: Envelope, 201: Envelope, 401: ErrorEnvelope, 403: ErrorEnvelope, 409: ErrorEnvelope, 422: ErrorEnvelope}, tags=["Interactions"])
 def sponsor_project(request, project_id: int, payload: SponsorRequest):
     auth_error = require_login(request)
     if auth_error:
         return auth_error
     project = get_object_or_404(Project, pk=project_id, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
-    if project.stage not in RECRUITING_PROJECT_STAGES:
-        return fail("Project is not recruiting.", status=422, code="project_not_recruiting")
     form = SponsorIntentForm(payload.model_dump())
     if not form.is_valid():
-        return fail("Sponsor intent submit failed.", status=422, code="validation_error", errors=form_errors(form))
-    sponsor, _ = SponsorIntent.objects.update_or_create(
-        user=request.user,
-        project=project,
-        sponsor_type=form.cleaned_data["sponsor_type"],
-        defaults={"note": form.cleaned_data.get("note", ""), "status": InteractionStatus.PENDING},
-    )
-    audit(request.user, "interaction.submit_sponsor", "SponsorIntent", sponsor.pk, after=sponsor_payload(sponsor))
-    return 201, ok(sponsor_payload(sponsor))
+        return audit_failed_response(
+            request.user,
+            "interaction.submit_sponsor",
+            "Project",
+            project.id,
+            fail("Sponsor intent submit failed.", status=422, code="validation_error", errors=form_errors(form)),
+        )
+    try:
+        def submit_sponsor():
+            with transaction.atomic():
+                locked_project = Project.objects.select_for_update().get(pk=project.pk)
+                if locked_project.stage not in RECRUITING_PROJECT_STAGES:
+                    return audit_failed_response(
+                        request.user,
+                        "interaction.submit_sponsor",
+                        "Project",
+                        locked_project.id,
+                        fail("Project is not recruiting.", status=422, code="project_not_recruiting"),
+                    )
+                sponsor, created = SponsorIntent.objects.select_for_update().get_or_create(
+                    user=request.user,
+                    project=locked_project,
+                    sponsor_type=form.cleaned_data["sponsor_type"],
+                    defaults={"note": form.cleaned_data.get("note", ""), "status": InteractionStatus.PENDING},
+                )
+                if created:
+                    action = "interaction.submit_sponsor"
+                    status_code = 201
+                else:
+                    before = sponsor_payload(sponsor)
+                    sponsor.note = form.cleaned_data.get("note", "")
+                    if sponsor.status in {InteractionStatus.REJECTED, InteractionStatus.WITHDRAWN}:
+                        sponsor.status = InteractionStatus.PENDING
+                        sponsor.review_comment = ""
+                        sponsor.reviewed_by = None
+                        sponsor.reviewed_at = None
+                        action = "interaction.sponsor_resubmit"
+                        status_code = 201
+                    else:
+                        action = "interaction.sponsor_update_note"
+                        status_code = 200
+                    sponsor.save(update_fields=["note", "status", "review_comment", "reviewed_by", "reviewed_at", "updated_at"])
+                    sponsor.refresh_from_db()
+                    audit(request.user, action, "SponsorIntent", sponsor.pk, before=before, after=sponsor_payload(sponsor))
+                    return status_code, ok(sponsor_payload(sponsor))
+                audit(request.user, action, "SponsorIntent", sponsor.pk, after=sponsor_payload(sponsor))
+            return status_code, ok(sponsor_payload(sponsor))
+
+        return run_with_database_lock_retry(submit_sponsor)
+    except (IntegrityError, OperationalError) as exc:
+        if isinstance(exc, OperationalError) and not is_database_lock_error(exc):
+            raise
+        return audit_failed_response(
+            request.user,
+            "interaction.submit_sponsor",
+            "Project",
+            project.id,
+            fail("请求冲突，请稍后重试。", status=409, code="database_busy"),
+        )
 
 
 def ok(data=None):
@@ -2885,6 +3259,55 @@ def ok(data=None):
 
 def fail(message, status=400, code="bad_request", errors=None):
     return status, error_payload(message, code, errors)
+
+
+def is_database_lock_error(exc):
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
+def run_with_database_lock_retry(operation):
+    last_error = None
+    for attempt in range(DATABASE_LOCK_RETRY_ATTEMPTS):
+        try:
+            return operation()
+        except OperationalError as exc:
+            if not is_database_lock_error(exc):
+                raise
+            last_error = exc
+            close_old_connections()
+            if attempt < DATABASE_LOCK_RETRY_ATTEMPTS - 1:
+                time.sleep(DATABASE_LOCK_RETRY_DELAY_SECONDS * (attempt + 1))
+    raise last_error
+
+
+def audit_failed_response(actor, action, target_type, target_id, response_tuple, before=None, after=None):
+    try:
+        _, payload = response_tuple
+        error = payload.get("error", {})
+        error_code = error.get("code", "")
+        error_message = error.get("message", "")
+    except (TypeError, AttributeError, ValueError):
+        error_code = ""
+        error_message = ""
+    try:
+        run_with_database_lock_retry(
+            lambda: audit(
+                actor,
+                action,
+                target_type,
+                target_id,
+                before=before,
+                after=after,
+                status="failed",
+                error_code=error_code,
+                error_message=error_message,
+            )
+        )
+    except OperationalError as exc:
+        if not is_database_lock_error(exc):
+            raise
+    return response_tuple
 
 
 def password_reset_form_errors(form):
@@ -2905,6 +3328,7 @@ def error_payload(message, code="bad_request", errors=None):
     payload = {"ok": False, "request_id": request_id, "error": {"code": code, "message": message, "request_id": request_id}}
     if errors is not None:
         payload["error"]["details"] = errors
+        payload["errors"] = errors
     return payload
 
 
@@ -2919,6 +3343,15 @@ def require_capability(request, capability):
     if auth_error:
         return auth_error
     if not has_capability(request.user, capability):
+        audit(
+            request.user,
+            "permission.denied",
+            "Capability",
+            capability,
+            status="failed",
+            error_code="permission_denied",
+            error_message="Permission denied.",
+        )
         return fail("Permission denied.", status=403, code="permission_denied")
     return None
 
@@ -3442,9 +3875,16 @@ def save_contribution_document(uploaded, project, user):
     if suffix not in CONTRIBUTION_DOCUMENT_EXTENSIONS:
         return "", "", fail("任务结果文档只支持 PDF 或 Markdown。", status=422, code="validation_error")
     if getattr(uploaded, "size", 0) > CONTRIBUTION_DOCUMENT_MAX_BYTES:
-        return "", "", fail("任务结果文档不能超过 10MB。", status=422, code="validation_error")
-    if suffix == ".pdf" and not uploaded_file_has_pdf_signature(uploaded):
-        return "", "", fail("PDF 文件格式无法识别。", status=422, code="validation_error")
+        return "", "", fail("任务结果文档不能超过 20MB。", status=422, code="validation_error")
+    if suffix == ".pdf":
+        _, pdf_error = validate_uploaded_pdf(
+            uploaded,
+            max_bytes=CONTRIBUTION_DOCUMENT_MAX_BYTES,
+            invalid_suffix_message="任务结果文档只支持 PDF 或 Markdown。",
+            too_large_message="任务结果文档不能超过 20MB。",
+        )
+        if pdf_error:
+            return "", "", pdf_error
     root = contribution_document_root()
     try:
         raw_user_uid = user.profile.uid
@@ -3550,7 +3990,7 @@ def status_uid_groups_for_project(project, authenticated):
         except UserProfile.DoesNotExist:
             return None
 
-    def add_uid(group_type, key, label, uid, sort_key):
+    def add_uid(group_type, key, label, uid, sort_key, status="", status_label="", subtype="", subtype_label=""):
         if not uid:
             return
         group = grouped.setdefault(
@@ -3559,6 +3999,10 @@ def status_uid_groups_for_project(project, authenticated):
                 "key": key,
                 "type": group_type,
                 "label": label,
+                "status": status,
+                "status_label": status_label,
+                "subtype": subtype,
+                "subtype_label": subtype_label,
                 "uids": set(),
                 "sort_key": sort_key,
             },
@@ -3573,19 +4017,51 @@ def status_uid_groups_for_project(project, authenticated):
     for interest in interest_rows:
         key = f"interest-{interest.role}-{interest.status}"
         label = f"参与：{interest.get_role_display()}（{interest.get_status_display()}）"
-        add_uid("interest", key, label, profile_uid_for(interest.user), (1, status_order.get(interest.status, 99), label))
+        add_uid(
+            "interest",
+            key,
+            label,
+            profile_uid_for(interest.user),
+            (1, status_order.get(interest.status, 99), label),
+            status=interest.status,
+            status_label=interest.get_status_display(),
+            subtype=interest.role,
+            subtype_label=interest.get_role_display(),
+        )
 
     claim_rows = ProjectClaimIntent.objects.filter(project=project).select_related("user__profile").order_by("status", "claim_type")
     for claim in claim_rows:
         key = f"claim-{claim.claim_type}-{claim.status}"
         label = f"{claim.get_claim_type_display()}（{claim.get_status_display()}）"
-        add_uid("claim", key, label, profile_uid_for(claim.user), (2, status_order.get(claim.status, 99), label))
+        if claim.claim_type == ClaimType.PAPER_FIRST_UNIT and claim.claimed_unit_name:
+            label = f"{claim.get_claim_type_display()}：{claim.claimed_unit_name}（{claim.get_status_display()}）"
+        add_uid(
+            "claim",
+            key,
+            label,
+            profile_uid_for(claim.user),
+            (2, status_order.get(claim.status, 99), label),
+            status=claim.status,
+            status_label=claim.get_status_display(),
+            subtype=claim.claim_type,
+            subtype_label=claim.get_claim_type_display(),
+        )
 
     sponsor_rows = SponsorIntent.objects.filter(project=project).select_related("user__profile").order_by("status", "sponsor_type")
     for sponsor in sponsor_rows:
         key = f"sponsor-{sponsor.sponsor_type}-{sponsor.status}"
         label = f"资助：{sponsor.get_sponsor_type_display()}（{sponsor.get_status_display()}）"
-        add_uid("sponsor", key, label, profile_uid_for(sponsor.user), (3, status_order.get(sponsor.status, 99), label))
+        add_uid(
+            "sponsor",
+            key,
+            label,
+            profile_uid_for(sponsor.user),
+            (3, status_order.get(sponsor.status, 99), label),
+            status=sponsor.status,
+            status_label=sponsor.get_status_display(),
+            subtype=sponsor.sponsor_type,
+            subtype_label=sponsor.get_sponsor_type_display(),
+        )
 
     groups = []
     for group in sorted(grouped.values(), key=lambda item: item["sort_key"]):
@@ -3595,6 +4071,10 @@ def status_uid_groups_for_project(project, authenticated):
                 "key": group["key"],
                 "type": group["type"],
                 "label": group["label"],
+                "status": group["status"],
+                "status_label": group["status_label"],
+                "subtype": group["subtype"],
+                "subtype_label": group["subtype_label"],
                 "count": len(uids),
                 "uids": uids,
             }
@@ -3732,11 +4212,10 @@ def interaction_kinds(type_filter=""):
 
 def interaction_queryset(kind):
     model = interaction_model(kind)
-    queryset = (
-        model.objects.select_related("user", "user__profile", "project", "project__theme")
-        .prefetch_related("project__tags")
-        .order_by("-updated_at")
-    )
+    related_fields = ["user", "user__profile", "project", "project__theme"]
+    if kind in {"claim", "sponsor"}:
+        related_fields.extend(["reviewed_by", "reviewed_by__profile"])
+    queryset = model.objects.select_related(*related_fields).prefetch_related("project__tags").order_by("-updated_at")
     if kind == "claim":
         queryset = queryset.filter(claim_type__in=REVIEW_REQUIRED_CLAIM_TYPES)
     return queryset
@@ -3774,6 +4253,7 @@ def interaction_payload(kind, item):
         subtype_label = item.get_claim_type_display()
         message = item.message
         detail = {
+            "claimed_unit_name": getattr(item, "claimed_unit_name", ""),
             "review_comment": getattr(item, "review_comment", ""),
             "reviewed_by": uid_only_user_payload(item.reviewed_by) if getattr(item, "reviewed_by_id", None) else None,
             "reviewed_at": getattr(item, "reviewed_at", None),
@@ -3782,7 +4262,15 @@ def interaction_payload(kind, item):
         subtype = item.sponsor_type
         subtype_label = item.get_sponsor_type_display()
         message = item.note
-        detail = {}
+        reviewed_by_payload = uid_only_user_payload(item.reviewed_by) if getattr(item, "reviewed_by_id", None) else None
+        detail = {
+            "sponsor_type": getattr(item, "sponsor_type", ""),
+            "sponsor_type_label": item.get_sponsor_type_display(),
+            "review_comment": getattr(item, "review_comment", ""),
+            "reviewed_by": reviewed_by_payload,
+            "reviewed_at": getattr(item, "reviewed_at", None),
+        }
+    reviewed_by_payload = uid_only_user_payload(item.reviewed_by) if getattr(item, "reviewed_by_id", None) else None
     return {
         "id": item.id,
         "type": kind,
@@ -3794,6 +4282,8 @@ def interaction_payload(kind, item):
         "status": item.status,
         "status_label": item.get_status_display(),
         "review_comment": getattr(item, "review_comment", ""),
+        "reviewed_by": reviewed_by_payload,
+        "reviewed_at": getattr(item, "reviewed_at", None),
         "user": uid_only_user_payload(item.user),
         "project": project_summary_payload(item.project),
         "created_at": item.created_at,
@@ -3871,7 +4361,105 @@ def viewer_state(user, project):
         "interest_roles": [interest.role for interest in active_interests],
         "claim_types": [claim.claim_type for claim in active_claims],
         "sponsor_types": [sponsor.sponsor_type for sponsor in active_sponsors],
+        "sponsor_requests": [sponsor_payload(sponsor) for sponsor in active_sponsors],
         "activity_labels": activity_labels,
+    }
+
+
+def claim_type_label(claim_type):
+    return dict(ClaimType.choices).get(claim_type, claim_type)
+
+
+def claim_relation_label(claim_type):
+    if claim_type == ClaimType.LEADER:
+        return "项目负责人认领"
+    if claim_type == ClaimType.PAPER_FIRST_UNIT:
+        return "论文第一单位认领"
+    return claim_type_label(claim_type)
+
+
+def active_claim_slot_queryset(project, claim_type):
+    return ProjectClaimIntent.objects.filter(
+        project=project,
+        claim_type=claim_type,
+        status__in=ACTIVE_CLAIM_SLOT_STATUSES,
+    )
+
+
+def claim_availability_for_type(user, project, claim_type):
+    label = claim_type_label(claim_type)
+    relation_label = claim_relation_label(claim_type)
+    authenticated = bool(getattr(user, "is_authenticated", False))
+    own_active = None
+    if authenticated:
+        own_active = active_claim_slot_queryset(project, claim_type).filter(user=user).first()
+    if own_active:
+        if own_active.status == InteractionStatus.PENDING:
+            return {
+                "available": False,
+                "action": "pending",
+                "own_status": own_active.status,
+                "own_interaction_id": own_active.pk,
+                "reason_code": "own_pending",
+                "reason": f"你的{relation_label}正在管理员审批中，审批通过后可撤回{relation_label}。",
+            }
+        return {
+            "available": False,
+            "action": "withdraw",
+            "own_status": own_active.status,
+            "own_interaction_id": own_active.pk,
+            "reason_code": "own_approved",
+            "reason": f"你的{relation_label}已通过，可撤回{relation_label}。",
+        }
+    if not authenticated:
+        return {
+            "available": False,
+            "action": "unavailable",
+            "reason_code": "login_required",
+            "reason": f"登录后才能提交{label}。",
+        }
+    if project.stage not in RECRUITING_PROJECT_STAGES:
+        return {
+            "available": False,
+            "action": "unavailable",
+            "reason_code": "stage_not_recruiting",
+            "reason": f"当前课题阶段不接受{label}。",
+        }
+    active_slots = active_claim_slot_queryset(project, claim_type)
+    active_count = active_slots.count()
+    if active_count > 1:
+        return {
+            "available": False,
+            "action": "unavailable",
+            "reason_code": "data_conflict",
+            "reason": f"该课题的{label}数据存在冲突，请联系管理员处理。",
+        }
+    if active_count == 1:
+        return {
+            "available": False,
+            "action": "unavailable",
+            "reason_code": "slot_occupied",
+            "reason": f"该课题已有{label}，暂不能重复认领。",
+        }
+    if not has_required_participation_credits(user, project=project):
+        return {
+            "available": False,
+            "action": "unavailable",
+            "reason_code": "insufficient_credits",
+            "reason": "参与或认领课题需要50积分，当前积分不足。",
+        }
+    return {
+        "available": True,
+        "action": "submit",
+        "reason_code": "available",
+        "reason": f"可以提交{label}。",
+    }
+
+
+def claim_availability_payload(user, project):
+    return {
+        claim_type: claim_availability_for_type(user, project, claim_type)
+        for claim_type in CLAIM_AVAILABILITY_TYPES
     }
 
 
@@ -3884,16 +4472,19 @@ def collaboration_display_name(user):
     return user.username or ""
 
 
-def collaboration_contact_payload(user, include_wechat=False):
+def collaboration_contact_payload(user, include_name=True, include_wechat=False):
     if not user:
         return None
     profile = getattr(user, "profile", None)
-    return {
+    payload = {
         "uid": getattr(profile, "uid", None),
-        "name": collaboration_display_name(user),
-        "wechat": getattr(profile, "contact_wechat", "") if include_wechat else "",
-        "wechat_visible": bool(include_wechat and getattr(profile, "contact_wechat", "")),
     }
+    if include_name:
+        payload["name"] = collaboration_display_name(user)
+    if include_wechat:
+        payload["wechat"] = getattr(profile, "contact_wechat", "")
+        payload["wechat_visible"] = bool(getattr(profile, "contact_wechat", ""))
+    return payload
 
 
 def interest_team_role_key(interest):
@@ -3956,7 +4547,11 @@ def project_team_contact_groups(project, include_wechat=False):
 
 def enrich_project_collaboration_payload(payload, project, user):
     include_contacts = bool(getattr(user, "is_authenticated", False))
-    payload["created_by_display"] = collaboration_contact_payload(project.created_by, include_wechat=include_contacts)
+    payload["created_by_display"] = collaboration_contact_payload(
+        project.created_by,
+        include_name=include_contacts,
+        include_wechat=include_contacts,
+    )
     payload["team_contact_groups"] = project_team_contact_groups(project, include_wechat=include_contacts) if include_contacts else []
     return payload
 
@@ -3964,6 +4559,7 @@ def enrich_project_collaboration_payload(payload, project, user):
 def project_list_payload(project, user):
     payload = project_summary_payload(project)
     enrich_project_collaboration_payload(payload, project, user)
+    payload["claim_availability"] = claim_availability_payload(user, project)
     if getattr(user, "is_authenticated", False):
         payload["viewer_state"] = viewer_state(user, project)
     return payload
@@ -4042,16 +4638,16 @@ def reserved_participation_project_ids(user, exclude_project=None):
     return project_ids - charged_project_ids
 
 
-def available_participation_credits(user, exclude_project=None):
-    profile = getattr(user, "profile", None)
+def available_participation_credits(user, exclude_project=None, profile=None):
+    profile = profile or getattr(user, "profile", None)
     if not profile:
         return 0
     reserved = len(reserved_participation_project_ids(user, exclude_project=exclude_project)) * PROJECT_PARTICIPATION_CREDIT_COST
     return profile.credit_balance - reserved
 
 
-def has_required_participation_credits(user, project=None):
-    return available_participation_credits(user, exclude_project=project) >= PROJECT_PARTICIPATION_CREDIT_COST
+def has_required_participation_credits(user, project=None, profile=None):
+    return available_participation_credits(user, exclude_project=project, profile=profile) >= PROJECT_PARTICIPATION_CREDIT_COST
 
 
 def charge_project_participation_credits_once(project, actor):
@@ -4343,6 +4939,26 @@ def write_uploaded_file_with_hash(uploaded, destination):
             hasher.update(chunk)
             output.write(chunk)
     return hasher.hexdigest()
+
+
+def validate_uploaded_pdf(
+    uploaded,
+    *,
+    max_bytes=PDF_DOCUMENT_MAX_BYTES,
+    invalid_name_message="file name is invalid.",
+    invalid_suffix_message="Only PDF files are allowed.",
+    too_large_message="PDF 文件不能超过 20MB。",
+):
+    file_name = sanitize_file_name(uploaded.name)
+    if not file_name:
+        return "", fail(invalid_name_message, status=422, code="validation_error")
+    if Path(file_name).suffix.lower() != ".pdf":
+        return "", fail(invalid_suffix_message, status=422, code="validation_error")
+    if getattr(uploaded, "size", 0) > max_bytes:
+        return "", fail(too_large_message, status=422, code="validation_error")
+    if not uploaded_file_has_pdf_signature(uploaded):
+        return "", fail("PDF 文件格式无法识别。", status=422, code="validation_error")
+    return file_name, None
 
 
 def uploaded_file_has_pdf_signature(uploaded):

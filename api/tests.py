@@ -1,17 +1,19 @@
 import json
 import importlib.util
 import io
+import threading
 import tempfile
 import zipfile
 from datetime import timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.conf import settings
-from django.test import Client, TestCase, override_settings
+from django.db import OperationalError, close_old_connections
+from django.test import Client, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import PLATFORM_ADMIN_UID, RoleType
@@ -56,6 +58,10 @@ class ApiTests(TestCase):
         admin = User.objects.get(username="platform_admin")
         self.client.force_login(admin)
         return admin
+
+    def oversized_pdf_upload(self, name="oversized.pdf"):
+        payload = b"%PDF-" + (b"0" * (20 * 1024 * 1024 - 4))
+        return SimpleUploadedFile(name, payload, content_type="application/pdf")
 
     def test_project_list_and_detail_api(self):
         ProjectDocument.objects.create(
@@ -302,6 +308,9 @@ class ApiTests(TestCase):
         self.assertIn("学生", viewer["interest_roles"])
         self.assertIn("leader", viewer["claim_types"])
         self.assertIn("compute", viewer["sponsor_types"])
+        self.assertEqual(len(viewer["sponsor_requests"]), 1)
+        self.assertEqual(viewer["sponsor_requests"][0]["sponsor_type"], "compute")
+        self.assertEqual(viewer["sponsor_requests"][0]["status"], InteractionStatus.PENDING)
 
         claim.status = InteractionStatus.WITHDRAWN
         claim.save(update_fields=["status", "updated_at"])
@@ -311,38 +320,160 @@ class ApiTests(TestCase):
         withdrawn_viewer = withdrawn_response.json()["data"]["results"][0]["viewer_state"]
         self.assertNotIn("leader", withdrawn_viewer["claim_types"])
 
-    def test_project_list_sorts_by_topic_id_by_default_and_newest_number(self):
+    def test_project_progress_viewer_state_includes_active_sponsor_request_details(self):
+        user = User.objects.create_user(username="progresssponsor", email="progresssponsor@example.com", password="StrongPass12345")
+        active_token = SponsorIntent.objects.create(
+            user=user,
+            project=self.project,
+            sponsor_type="token",
+            status=InteractionStatus.APPROVED,
+        )
+        SponsorIntent.objects.create(
+            user=user,
+            project=self.project,
+            sponsor_type="compute",
+            status=InteractionStatus.WITHDRAWN,
+        )
+        self.client.force_login(user)
+
+        response = self.client.get(f"/api/projects/{self.project.pk}/progress/")
+
+        self.assertEqual(response.status_code, 200)
+        viewer = response.json()["data"]["project"]["viewer_state"]
+        self.assertIn("token", viewer["sponsor_types"])
+        self.assertNotIn("compute", viewer["sponsor_types"])
+        self.assertEqual(len(viewer["sponsor_requests"]), 1)
+        self.assertEqual(viewer["sponsor_requests"][0]["id"], active_token.pk)
+        self.assertEqual(viewer["sponsor_requests"][0]["sponsor_type"], "token")
+        self.assertEqual(viewer["sponsor_requests"][0]["status"], InteractionStatus.APPROVED)
+
+    def test_anonymous_project_payload_uses_uid_only_for_creator(self):
+        creator = User.objects.create_user(
+            username="privacycreator",
+            email="privacycreator@example.com",
+            password="StrongPass12345",
+        )
+        creator.profile.display_name = "真实昵称"
+        creator.profile.real_name = "真实姓名"
+        creator.profile.contact_wechat = "wechat-secret"
+        creator.profile.save(update_fields=["display_name", "real_name", "contact_wechat", "updated_at"])
+        self.project.created_by = creator
+        self.project.save(update_fields=["created_by", "updated_at"])
+
+        response = self.client.get("/api/projects/?page_size=1")
+
+        self.assertEqual(response.status_code, 200)
+        project = response.json()["data"]["results"][0]
+        payload = json.dumps(project, ensure_ascii=False)
+        self.assertIn(creator.profile.uid, payload)
+        self.assertNotIn("真实昵称", payload)
+        self.assertNotIn("真实姓名", payload)
+        self.assertNotIn("privacycreator", payload)
+        self.assertNotIn("wechat-secret", payload)
+        creator_payload = project["created_by_display"]
+        self.assertEqual(creator_payload["uid"], creator.profile.uid)
+        self.assertNotIn("name", creator_payload)
+        self.assertNotIn("wechat", creator_payload)
+
+    def test_anonymous_status_card_project_uses_uid_only_for_creator(self):
+        creator = User.objects.create_user(
+            username="statusprivacycreator",
+            email="statusprivacycreator@example.com",
+            password="StrongPass12345",
+        )
+        creator.profile.display_name = "状态卡昵称"
+        creator.profile.contact_wechat = "status-wechat-secret"
+        creator.profile.save(update_fields=["display_name", "contact_wechat", "updated_at"])
+        self.project.created_by = creator
+        self.project.save(update_fields=["created_by", "updated_at"])
+
+        response = self.client.get(f"/api/projects/{self.project.pk}/status-card/")
+
+        self.assertEqual(response.status_code, 200)
+        project = response.json()["data"]["project"]
+        payload = json.dumps(project, ensure_ascii=False)
+        self.assertIn(creator.profile.uid, payload)
+        self.assertNotIn("状态卡昵称", payload)
+        self.assertNotIn("statusprivacycreator", payload)
+        self.assertNotIn("status-wechat-secret", payload)
+        self.assertEqual(project["created_by_display"]["uid"], creator.profile.uid)
+        self.assertNotIn("name", project["created_by_display"])
+        self.assertNotIn("wechat", project["created_by_display"])
+
+    def test_project_list_default_sort_prioritizes_self_relation_then_engagement(self):
         popular_user = User.objects.create_user(username="popularsort", email="popularsort@example.com", password="StrongPass12345")
-        Project.objects.create(
+        third = Project.objects.create(
             topic_id=3,
             title="第三个公开课题",
-            summary="默认排序不应被热度影响。",
+            summary="默认排序应考虑热度。",
             theme=self.theme,
             stage=ProjectStage.OPEN_RECRUITING,
             is_public=True,
         )
-        Project.objects.create(
+        second = Project.objects.create(
             topic_id=2,
             title="第二个公开课题",
-            summary="默认排序按编号。",
+            summary="登录后本人相关课题应优先。",
             theme=self.theme,
             stage=ProjectStage.OPEN_RECRUITING,
             is_public=True,
         )
-        ProjectFollow.objects.create(user=popular_user, project=Project.objects.get(topic_id=3))
+        ProjectFollow.objects.create(user=popular_user, project=third)
         self.project.title = "最近更新但编号最小"
         self.project.save(update_fields=["title", "updated_at"])
 
         default_response = self.client.get("/api/projects/?page_size=10")
+        project_id_response = self.client.get("/api/projects/?sort=project_id&page_size=10")
         newest_response = self.client.get("/api/projects/?sort=newest&page_size=10")
         updated_response = self.client.get("/api/projects/?sort=updated&page_size=10")
 
         self.assertEqual(default_response.status_code, 200)
+        self.assertEqual(project_id_response.status_code, 200)
         self.assertEqual(newest_response.status_code, 200)
         self.assertEqual(updated_response.status_code, 200)
-        self.assertEqual([row["topic_id"] for row in default_response.json()["data"]["results"][:3]], [1, 2, 3])
+        self.assertEqual([row["topic_id"] for row in default_response.json()["data"]["results"][:3]], [3, 1, 2])
+        self.assertEqual([row["topic_id"] for row in project_id_response.json()["data"]["results"][:3]], [1, 2, 3])
         self.assertEqual([row["topic_id"] for row in newest_response.json()["data"]["results"][:3]], [3, 2, 1])
         self.assertEqual(updated_response.json()["data"]["results"][0]["topic_id"], 1)
+
+        related_user = User.objects.create_user(username="relatedsort", email="relatedsort@example.com", password="StrongPass12345")
+        ProjectInterest.objects.create(user=related_user, project=second, role="学生", status=InteractionStatus.APPROVED)
+        self.client.force_login(related_user)
+        related_response = self.client.get("/api/projects/?page_size=10")
+
+        self.assertEqual(related_response.status_code, 200)
+        self.assertEqual([row["topic_id"] for row in related_response.json()["data"]["results"][:3]], [2, 3, 1])
+
+    def test_project_list_likes_sort_happens_before_pagination(self):
+        low_like = Project.objects.create(
+            topic_id=9911,
+            title="低赞",
+            summary="低赞",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        high_like = Project.objects.create(
+            topic_id=9912,
+            title="高赞",
+            summary="高赞",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        ProjectScore.objects.create(
+            user=User.objects.create_user(username="lowlikeuser", email="lowlikeuser@example.com", password="StrongPass12345"),
+            project=low_like,
+            score=10,
+        )
+        for idx in range(3):
+            user = User.objects.create_user(username=f"liker{idx}", email=f"liker{idx}@example.com", password="StrongPass12345")
+            ProjectScore.objects.create(user=user, project=high_like, score=10)
+
+        response = self.client.get("/api/projects/?sort=likes&page_size=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["results"][0]["id"], high_like.id)
 
     def test_recruiting_and_follow_stage_rules(self):
         user = User.objects.create_user(username="stageuser", email="stageuser@example.com", password="StrongPass12345")
@@ -389,6 +520,21 @@ class ApiTests(TestCase):
         self.assertEqual(status["roles"]["医生"], 0)
         self.assertEqual(status["roles"]["学生"], 1)
         self.assertEqual(status["sponsor_count"], 0)
+
+    def test_project_sponsor_count_only_counts_approved_intents(self):
+        pending = User.objects.create_user(username="pendingfund", email="pendingfund@example.com", password="StrongPass12345")
+        approved = User.objects.create_user(username="approvedfund", email="approvedfund@example.com", password="StrongPass12345")
+        rejected = User.objects.create_user(username="rejectedfund", email="rejectedfund@example.com", password="StrongPass12345")
+        SponsorIntent.objects.create(user=pending, project=self.project, sponsor_type="compute", status=InteractionStatus.PENDING)
+        SponsorIntent.objects.create(user=approved, project=self.project, sponsor_type="labor_fee", status=InteractionStatus.APPROVED)
+        SponsorIntent.objects.create(user=rejected, project=self.project, sponsor_type="token", status=InteractionStatus.REJECTED)
+
+        response = self.client.get("/api/projects/?page_size=1")
+
+        self.assertEqual(response.status_code, 200)
+        project = response.json()["data"]["results"][0]
+        self.assertEqual(project["sponsor_count"], 1)
+        self.assertEqual(project["team_status"]["sponsor_count"], 1)
 
     def test_team_status_counts_other_interest_as_visible_student_fallback(self):
         user = User.objects.create_user(username="otherparticipant", email="otherparticipant@example.com", password="StrongPass12345")
@@ -575,6 +721,37 @@ class ApiTests(TestCase):
             public_file = public_response.json()["data"]["sections"][0]["files"][0]
             self.assertEqual(public_file["detail_pdf_title"], "数据集特点说明")
             self.assertEqual(public_file["detail_pdf_path"], payload["detail_pdf_path"])
+
+    def test_theme_detail_pdf_rejects_fake_pdf_and_writes_failed_audit(self):
+        admin = self.login_platform_admin()
+        dataset = ThemeFile.objects.create(
+            theme=self.theme,
+            section="数据集说明文件",
+            file_type=ThemeFile.FileType.DATASET_META,
+            title="抗 VEGF 脱敏随访数据说明",
+            path="dataset-descriptions/antivegf-followup",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir), MEDIA_URL="/media/"):
+            response = self.client.post(
+                f"/api/admin/theme-files/{dataset.pk}/detail-pdf/",
+                {
+                    "title": "假 PDF",
+                    "file": SimpleUploadedFile("fake.pdf", b"not a pdf", content_type="application/pdf"),
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["message"], "PDF 文件格式无法识别。")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="theme_file.detail_pdf_upload",
+                target_type="ThemeFile",
+                target_id=str(dataset.pk),
+                status="failed",
+                error_code="validation_error",
+            ).exists()
+        )
 
     def test_admin_theme_dataset_description_uses_generated_path(self):
         self.login_platform_admin()
@@ -1041,6 +1218,42 @@ class ApiTests(TestCase):
             self.assertEqual(locked_response.status_code, 422)
             self.assertEqual(locked_response.json()["error"]["code"], "user_project_stage_locked")
 
+    def test_user_project_detail_pdf_rejects_fake_pdf_and_writes_failed_audit(self):
+        owner = User.objects.create_user(username="fake_pdf_owner", email="fake-pdf-owner@example.com", password="StrongPass12345")
+        project = Project.objects.create(
+            topic_id=18,
+            title="用户假 PDF 课题",
+            summary="普通用户上传假 PDF 应被拒绝。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+            created_by=owner,
+        )
+        self.client.force_login(owner)
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir), MEDIA_URL="media/"):
+            response = self.client.post(
+                "/api/project-documents/upload/",
+                {
+                    "project_id": project.pk,
+                    "document_kind": "detail",
+                    "title": "假 PDF",
+                    "files": SimpleUploadedFile("fake.pdf", b"not a pdf", content_type="application/pdf"),
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["message"], "PDF 文件格式无法识别。")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=owner,
+                action="project_document.user_upload",
+                target_type="Project",
+                target_id=str(project.pk),
+                status="failed",
+                error_code="validation_error",
+            ).exists()
+        )
+
     def test_request_id_is_bounded_in_errors_and_audit_logs(self):
         owner = User.objects.create_user(username="request_owner", email="request-owner@example.com", password="StrongPass12345")
         self.client.force_login(owner)
@@ -1455,6 +1668,32 @@ class ApiTests(TestCase):
                 "替换后的主文档",
             )
 
+    def test_admin_project_detail_pdf_rejects_fake_pdf_and_writes_failed_audit(self):
+        admin = self.login_platform_admin()
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir), MEDIA_URL="media/"):
+            response = self.client.post(
+                "/api/admin/project-documents/upload/",
+                {
+                    "project_id": self.project.pk,
+                    "document_kind": "detail",
+                    "title": "假主文档",
+                    "files": SimpleUploadedFile("fake.pdf", b"not a pdf", content_type="application/pdf"),
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["message"], "PDF 文件格式无法识别。")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="project_document.upload",
+                target_type="Project",
+                target_id=str(self.project.pk),
+                status="failed",
+                error_code="validation_error",
+            ).exists()
+        )
+
     def test_team_status_marks_required_roles_as_missing_ready_or_overfilled(self):
         doctor = User.objects.create_user(username="doctor1", password="StrongPass12345")
         doctor.profile.role_type = RoleType.DOCTOR
@@ -1562,6 +1801,157 @@ class ApiTests(TestCase):
             self.project.save(update_fields=["stage", "updated_at"])
             archived_response = self.client.get(f"/api/projects/{self.project.pk}/progress/")
             self.assertEqual(archived_response.status_code, 404)
+
+    def test_admin_project_progress_pdf_rejects_fake_pdf_and_writes_failed_audit(self):
+        admin = self.login_platform_admin()
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir), MEDIA_URL="media/"):
+            response = self.client.post(
+                "/api/admin/project-documents/upload/",
+                {
+                    "project_id": self.project.pk,
+                    "document_kind": "progress",
+                    "title": "假进度文档",
+                    "files": SimpleUploadedFile("fake.pdf", b"not a pdf", content_type="application/pdf"),
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["message"], "PDF 文件格式无法识别。")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="project_document.upload",
+                target_type="Project",
+                target_id=str(self.project.pk),
+                status="failed",
+                error_code="validation_error",
+            ).exists()
+        )
+
+    def test_pdf_uploads_reject_oversized_files_and_write_failed_audit(self):
+        admin = self.login_platform_admin()
+        dataset = ThemeFile.objects.create(
+            theme=self.theme,
+            section="数据集说明文件",
+            file_type=ThemeFile.FileType.DATASET_META,
+            title="超限数据集说明",
+            path="dataset-descriptions/oversized",
+        )
+        owner = User.objects.create_user(username="oversized_pdf_owner", email="oversized-pdf-owner@example.com", password="StrongPass12345")
+        owned_project = Project.objects.create(
+            topic_id=1801,
+            title="超限用户 PDF 课题",
+            summary="普通用户上传超限 PDF 应被拒绝。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+            created_by=owner,
+        )
+        contributor = User.objects.create_user(username="oversized_result_user", email="oversized-result@example.com", password="StrongPass12345")
+        ProjectInterest.objects.create(
+            user=contributor,
+            project=self.project,
+            role="学生",
+            available_hours_per_week=4,
+            status=InteractionStatus.APPROVED,
+        )
+        self.project.stage = ProjectStage.ACTIVE
+        self.project.save(update_fields=["stage", "updated_at"])
+
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir) / "media", MEDIA_URL="media/"):
+            theme_response = self.client.post(
+                f"/api/admin/theme-files/{dataset.pk}/detail-pdf/",
+                {"title": "超限 PDF", "file": self.oversized_pdf_upload("theme-large.pdf")},
+            )
+            admin_detail_response = self.client.post(
+                "/api/admin/project-documents/upload/",
+                {
+                    "project_id": self.project.pk,
+                    "document_kind": "detail",
+                    "title": "超限主文档",
+                    "files": self.oversized_pdf_upload("admin-detail-large.pdf"),
+                },
+            )
+            admin_progress_response = self.client.post(
+                "/api/admin/project-documents/upload/",
+                {
+                    "project_id": self.project.pk,
+                    "document_kind": "progress",
+                    "title": "超限进度文档",
+                    "files": self.oversized_pdf_upload("admin-progress-large.pdf"),
+                },
+            )
+
+            self.client.force_login(owner)
+            user_detail_response = self.client.post(
+                "/api/project-documents/upload/",
+                {
+                    "project_id": owned_project.pk,
+                    "document_kind": "detail",
+                    "title": "超限用户主文档",
+                    "files": self.oversized_pdf_upload("user-detail-large.pdf"),
+                },
+            )
+
+            self.client.force_login(contributor)
+            contribution_response = self.client.post(
+                "/api/me/contributions/upload/",
+                {
+                    "project_id": str(self.project.pk),
+                    "title": "超限任务结果",
+                    "result_type": "stage",
+                    "file": self.oversized_pdf_upload("result-large.pdf"),
+                },
+            )
+
+        for response in [theme_response, admin_detail_response, admin_progress_response, user_detail_response]:
+            self.assertEqual(response.status_code, 422)
+            self.assertEqual(response.json()["error"]["code"], "validation_error")
+            self.assertEqual(response.json()["error"]["message"], "PDF 文件不能超过 20MB。")
+        self.assertEqual(contribution_response.status_code, 422)
+        self.assertEqual(contribution_response.json()["error"]["code"], "validation_error")
+        self.assertEqual(contribution_response.json()["error"]["message"], "任务结果文档不能超过 20MB。")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="theme_file.detail_pdf_upload",
+                target_type="ThemeFile",
+                target_id=str(dataset.pk),
+                status="failed",
+                error_code="validation_error",
+            ).exists()
+        )
+        self.assertGreaterEqual(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="project_document.upload",
+                target_type="Project",
+                target_id=str(self.project.pk),
+                status="failed",
+                error_code="validation_error",
+            ).count(),
+            2,
+        )
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=owner,
+                action="project_document.user_upload",
+                target_type="Project",
+                target_id=str(owned_project.pk),
+                status="failed",
+                error_code="validation_error",
+            ).exists()
+        )
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=contributor,
+                action="contribution.submit",
+                target_type="Project",
+                target_id=str(self.project.pk),
+                status="failed",
+                error_code="validation_error",
+            ).exists()
+        )
 
     def test_project_discussion_lifecycle_permissions_and_privacy(self):
         author = User.objects.create_user(username="discussion_author", password="StrongPass12345")
@@ -1817,7 +2207,21 @@ class ApiTests(TestCase):
                 detail_pdf_hash="old-dataset-hash",
                 is_active=True,
             )
-            self.login_platform_admin()
+            admin = self.login_platform_admin()
+            participant = User.objects.create_user(username="backup_relation_user", email="backup-relation@example.com", password="StrongPass12345")
+            interest = ProjectInterest.objects.create(user=participant, project=self.project, role="学生", status=InteractionStatus.APPROVED)
+            sponsor = SponsorIntent.objects.create(user=participant, project=self.project, sponsor_type="compute", status=InteractionStatus.APPROVED)
+            contribution = Contribution.objects.create(user=participant, project=self.project, title="备份外任务结果", result_type=Contribution.ResultType.STAGE)
+            ledger = CreditLedger.objects.create(
+                user=participant,
+                project=self.project,
+                action_type=CreditLedger.ActionType.ADMIN_ADJUST,
+                amount=1,
+                balance_after=101,
+                created_by=admin,
+            )
+            user_count = User.objects.count()
+            audit_before = AuditLog.objects.count()
 
             export_response = self.client.get("/api/admin/content-backup/export/")
 
@@ -1863,6 +2267,14 @@ class ApiTests(TestCase):
             self.assertEqual(ThemeFile.objects.get(theme=self.theme).detail_pdf_title, "数据集说明 PDF")
             self.assertTrue(project_pdf.exists())
             self.assertTrue(dataset_pdf.exists())
+            self.assertEqual(User.objects.count(), user_count)
+            self.assertTrue(ProjectInterest.objects.filter(pk=interest.pk).exists())
+            self.assertTrue(SponsorIntent.objects.filter(pk=sponsor.pk).exists())
+            self.assertTrue(Contribution.objects.filter(pk=contribution.pk).exists())
+            self.assertTrue(CreditLedger.objects.filter(pk=ledger.pk).exists())
+            self.assertGreater(AuditLog.objects.count(), audit_before)
+            self.assertTrue(AuditLog.objects.filter(actor=admin, action="content_backup.export", status="success").exists())
+            self.assertTrue(AuditLog.objects.filter(actor=admin, action="content_backup.restore", status="success").exists())
 
     def test_regular_user_cannot_manage_content(self):
         user = User.objects.create_user(username="normaluser", password="StrongPass12345")
@@ -1872,6 +2284,16 @@ class ApiTests(TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "permission_denied")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=user,
+                action="permission.denied",
+                target_type="Capability",
+                target_id="manage_themes",
+                status="failed",
+                error_code="permission_denied",
+            ).exists()
+        )
 
     def test_project_status_card_exposes_uid_and_contact_groups_for_authenticated_viewer(self):
         student = User.objects.create_user(username="studentuid", email="studentuid@example.com", password="StrongPass12345")
@@ -1962,6 +2384,32 @@ class ApiTests(TestCase):
         follow_group = next(group for group in follower_payload["uid_groups"]["groups"] if group["key"] == "follow")
         self.assertEqual(follow_group["uids"], sorted([student.profile.uid, follower.profile.uid]))
 
+    def test_status_card_structured_sponsor_groups_filter_approved_for_admin_task(self):
+        pending = User.objects.create_user(username="pendingtaskfund", email="pendingtaskfund@example.com", password="StrongPass12345")
+        approved = User.objects.create_user(username="approvedtaskfund", email="approvedtaskfund@example.com", password="StrongPass12345")
+        rejected = User.objects.create_user(username="rejectedtaskfund", email="rejectedtaskfund@example.com", password="StrongPass12345")
+        SponsorIntent.objects.create(user=pending, project=self.project, sponsor_type="compute", status=InteractionStatus.PENDING)
+        SponsorIntent.objects.create(user=approved, project=self.project, sponsor_type="labor_fee", status=InteractionStatus.APPROVED)
+        SponsorIntent.objects.create(user=rejected, project=self.project, sponsor_type="token", status=InteractionStatus.REJECTED)
+
+        self.client.force_login(approved)
+        response = self.client.get(f"/api/projects/{self.project.pk}/status-card/")
+
+        self.assertEqual(response.status_code, 200)
+        groups = response.json()["data"]["uid_groups"]["groups"]
+        sponsor_groups = [group for group in groups if group["type"] == "sponsor"]
+        self.assertTrue(sponsor_groups)
+        for group in sponsor_groups:
+            self.assertIn("status", group)
+            self.assertIn("status_label", group)
+            self.assertIn("subtype", group)
+            self.assertIn("subtype_label", group)
+        approved_groups = [group for group in sponsor_groups if group["status"] == InteractionStatus.APPROVED]
+        self.assertEqual(len(approved_groups), 1)
+        self.assertEqual(approved_groups[0]["subtype"], "labor_fee")
+        self.assertEqual(approved_groups[0]["uids"], [approved.profile.uid])
+        self.assertFalse(any(group["status"] == InteractionStatus.PENDING and group.get("label") == "已获批资助" for group in sponsor_groups))
+
     def test_interest_auto_approves_and_admin_reviews_claims_and_sponsors(self):
         applicant = User.objects.create_user(username="applicant", email="applicant@example.com", password="StrongPass12345")
         self.client.force_login(applicant)
@@ -2035,6 +2483,33 @@ class ApiTests(TestCase):
         )
         self.assertEqual(invalid_review_response.status_code, 422)
         self.assertEqual(invalid_review_response.json()["error"]["code"], "invalid_interaction_type")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="interaction.review",
+                target_type="Interaction",
+                target_id=str(interest.pk),
+                status="failed",
+                error_code="invalid_interaction_type",
+            ).exists()
+        )
+
+        invalid_status_response = self.patch_json(
+            f"/api/admin/interactions/sponsor/{sponsor.pk}/status/",
+            {"status": "pending", "review_note": "非法状态"},
+        )
+        self.assertEqual(invalid_status_response.status_code, 422)
+        self.assertEqual(invalid_status_response.json()["error"]["code"], "validation_error")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="interaction.review",
+                target_type="SponsorIntent",
+                target_id=str(sponsor.pk),
+                status="failed",
+                error_code="validation_error",
+            ).exists()
+        )
 
         claim_review_response = self.patch_json(
             f"/api/admin/interactions/claim/{claim.pk}/status/",
@@ -2055,7 +2530,14 @@ class ApiTests(TestCase):
         sponsor.refresh_from_db()
         self.project.refresh_from_db()
         self.assertEqual(sponsor.status, InteractionStatus.APPROVED)
+        self.assertEqual(sponsor.review_comment, "资助已确认")
+        self.assertEqual(sponsor.reviewed_by, admin)
+        self.assertIsNotNone(sponsor.reviewed_at)
         self.assertEqual(self.project.stage, ProjectStage.TEAM_BUILDING)
+        response_payload = review_response.json()["data"]
+        self.assertEqual(response_payload["review_comment"], "资助已确认")
+        self.assertEqual(response_payload["reviewed_by"]["uid"], admin.profile.uid)
+        self.assertEqual(response_payload["detail"]["review_comment"], "资助已确认")
         self.assertTrue(
             AuditLog.objects.filter(
                 actor=admin,
@@ -2077,6 +2559,16 @@ class ApiTests(TestCase):
         rereview_response = self.patch_json(f"/api/admin/interactions/sponsor/{sponsor.pk}/status/", {"status": "rejected"})
         self.assertEqual(rereview_response.status_code, 422)
         self.assertEqual(rereview_response.json()["error"]["code"], "interaction_not_pending")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="interaction.review",
+                target_type="SponsorIntent",
+                target_id=str(sponsor.pk),
+                status="failed",
+                error_code="interaction_not_pending",
+            ).exists()
+        )
         audit_response = self.client.get("/api/admin/audit-logs/?action=interaction.review")
         self.assertEqual(audit_response.status_code, 200)
         audit_entry = audit_response.json()["data"]["results"][0]
@@ -2084,6 +2576,582 @@ class ApiTests(TestCase):
         self.assertIn(applicant.profile.uid, audit_entry["summary"])
         self.assertIn("已通过", audit_entry["summary"])
         self.assertNotIn('{"id"', audit_entry["summary"])
+
+    def test_sponsor_review_note_is_persisted_and_visible_to_applicant(self):
+        sponsor_user = User.objects.create_user(username="sponsorreview", email="sponsorreview@example.com", password="StrongPass12345")
+        intent = SponsorIntent.objects.create(user=sponsor_user, project=self.project, sponsor_type="compute", status=InteractionStatus.PENDING)
+        admin = self.login_platform_admin()
+
+        response = self.patch_json(
+            f"/api/admin/interactions/sponsor/{intent.pk}/status/",
+            {"status": "rejected", "review_note": "算力额度信息不足"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        intent.refresh_from_db()
+        self.assertEqual(intent.review_comment, "算力额度信息不足")
+        self.assertEqual(intent.reviewed_by, admin)
+        self.assertIsNotNone(intent.reviewed_at)
+        self.assertEqual(response.json()["data"]["review_comment"], "算力额度信息不足")
+        self.assertEqual(response.json()["data"]["reviewed_by"]["uid"], admin.profile.uid)
+
+        list_response = self.client.get("/api/admin/interactions/?type=sponsor")
+        self.assertEqual(list_response.status_code, 200)
+        admin_row = next(item for item in list_response.json()["data"]["results"] if item["id"] == intent.pk)
+        self.assertEqual(admin_row["review_comment"], "算力额度信息不足")
+        self.assertEqual(admin_row["reviewed_by"]["uid"], admin.profile.uid)
+        self.assertEqual(admin_row["detail"]["review_comment"], "算力额度信息不足")
+
+        self.client.force_login(sponsor_user)
+        dashboard = self.client.get("/api/me/dashboard/").json()["data"]
+        row = next(item for item in dashboard["sponsors"] if item["id"] == intent.pk)
+        self.assertEqual(row["review_comment"], "算力额度信息不足")
+        self.assertEqual(row["reviewed_by"]["uid"], admin.profile.uid)
+
+    def test_admin_review_requires_reject_note_and_keeps_application_contract(self):
+        claim_user = User.objects.create_user(username="rejectclaim", email="rejectclaim@example.com", password="StrongPass12345")
+        sponsor_user = User.objects.create_user(username="rejectsponsor", email="rejectsponsor@example.com", password="StrongPass12345")
+        claim = ProjectClaimIntent.objects.create(user=claim_user, project=self.project, claim_type="leader", status=InteractionStatus.PENDING)
+        sponsor = SponsorIntent.objects.create(user=sponsor_user, project=self.project, sponsor_type="labor_fee", status=InteractionStatus.PENDING)
+        admin = self.login_platform_admin()
+
+        for kind, item in (("claim", claim), ("sponsor", sponsor)):
+            response = self.patch_json(
+                f"/api/admin/interactions/{kind}/{item.pk}/status/",
+                {"status": "rejected", "review_note": "  "},
+            )
+            self.assertEqual(response.status_code, 422)
+            payload = response.json()
+            self.assertEqual(payload["error"]["code"], "review_note_required")
+            self.assertEqual(payload["error"]["details"]["review_note"][0], "拒绝申请时必须填写审核意见。")
+            self.assertEqual(payload["errors"]["review_note"][0], "拒绝申请时必须填写审核意见。")
+            item.refresh_from_db()
+            self.assertEqual(item.status, InteractionStatus.PENDING)
+            self.assertEqual(item.review_comment, "")
+            self.assertIsNone(item.reviewed_by)
+            self.assertIsNone(item.reviewed_at)
+            self.assertTrue(
+                AuditLog.objects.filter(
+                    actor=admin,
+                    action="interaction.review",
+                    target_type=item.__class__.__name__,
+                    target_id=str(item.pk),
+                    status="failed",
+                    error_code="review_note_required",
+                ).exists()
+            )
+
+        list_response = self.client.get("/api/admin/interactions/?status=pending")
+        self.assertEqual(list_response.status_code, 200)
+        rows = list_response.json()["data"]["results"]
+        claim_row = next(row for row in rows if row["type"] == "claim" and row["id"] == claim.pk)
+        sponsor_row = next(row for row in rows if row["type"] == "sponsor" and row["id"] == sponsor.pk)
+        self.assertEqual(claim_row["detail"]["claimed_unit_name"], "")
+        self.assertIn("review_comment", claim_row["detail"])
+        self.assertIn("reviewed_by", claim_row["detail"])
+        self.assertIn("reviewed_at", claim_row["detail"])
+        self.assertEqual(sponsor_row["detail"]["sponsor_type"], "labor_fee")
+        self.assertEqual(sponsor_row["detail"]["sponsor_type_label"], "资助劳务费")
+        self.assertIn("review_comment", sponsor_row["detail"])
+        self.assertIn("reviewed_by", sponsor_row["detail"])
+        self.assertIn("reviewed_at", sponsor_row["detail"])
+        self.assertIn("created_at", sponsor_row)
+        self.assertIn("updated_at", sponsor_row)
+
+    def test_admin_interaction_list_prioritizes_pending_by_oldest_created_at(self):
+        first_user = User.objects.create_user(username="oldpending", email="oldpending@example.com", password="StrongPass12345")
+        second_user = User.objects.create_user(username="newpending", email="newpending@example.com", password="StrongPass12345")
+        processed_user = User.objects.create_user(username="processedclaim", email="processedclaim@example.com", password="StrongPass12345")
+        older_pending = SponsorIntent.objects.create(user=first_user, project=self.project, sponsor_type="compute", status=InteractionStatus.PENDING)
+        newer_pending = ProjectClaimIntent.objects.create(user=second_user, project=self.project, claim_type="leader", status=InteractionStatus.PENDING)
+        processed = SponsorIntent.objects.create(user=processed_user, project=self.project, sponsor_type="labor_fee", status=InteractionStatus.APPROVED)
+        SponsorIntent.objects.filter(pk=older_pending.pk).update(created_at=timezone.now() - timedelta(days=2))
+        ProjectClaimIntent.objects.filter(pk=newer_pending.pk).update(created_at=timezone.now() - timedelta(days=1))
+        SponsorIntent.objects.filter(pk=processed.pk).update(updated_at=timezone.now())
+
+        self.login_platform_admin()
+        response = self.client.get("/api/admin/interactions/?page_size=10")
+
+        self.assertEqual(response.status_code, 200)
+        rows = response.json()["data"]["results"]
+        positions = {(row["type"], row["id"]): index for index, row in enumerate(rows)}
+        self.assertLess(positions[("sponsor", older_pending.pk)], positions[("claim", newer_pending.pk)])
+        self.assertLess(positions[("claim", newer_pending.pk)], positions[("sponsor", processed.pk)])
+
+    def test_admin_interaction_list_does_not_truncate_old_pending_before_processed_rows(self):
+        pending_user = User.objects.create_user(username="oldpendingsponsor", email="old-pending-sponsor@example.com", password="StrongPass12345")
+        processed_user = User.objects.create_user(username="manyprocessed", email="many-processed@example.com", password="StrongPass12345")
+        old_pending = SponsorIntent.objects.create(
+            user=pending_user,
+            project=self.project,
+            sponsor_type="compute",
+            status=InteractionStatus.PENDING,
+        )
+        old_time = timezone.now() - timedelta(days=30)
+        SponsorIntent.objects.filter(pk=old_pending.pk).update(created_at=old_time, updated_at=old_time)
+        bulk_projects = [
+            Project(
+                topic_id=910000 + index,
+                title=f"大量已处理资助课题 {index}",
+                summary="用于验证申请审批列表排序截断。",
+                theme=self.theme,
+                stage=ProjectStage.OPEN_RECRUITING,
+                is_public=True,
+                created_by=self.project.created_by,
+            )
+            for index in range(501)
+        ]
+        Project.objects.bulk_create(bulk_projects)
+        created_projects = list(Project.objects.filter(topic_id__gte=910000, topic_id__lt=910501).order_by("topic_id"))
+        SponsorIntent.objects.bulk_create([
+            SponsorIntent(
+                user=processed_user,
+                project=project,
+                sponsor_type="compute",
+                status=InteractionStatus.APPROVED,
+            )
+            for project in created_projects
+        ])
+        SponsorIntent.objects.filter(project__in=created_projects).update(updated_at=timezone.now())
+
+        self.login_platform_admin()
+        response = self.client.get("/api/admin/interactions/?type=sponsor&page_size=1")
+
+        self.assertEqual(response.status_code, 200)
+        rows = response.json()["data"]["results"]
+        self.assertEqual(rows[0]["id"], old_pending.pk)
+        self.assertEqual(rows[0]["status"], InteractionStatus.PENDING)
+
+    def test_resubmitting_approved_sponsor_does_not_reset_status(self):
+        sponsor_user = User.objects.create_user(username="sponsorrepeat", email="sponsorrepeat@example.com", password="StrongPass12345")
+        intent = SponsorIntent.objects.create(user=sponsor_user, project=self.project, sponsor_type="compute", status=InteractionStatus.APPROVED)
+        self.client.force_login(sponsor_user)
+
+        response = self.post_json(
+            f"/api/projects/{self.project.pk}/sponsor/",
+            {"sponsor_type": "compute", "note": "补充说明"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        intent.refresh_from_db()
+        self.assertEqual(intent.status, InteractionStatus.APPROVED)
+        self.assertEqual(intent.note, "补充说明")
+
+    def test_resubmitting_rejected_sponsor_becomes_pending_and_clears_review_fields(self):
+        sponsor_user = User.objects.create_user(username="sponsorrejectedrepeat", email="sponsor-rejected-repeat@example.com", password="StrongPass12345")
+        admin = self.login_platform_admin()
+        intent = SponsorIntent.objects.create(
+            user=sponsor_user,
+            project=self.project,
+            sponsor_type="compute",
+            note="旧说明",
+            status=InteractionStatus.REJECTED,
+            review_comment="额度不足",
+            reviewed_by=admin,
+            reviewed_at=timezone.now(),
+        )
+        self.client.force_login(sponsor_user)
+
+        response = self.post_json(
+            f"/api/projects/{self.project.pk}/sponsor/",
+            {"sponsor_type": "compute", "note": "重新提交算力额度"},
+        )
+
+        self.assertEqual(response.status_code, 201)
+        intent.refresh_from_db()
+        self.assertEqual(intent.status, InteractionStatus.PENDING)
+        self.assertEqual(intent.note, "重新提交算力额度")
+        self.assertEqual(intent.review_comment, "")
+        self.assertIsNone(intent.reviewed_by)
+        self.assertIsNone(intent.reviewed_at)
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=sponsor_user,
+                action="interaction.sponsor_resubmit",
+                target_type="SponsorIntent",
+                target_id=str(intent.pk),
+            ).exists()
+        )
+
+    def test_resubmitting_withdrawn_sponsor_becomes_pending_and_clears_review_fields(self):
+        sponsor_user = User.objects.create_user(username="sponsorwithdrawnrepeat", email="sponsor-withdrawn-repeat@example.com", password="StrongPass12345")
+        admin = self.login_platform_admin()
+        intent = SponsorIntent.objects.create(
+            user=sponsor_user,
+            project=self.project,
+            sponsor_type="labor_fee",
+            note="旧劳务费说明",
+            status=InteractionStatus.WITHDRAWN,
+            review_comment="历史意见",
+            reviewed_by=admin,
+            reviewed_at=timezone.now(),
+        )
+        self.client.force_login(sponsor_user)
+
+        response = self.post_json(
+            f"/api/projects/{self.project.pk}/sponsor/",
+            {"sponsor_type": "labor_fee", "note": "重新提交劳务费"},
+        )
+
+        self.assertEqual(response.status_code, 201)
+        intent.refresh_from_db()
+        self.assertEqual(intent.status, InteractionStatus.PENDING)
+        self.assertEqual(intent.note, "重新提交劳务费")
+        self.assertEqual(intent.review_comment, "")
+        self.assertIsNone(intent.reviewed_by)
+        self.assertIsNone(intent.reviewed_at)
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=sponsor_user,
+                action="interaction.sponsor_resubmit",
+                target_type="SponsorIntent",
+                target_id=str(intent.pk),
+            ).exists()
+        )
+
+    def test_database_lock_retry_retries_locked_operations_until_success(self):
+        from api import ninja_api
+
+        attempts = []
+
+        def operation():
+            attempts.append(len(attempts) + 1)
+            if len(attempts) < 3:
+                raise OperationalError("database is locked")
+            return "ok"
+
+        with patch("api.ninja_api.time.sleep") as sleep_mock, patch("api.ninja_api.close_old_connections") as close_mock:
+            result = ninja_api.run_with_database_lock_retry(operation)
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(attempts, [1, 2, 3])
+        self.assertEqual(close_mock.call_count, 2)
+        self.assertEqual(sleep_mock.call_count, 2)
+
+    def test_sponsor_submit_retries_database_lock_and_succeeds(self):
+        sponsor_user = User.objects.create_user(username="sponsorlockretry", email="sponsor-lock-retry@example.com", password="StrongPass12345")
+        intent = SponsorIntent.objects.create(
+            user=sponsor_user,
+            project=self.project,
+            sponsor_type="compute",
+            note="旧说明",
+            status=InteractionStatus.PENDING,
+        )
+        self.client.force_login(sponsor_user)
+        query_mock = Mock()
+        query_mock.get_or_create.side_effect = [OperationalError("database is locked"), (intent, False)]
+
+        with patch("api.ninja_api.SponsorIntent.objects.select_for_update", return_value=query_mock), patch("api.ninja_api.time.sleep"):
+            response = self.post_json(
+                f"/api/projects/{self.project.pk}/sponsor/",
+                {"sponsor_type": "compute", "note": "锁后成功"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("database is locked", json.dumps(response.json(), ensure_ascii=False).lower())
+        intent.refresh_from_db()
+        self.assertEqual(intent.note, "锁后成功")
+        self.assertEqual(query_mock.get_or_create.call_count, 2)
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=sponsor_user,
+                action="interaction.sponsor_update_note",
+                target_type="SponsorIntent",
+                target_id=str(intent.pk),
+            ).exists()
+        )
+
+    def test_sponsor_submit_database_lock_exhaustion_returns_409_and_failed_audit(self):
+        from api import ninja_api
+
+        sponsor_user = User.objects.create_user(username="sponsorlockexhausted", email="sponsor-lock-exhausted@example.com", password="StrongPass12345")
+        self.client.force_login(sponsor_user)
+        query_mock = Mock()
+        query_mock.get_or_create.side_effect = OperationalError("database is locked")
+
+        with patch("api.ninja_api.SponsorIntent.objects.select_for_update", return_value=query_mock), patch("api.ninja_api.time.sleep"):
+            response = self.post_json(
+                f"/api/projects/{self.project.pk}/sponsor/",
+                {"sponsor_type": "compute", "note": "锁耗尽"},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "database_busy")
+        self.assertNotIn("database is locked", json.dumps(response.json(), ensure_ascii=False).lower())
+        self.assertEqual(query_mock.get_or_create.call_count, ninja_api.DATABASE_LOCK_RETRY_ATTEMPTS)
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=sponsor_user,
+                action="interaction.submit_sponsor",
+                target_type="Project",
+                target_id=str(self.project.pk),
+                status="failed",
+                error_code="database_busy",
+            ).exists()
+        )
+
+    def test_claim_slots_are_unique_and_first_unit_is_structured(self):
+        leader_user = User.objects.create_user(username="leaderclaimant", email="leaderclaimant@example.com", password="StrongPass12345")
+        first_unit_user = User.objects.create_user(username="firstunitclaimant", email="firstunitclaimant@example.com", password="StrongPass12345")
+        next_user = User.objects.create_user(username="nextclaimant", email="nextclaimant@example.com", password="StrongPass12345")
+
+        self.client.force_login(leader_user)
+        leader_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {"claim_type": "leader", "message": "申请担任项目负责人"},
+        )
+        self.assertEqual(leader_response.status_code, 201)
+        leader_claim = ProjectClaimIntent.objects.get(user=leader_user, project=self.project, claim_type="leader")
+        self.assertEqual(leader_claim.status, InteractionStatus.PENDING)
+
+        duplicate_own_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {"claim_type": "leader", "message": "重复申请负责人"},
+        )
+        self.assertEqual(duplicate_own_response.status_code, 422)
+        self.assertEqual(duplicate_own_response.json()["error"]["code"], "claim_already_active")
+
+        self.client.force_login(first_unit_user)
+        occupied_leader_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {"claim_type": "leader", "message": "另一个负责人申请"},
+        )
+        self.assertEqual(occupied_leader_response.status_code, 409)
+        self.assertEqual(occupied_leader_response.json()["error"]["code"], "claim_slot_occupied")
+
+        missing_unit_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {"claim_type": "paper_first_unit", "message": "申请第一单位"},
+        )
+        self.assertEqual(missing_unit_response.status_code, 422)
+        self.assertEqual(missing_unit_response.json()["error"]["code"], "paper_first_unit_required")
+
+        first_unit_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {
+                "claim_type": "paper_first_unit",
+                "claimed_unit_name": "中山大学附属第一医院",
+            },
+        )
+        self.assertEqual(first_unit_response.status_code, 201)
+        first_unit_payload = first_unit_response.json()["data"]
+        self.assertEqual(first_unit_payload["claimed_unit_name"], "中山大学附属第一医院")
+        self.assertIn("中山大学附属第一医院", first_unit_payload["message"])
+
+        self.client.force_login(next_user)
+        occupied_unit_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {
+                "claim_type": "paper_first_unit",
+                "claimed_unit_name": "北京协和医院",
+            },
+        )
+        self.assertEqual(occupied_unit_response.status_code, 409)
+        self.assertEqual(occupied_unit_response.json()["error"]["code"], "claim_slot_occupied")
+
+        admin = self.login_platform_admin()
+        claim_review_response = self.patch_json(
+            f"/api/admin/interactions/claim/{leader_claim.pk}/status/",
+            {"status": "approved", "review_note": "负责人认领通过"},
+        )
+        self.assertEqual(claim_review_response.status_code, 200)
+        leader_claim.refresh_from_db()
+        self.assertEqual(leader_claim.status, InteractionStatus.APPROVED)
+
+        self.client.force_login(leader_user)
+        withdraw_response = self.patch_json(
+            f"/api/me/interactions/claim/{leader_claim.pk}/withdraw/",
+            {"reason": "用户主动撤回项目负责人认领"},
+        )
+        self.assertEqual(withdraw_response.status_code, 200)
+        leader_claim.refresh_from_db()
+        self.assertEqual(leader_claim.status, InteractionStatus.WITHDRAWN)
+
+        self.client.force_login(next_user)
+        released_leader_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {"claim_type": "leader", "message": "释放后申请负责人"},
+        )
+        self.assertEqual(released_leader_response.status_code, 201)
+
+        self.client.force_login(admin)
+        first_unit_claim = ProjectClaimIntent.objects.get(
+            user=first_unit_user,
+            project=self.project,
+            claim_type="paper_first_unit",
+        )
+        list_response = self.client.get("/api/admin/interactions/?status=pending&type=claim")
+        self.assertEqual(list_response.status_code, 200)
+        first_unit_row = next(row for row in list_response.json()["data"]["results"] if row["id"] == first_unit_claim.pk)
+        self.assertEqual(first_unit_row["detail"]["claimed_unit_name"], "中山大学附属第一医院")
+
+        reject_response = self.patch_json(
+            f"/api/admin/interactions/claim/{first_unit_claim.pk}/status/",
+            {"status": "rejected", "review_note": "第一单位信息需重新提交"},
+        )
+        self.assertEqual(reject_response.status_code, 200)
+        first_unit_claim.refresh_from_db()
+        self.assertEqual(first_unit_claim.status, InteractionStatus.REJECTED)
+        self.assertEqual(first_unit_claim.reviewed_by, admin)
+
+        self.client.force_login(next_user)
+        released_unit_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {
+                "claim_type": "paper_first_unit",
+                "claimed_unit_name": "北京协和医院",
+            },
+        )
+        self.assertEqual(released_unit_response.status_code, 201)
+        self.assertEqual(released_unit_response.json()["data"]["claimed_unit_name"], "北京协和医院")
+
+    def test_pending_review_required_claim_cannot_be_withdrawn_by_user(self):
+        user = User.objects.create_user(username="pendingclaimwithdraw", email="pendingclaimwithdraw@example.com", password="StrongPass12345")
+        claim = ProjectClaimIntent.objects.create(
+            user=user,
+            project=self.project,
+            claim_type="leader",
+            status=InteractionStatus.PENDING,
+        )
+        self.client.force_login(user)
+
+        response = self.patch_json(f"/api/me/interactions/claim/{claim.pk}/withdraw/", {"reason": "想撤回"})
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["code"], "claim_pending_cannot_withdraw")
+        claim.refresh_from_db()
+        self.assertEqual(claim.status, InteractionStatus.PENDING)
+        self.assertTrue(
+            AuditLog.objects.filter(
+                action="interaction.withdraw",
+                target_type="ProjectClaimIntent",
+                target_id=str(claim.pk),
+                status="failed",
+                error_code="claim_pending_cannot_withdraw",
+            ).exists()
+        )
+
+    def test_claim_availability_reports_action_and_reason_codes(self):
+        anonymous_response = self.client.get("/api/projects/?page_size=10")
+        self.assertEqual(anonymous_response.status_code, 200)
+        anonymous_project = anonymous_response.json()["data"]["results"][0]
+        self.assertEqual(anonymous_project["claim_availability"]["leader"]["action"], "unavailable")
+        self.assertEqual(anonymous_project["claim_availability"]["leader"]["reason_code"], "login_required")
+
+        claimant = User.objects.create_user(username="availabilityowner", email="availabilityowner@example.com", password="StrongPass12345")
+        ProjectClaimIntent.objects.create(
+            user=claimant,
+            project=self.project,
+            claim_type="leader",
+            status=InteractionStatus.PENDING,
+        )
+        self.client.force_login(claimant)
+        own_response = self.client.get(f"/api/projects/{self.project.pk}/status-card/")
+        self.assertEqual(own_response.status_code, 200)
+        own_availability = own_response.json()["data"]["claim_availability"]["leader"]
+        self.assertEqual(own_availability["action"], "pending")
+        self.assertEqual(own_availability["reason_code"], "own_pending")
+        self.assertEqual(own_availability["own_status"], InteractionStatus.PENDING)
+        self.assertEqual(own_availability["own_interaction_id"], ProjectClaimIntent.objects.get(user=claimant, project=self.project).pk)
+        self.assertIn("项目负责人认领正在管理员审批中", own_availability["reason"])
+
+        ProjectClaimIntent.objects.filter(user=claimant, project=self.project, claim_type="leader").update(
+            status=InteractionStatus.APPROVED,
+        )
+        approved_response = self.client.get(f"/api/projects/{self.project.pk}/status-card/")
+        self.assertEqual(approved_response.status_code, 200)
+        approved_availability = approved_response.json()["data"]["claim_availability"]["leader"]
+        self.assertEqual(approved_availability["action"], "withdraw")
+        self.assertEqual(approved_availability["reason_code"], "own_approved")
+        self.assertEqual(approved_availability["own_status"], InteractionStatus.APPROVED)
+        self.assertIn("可撤回项目负责人认领", approved_availability["reason"])
+
+        ProjectClaimIntent.objects.create(
+            user=claimant,
+            project=self.project,
+            claim_type="paper_first_unit",
+            claimed_unit_name="中山大学附属第一医院",
+            status=InteractionStatus.PENDING,
+        )
+        progress_response = self.client.get(f"/api/projects/{self.project.pk}/progress/")
+        self.assertEqual(progress_response.status_code, 200)
+        progress_project = progress_response.json()["data"]["project"]
+        self.assertEqual(progress_project["claim_availability"]["leader"]["action"], "withdraw")
+        self.assertEqual(progress_project["claim_availability"]["paper_first_unit"]["action"], "pending")
+        self.assertIn("paper_first_unit", progress_project["viewer_state"]["claim_types"])
+
+        other = User.objects.create_user(username="availabilityother", email="availabilityother@example.com", password="StrongPass12345")
+        self.client.force_login(other)
+        occupied_response = self.client.get("/api/projects/?page_size=10")
+        occupied_availability = occupied_response.json()["data"]["results"][0]["claim_availability"]["leader"]
+        self.assertEqual(occupied_availability["action"], "unavailable")
+        self.assertEqual(occupied_availability["reason_code"], "slot_occupied")
+
+        no_credit_project = Project.objects.create(
+            topic_id=2,
+            title="积分不足课题",
+            summary="无占用席位时展示积分不足原因。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        other.profile.credit_balance = 0
+        other.profile.save(update_fields=["credit_balance", "updated_at"])
+        insufficient_response = self.client.get(f"/api/projects/{no_credit_project.pk}/status-card/")
+        self.assertEqual(insufficient_response.status_code, 200)
+        self.assertEqual(
+            insufficient_response.json()["data"]["claim_availability"]["leader"]["reason_code"],
+            "insufficient_credits",
+        )
+
+        no_credit_project.stage = ProjectStage.ACTIVE
+        no_credit_project.save(update_fields=["stage", "updated_at"])
+        stage_response = self.client.get(f"/api/projects/{no_credit_project.pk}/status-card/")
+        self.assertEqual(stage_response.status_code, 200)
+        self.assertEqual(
+            stage_response.json()["data"]["claim_availability"]["leader"]["reason_code"],
+            "stage_not_recruiting",
+        )
+
+    def test_project_list_default_sort_prioritizes_self_relations_before_pagination(self):
+        user = User.objects.create_user(username="selfsort", email="selfsort@example.com", password="StrongPass12345")
+        low_project = Project.objects.create(
+            topic_id=2,
+            title="无本人关系的低编号课题",
+            summary="用于验证分页前排序。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        claimed_project = Project.objects.create(
+            topic_id=9905,
+            title="高编号但本人认领课题",
+            summary="本人关系应优先。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        sponsored_project = Project.objects.create(
+            topic_id=9906,
+            title="高编号但本人资助课题",
+            summary="本人资助应优先于无关系。",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        ProjectClaimIntent.objects.create(user=user, project=claimed_project, claim_type="leader", status=InteractionStatus.PENDING)
+        SponsorIntent.objects.create(user=user, project=sponsored_project, sponsor_type="compute", status=InteractionStatus.PENDING)
+
+        self.client.force_login(user)
+        response = self.client.get("/api/projects/?page_size=2")
+        project_id_response = self.client.get("/api/projects/?page_size=2&sort=project_id")
+
+        self.assertEqual(response.status_code, 200)
+        topic_ids = [row["topic_id"] for row in response.json()["data"]["results"]]
+        self.assertEqual(topic_ids, [9905, 9906])
+        self.assertNotIn(low_project.topic_id, topic_ids)
+        self.assertEqual(project_id_response.status_code, 200)
+        self.assertEqual([row["topic_id"] for row in project_id_response.json()["data"]["results"]], [1, 2])
 
     def test_credit_rules_cover_profile_transfer_reserve_and_completion_return(self):
         donor = User.objects.create_user(username="creditdonor", email="creditdonor@example.com", password="StrongPass12345")
@@ -2200,6 +3268,64 @@ class ApiTests(TestCase):
                 amount=100,
             ).exists()
         )
+
+    def test_interaction_stage_and_credit_failures_write_failed_audit(self):
+        user = User.objects.create_user(username="interactionfail", email="interactionfail@example.com", password="StrongPass12345")
+        self.client.force_login(user)
+        self.project.stage = ProjectStage.ACTIVE
+        self.project.save(update_fields=["stage", "updated_at"])
+
+        interest_response = self.post_json(
+            f"/api/projects/{self.project.pk}/interest/",
+            {"role": "学生", "available_hours_per_week": 4, "message": "想参与"},
+        )
+        claim_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {"claim_type": "leader", "message": "想认领负责人"},
+        )
+        sponsor_response = self.post_json(
+            f"/api/projects/{self.project.pk}/sponsor/",
+            {"sponsor_type": "compute", "note": "提供算力"},
+        )
+
+        self.assertEqual(interest_response.status_code, 422)
+        self.assertEqual(claim_response.status_code, 422)
+        self.assertEqual(sponsor_response.status_code, 422)
+        self.assertTrue(AuditLog.objects.filter(actor=user, action="interaction.submit_interest", status="failed", error_code="project_not_recruiting").exists())
+        self.assertTrue(AuditLog.objects.filter(actor=user, action="interaction.submit_claim", status="failed", error_code="project_not_recruiting").exists())
+        self.assertTrue(AuditLog.objects.filter(actor=user, action="interaction.submit_sponsor", status="failed", error_code="project_not_recruiting").exists())
+
+        self.project.stage = ProjectStage.OPEN_RECRUITING
+        self.project.save(update_fields=["stage", "updated_at"])
+        user.profile.credit_balance = 0
+        user.profile.save(update_fields=["credit_balance", "updated_at"])
+        insufficient_interest = self.post_json(
+            f"/api/projects/{self.project.pk}/interest/",
+            {"role": "学生", "available_hours_per_week": 4, "message": "积分不足参与"},
+        )
+        insufficient_claim = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {"claim_type": "leader", "message": "积分不足认领"},
+        )
+
+        self.assertEqual(insufficient_interest.status_code, 422)
+        self.assertEqual(insufficient_interest.json()["error"]["code"], "insufficient_credits")
+        self.assertEqual(insufficient_claim.status_code, 422)
+        self.assertEqual(insufficient_claim.json()["error"]["code"], "insufficient_credits")
+        self.assertTrue(AuditLog.objects.filter(actor=user, action="interaction.submit_interest", status="failed", error_code="insufficient_credits").exists())
+        self.assertTrue(AuditLog.objects.filter(actor=user, action="interaction.submit_claim", status="failed", error_code="insufficient_credits").exists())
+
+    def test_project_stage_rolls_back_when_credit_charge_fails(self):
+        self.login_platform_admin()
+        self.client.raise_request_exception = False
+        self.assertEqual(self.project.stage, ProjectStage.OPEN_RECRUITING)
+
+        with patch("api.ninja_api.charge_project_participation_credits_once", side_effect=RuntimeError("charge failed")):
+            response = self.patch_json(f"/api/admin/projects/{self.project.pk}/", {"stage": "active"})
+
+        self.project.refresh_from_db()
+        self.assertGreaterEqual(response.status_code, 400)
+        self.assertEqual(self.project.stage, ProjectStage.OPEN_RECRUITING)
 
     def test_sponsor_approval_does_not_auto_start_project(self):
         doctor = User.objects.create_user(username="readydoctor", email="readydoctor@example.com", password="StrongPass12345")
@@ -2487,6 +3613,43 @@ class ApiTests(TestCase):
             self.assertEqual(rejected_response.status_code, 422)
             self.assertEqual(rejected_response.json()["error"]["code"], "validation_error")
 
+    def test_task_result_upload_rejects_fake_pdf_and_writes_failed_audit(self):
+        user = User.objects.create_user(username="fake_pdf_result", email="fake-pdf-result@example.com", password="StrongPass12345")
+        ProjectInterest.objects.create(
+            user=user,
+            project=self.project,
+            role="学生",
+            available_hours_per_week=4,
+            status=InteractionStatus.APPROVED,
+        )
+        self.project.stage = ProjectStage.ACTIVE
+        self.project.save(update_fields=["stage", "updated_at"])
+
+        self.client.force_login(user)
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(MEDIA_ROOT=Path(tmpdir) / "media", MEDIA_URL="media/"):
+            response = self.client.post(
+                "/api/me/contributions/upload/",
+                {
+                    "project_id": str(self.project.pk),
+                    "title": "假 PDF 任务结果",
+                    "result_type": "stage",
+                    "file": SimpleUploadedFile("result.pdf", b"not a pdf", content_type="application/pdf"),
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["message"], "PDF 文件格式无法识别。")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=user,
+                action="contribution.submit",
+                target_type="Project",
+                target_id=str(self.project.pk),
+                status="failed",
+                error_code="validation_error",
+            ).exists()
+        )
+
     def test_admin_overview_user_detail_credits_and_audit_logs_are_permissioned(self):
         user = User.objects.create_user(username="detailuser", email="detail@example.com", password="StrongPass12345")
         ProjectFollow.objects.create(user=user, project=self.project)
@@ -2757,6 +3920,25 @@ class ApiTests(TestCase):
         self.assertEqual(invalid_role.status_code, 422)
         self.assertIn("role_type", invalid_role.json()["error"]["details"])
 
+    def test_validation_error_exposes_details_and_errors_alias(self):
+        response = self.post_json(
+            "/api/auth/register/",
+            {
+                "username": "",
+                "email": "bad",
+                "display_name": "",
+                "role_type": "invalid-role",
+                "password1": "x",
+                "password2": "y",
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+        body = response.json()
+        self.assertIn("details", body["error"])
+        self.assertIn("errors", body)
+        self.assertEqual(body["errors"], body["error"]["details"])
+
     def test_profile_contact_email_keeps_global_email_unique(self):
         User.objects.create_user(username="emailowner", email="owner@example.com", password="StrongPass12345")
         user = User.objects.create_user(username="profileeditor", email="editor@example.com", password="StrongPass12345")
@@ -3013,3 +4195,237 @@ class ApiTests(TestCase):
         response = self.post_json("/api/auth/login/", {"username": "loginuser", "password": "StrongPass12345"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data"]["username"], "loginuser")
+
+
+class InteractionConcurrencyTests(TransactionTestCase):
+    reset_sequences = True
+
+    def setUp(self):
+        self.theme = Theme.objects.create(name="并发验收", slug="concurrency-acceptance")
+        self.project = Project.objects.create(
+            topic_id=9901,
+            title="并发测试课题",
+            summary="并发测试",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+        self.other_project = Project.objects.create(
+            topic_id=9902,
+            title="并发测试课题 B",
+            summary="并发测试 B",
+            theme=self.theme,
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+        )
+
+    def _user(self, username, credits=200):
+        user = User.objects.create_user(
+            username=username,
+            email=f"{username}@example.com",
+            password="StrongPass12345",
+        )
+        user.profile.credit_balance = credits
+        user.profile.save(update_fields=["credit_balance", "updated_at"])
+        return user
+
+    def _client_for(self, user):
+        client = Client()
+        client.raise_request_exception = False
+        client.force_login(user)
+        return client
+
+    def _post_as(self, user, path, payload):
+        client = self._client_for(user)
+        return self._post_with_client(client, path, payload)
+
+    def _patch_as(self, user, path, payload):
+        client = self._client_for(user)
+        return self._patch_with_client(client, path, payload)
+
+    def _post_with_client(self, client, path, payload):
+        response = client.post(path, data=json.dumps(payload), content_type="application/json")
+        return self._response_tuple(response)
+
+    def _patch_with_client(self, client, path, payload):
+        response = client.patch(path, data=json.dumps(payload), content_type="application/json")
+        return self._response_tuple(response)
+
+    def _response_tuple(self, response):
+        try:
+            body = response.json()
+        except ValueError:
+            body = response.content.decode("utf-8", errors="replace")[:500]
+        return response.status_code, body
+
+    def _parallel(self, *callables):
+        barrier = threading.Barrier(len(callables))
+        results = [None] * len(callables)
+        errors = [None] * len(callables)
+
+        def runner(index, func):
+            close_old_connections()
+            try:
+                barrier.wait(timeout=5)
+                results[index] = func()
+            except Exception as exc:  # pragma: no cover - surfaced by assertion below
+                errors[index] = exc
+            finally:
+                close_old_connections()
+
+        threads = [threading.Thread(target=runner, args=(index, func)) for index, func in enumerate(callables)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        for thread in threads:
+            self.assertFalse(thread.is_alive(), "并发测试线程未能按时结束")
+        for error in errors:
+            if error is not None:
+                raise error
+        return results
+
+    def _assert_no_server_errors(self, results):
+        for status_code, body in results:
+            self.assertLess(status_code, 500, body)
+            self.assertNotIn("database is locked", json.dumps(body, ensure_ascii=False).lower())
+            self.assertNotIn("integrityerror", json.dumps(body, ensure_ascii=False).lower())
+
+    def test_concurrent_leader_claim_allows_only_one_active_claim(self):
+        first = self._user("leader_claim_a")
+        second = self._user("leader_claim_b")
+        first_client = self._client_for(first)
+        second_client = self._client_for(second)
+
+        results = self._parallel(
+            lambda: self._post_with_client(first_client, f"/api/projects/{self.project.pk}/claim/", {"claim_type": "leader", "message": "并发负责人 A"}),
+            lambda: self._post_with_client(second_client, f"/api/projects/{self.project.pk}/claim/", {"claim_type": "leader", "message": "并发负责人 B"}),
+        )
+
+        self._assert_no_server_errors(results)
+        statuses = [status for status, _ in results]
+        self.assertEqual(statuses.count(201), 1, results)
+        self.assertEqual(statuses.count(409), 1, results)
+        active_count = ProjectClaimIntent.objects.filter(
+            project=self.project,
+            claim_type="leader",
+            status__in=[InteractionStatus.PENDING, InteractionStatus.APPROVED],
+        ).count()
+        self.assertEqual(active_count, 1)
+
+    def test_concurrent_paper_first_unit_claim_allows_only_one_active_claim(self):
+        first = self._user("paper_claim_a")
+        second = self._user("paper_claim_b")
+        first_client = self._client_for(first)
+        second_client = self._client_for(second)
+
+        results = self._parallel(
+            lambda: self._post_with_client(
+                first_client,
+                f"/api/projects/{self.project.pk}/claim/",
+                {"claim_type": "paper_first_unit", "claimed_unit_name": "第一单位A", "message": "申请第一单位 A"},
+            ),
+            lambda: self._post_with_client(
+                second_client,
+                f"/api/projects/{self.project.pk}/claim/",
+                {"claim_type": "paper_first_unit", "claimed_unit_name": "第一单位B", "message": "申请第一单位 B"},
+            ),
+        )
+
+        self._assert_no_server_errors(results)
+        statuses = [status for status, _ in results]
+        self.assertEqual(statuses.count(201), 1, results)
+        self.assertEqual(statuses.count(409), 1, results)
+        active_count = ProjectClaimIntent.objects.filter(
+            project=self.project,
+            claim_type="paper_first_unit",
+            status__in=[InteractionStatus.PENDING, InteractionStatus.APPROVED],
+        ).count()
+        self.assertEqual(active_count, 1)
+
+    def test_concurrent_sponsor_resubmit_does_not_duplicate_active_intent(self):
+        sponsor = self._user("sponsor_concurrent")
+        first_client = self._client_for(sponsor)
+        second_client = self._client_for(sponsor)
+
+        results = self._parallel(
+            lambda: self._post_with_client(first_client, f"/api/projects/{self.project.pk}/sponsor/", {"sponsor_type": "compute", "note": "第一次"}),
+            lambda: self._post_with_client(second_client, f"/api/projects/{self.project.pk}/sponsor/", {"sponsor_type": "compute", "note": "第二次"}),
+        )
+
+        self._assert_no_server_errors(results)
+        statuses = [status for status, _ in results]
+        self.assertIn(201, statuses, results)
+        self.assertTrue(set(statuses).issubset({200, 201}), results)
+        self.assertEqual(
+            SponsorIntent.objects.filter(user=sponsor, project=self.project, sponsor_type="compute").count(),
+            1,
+        )
+
+    def test_stage_change_blocks_in_flight_interaction_submit(self):
+        participant = self._user("stage_race_participant")
+        call_command(
+            "ensure_platform_admin",
+            username="platform_admin",
+            email="admin@example.com",
+            password="StrongPass12345",
+        )
+        admin = User.objects.get(username="platform_admin")
+        admin_client = self._client_for(admin)
+        participant_client = self._client_for(participant)
+
+        results = self._parallel(
+            lambda: self._patch_with_client(admin_client, f"/api/admin/projects/{self.project.pk}/", {"stage": ProjectStage.ACTIVE}),
+            lambda: self._post_with_client(
+                participant_client,
+                f"/api/projects/{self.project.pk}/interest/",
+                {"role": "学生", "available_hours_per_week": 4, "message": "阶段并发参与"},
+            ),
+        )
+
+        self._assert_no_server_errors(results)
+        admin_status, _ = results[0]
+        interaction_status, interaction_body = results[1]
+        self.assertEqual(admin_status, 200, results)
+        self.assertIn(interaction_status, {201, 422}, results)
+        if interaction_status == 422:
+            self.assertEqual(interaction_body["error"]["code"], "project_not_recruiting")
+            self.assertFalse(ProjectInterest.objects.filter(user=participant, project=self.project).exists())
+        else:
+            self.assertTrue(
+                ProjectInterest.objects.filter(
+                    user=participant,
+                    project=self.project,
+                    status=InteractionStatus.APPROVED,
+                ).exists()
+            )
+
+    def test_participation_credit_precheck_uses_locked_profile_balance(self):
+        participant = self._user("credit_race_participant", credits=50)
+        first_client = self._client_for(participant)
+        second_client = self._client_for(participant)
+
+        results = self._parallel(
+            lambda: self._post_with_client(
+                first_client,
+                f"/api/projects/{self.project.pk}/interest/",
+                {"role": "学生", "available_hours_per_week": 4, "message": "并发参与 A"},
+            ),
+            lambda: self._post_with_client(
+                second_client,
+                f"/api/projects/{self.other_project.pk}/interest/",
+                {"role": "学生", "available_hours_per_week": 4, "message": "并发参与 B"},
+            ),
+        )
+
+        self._assert_no_server_errors(results)
+        statuses = [status for status, _ in results]
+        self.assertLessEqual(statuses.count(201), 1, results)
+        self.assertIn(422, statuses, results)
+        for status_code, body in results:
+            if status_code == 422:
+                self.assertEqual(body["error"]["code"], "insufficient_credits")
+        self.assertLessEqual(
+            ProjectInterest.objects.filter(user=participant, status=InteractionStatus.APPROVED).count(),
+            1,
+        )

@@ -3,6 +3,7 @@ from datetime import timedelta
 from uuid import uuid4
 
 from django.conf import settings
+from django.db import OperationalError
 from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
 
@@ -95,7 +96,13 @@ class LastSeenMiddleware:
         interval_seconds = getattr(settings, "OPENMEDAILAB_LAST_SEEN_UPDATE_INTERVAL_SECONDS", 60)
         if profile.last_seen_at and profile.last_seen_at >= now - timedelta(seconds=interval_seconds):
             return
-        UserProfile.objects.filter(pk=profile.pk).update(last_seen_at=now)
+        try:
+            UserProfile.objects.filter(pk=profile.pk).update(last_seen_at=now)
+        except OperationalError as exc:
+            message = str(exc).lower()
+            if "database is locked" not in message and "database table is locked" not in message:
+                raise
+            return
         profile.last_seen_at = now
 
 

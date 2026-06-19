@@ -130,6 +130,7 @@ class ProjectClaimIntent(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="project_claim_intents")
     project = models.ForeignKey("projects.Project", on_delete=models.CASCADE, related_name="claim_intents")
     claim_type = models.CharField(max_length=40, choices=ClaimType.choices)
+    claimed_unit_name = models.CharField(max_length=100, blank=True)
     message = models.TextField(blank=True)
     status = models.CharField(max_length=32, choices=InteractionStatus.choices, default=InteractionStatus.PENDING)
     review_comment = models.TextField(blank=True)
@@ -147,6 +148,14 @@ class ProjectClaimIntent(models.Model):
     class Meta:
         constraints = [
             models.UniqueConstraint(fields=["user", "project", "claim_type"], name="unique_project_claim_intent"),
+            models.UniqueConstraint(
+                fields=["project", "claim_type"],
+                condition=models.Q(
+                    claim_type__in=[ClaimType.LEADER, ClaimType.PAPER_FIRST_UNIT],
+                    status__in=[InteractionStatus.PENDING, InteractionStatus.APPROVED],
+                ),
+                name="unique_active_review_claim_slot",
+            ),
         ]
         indexes = [
             models.Index(fields=["project", "claim_type", "status"]),
@@ -163,6 +172,15 @@ class SponsorIntent(models.Model):
     sponsor_type = models.CharField(max_length=40, choices=SponsorType.choices)
     note = models.TextField(blank=True)
     status = models.CharField(max_length=32, choices=InteractionStatus.choices, default=InteractionStatus.PENDING)
+    review_comment = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_sponsor_intents",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
