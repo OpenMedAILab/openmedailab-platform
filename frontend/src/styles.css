@@ -790,13 +790,32 @@ textarea:focus {
   align-items: stretch;
 }
 
-.project-list-main {
+.project-list-main,
+.project-card-body {
   min-width: 0;
 }
 
-.project-list-main {
+.project-list-main,
+.project-card-body {
   display: grid;
   gap: 10px;
+}
+
+.project-card--self-related .project-list-main,
+.project-card--self-related .project-card-body {
+  margin-left: 0;
+  padding-left: 0;
+  transform: none;
+}
+
+.project-card--self-related > .project-list-main,
+.project-card--self-related > .project-card-body,
+.project-card--self-related > .project-card-bottom,
+.project-card--self-related > .project-card-footer {
+  grid-column: 1 / -1;
+  justify-self: stretch;
+  width: 100%;
+  min-width: 0;
 }
 
 .project-card-footer {
@@ -837,7 +856,7 @@ textarea:focus {
 .project-card-headline--self-related {
   position: absolute;
   top: 16px;
-  left: 18px;
+  left: 72px;
   right: 18px;
   z-index: 3;
   align-items: start;
@@ -846,12 +865,8 @@ textarea:focus {
 .project-card--self-related .project-card-headline .project-card-meta,
 .project-card-headline--self-related .project-card-meta {
   min-height: 32px;
-  padding-left: 82px;
+  padding-left: 0;
   align-items: center;
-}
-
-.project-card--self-related .project-list-main {
-  padding-left: var(--self-relation-content-offset, 82px);
 }
 
 .self-relation-corner {
@@ -2100,6 +2115,52 @@ textarea:focus {
   gap: 12px;
 }
 
+.application-list {
+  display: grid;
+  gap: 12px;
+}
+
+.application-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(190px, auto);
+  gap: 16px;
+  align-items: start;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 12px 30px rgba(34, 82, 94, 0.05);
+}
+
+.application-card > div {
+  min-width: 0;
+}
+
+.application-card h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.application-card p,
+.application-card small {
+  color: var(--muted);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.application-review-note {
+  margin: 8px 0 0;
+  padding: 9px 11px;
+  border: 1px solid rgba(217, 154, 24, 0.24);
+  border-radius: 8px;
+  background: #fff8e4;
+  color: #6f4a00 !important;
+  font-weight: 800;
+}
+
 .my-task-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(180px, auto);
@@ -2570,6 +2631,30 @@ textarea:focus {
   padding: 0 12px;
 }
 
+.sponsor-intent-group {
+  align-items: start;
+  background: linear-gradient(180deg, #ffffff, #fbfefe);
+}
+
+.sponsor-intent-items {
+  display: grid;
+  gap: 8px;
+}
+
+.sponsor-intent-item {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fbfb;
+}
+
+.sponsor-intent-item strong,
+.sponsor-intent-item small {
+  overflow-wrap: anywhere;
+}
+
 .admin-stage-select {
   width: 100%;
   min-width: 126px;
@@ -2977,9 +3062,11 @@ textarea:focus {
 }
 
 .modal-header h2 {
+  min-width: 0;
   margin: 6px 0 0;
   font-size: 22px;
   line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
 .stacked-form {
@@ -2992,6 +3079,15 @@ textarea:focus {
   margin: 0;
   color: var(--muted);
   line-height: 1.6;
+}
+
+.warning-note {
+  padding: 9px 11px;
+  border: 1px solid rgba(217, 154, 24, 0.24);
+  border-radius: 8px;
+  background: #fff8e4;
+  color: #6f4a00;
+  font-weight: 800;
 }
 
 .form-error {
@@ -3049,6 +3145,93 @@ textarea:focus {
 
 .sponsor-extra-options {
   margin-top: -4px;
+}
+
+.review-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 910;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(14, 31, 35, 0.36);
+  backdrop-filter: blur(10px);
+}
+
+.review-modal {
+  width: min(720px, calc(100vw - 36px));
+  max-height: calc(100dvh - 36px);
+  overflow: auto;
+  border: 1px solid rgba(217, 231, 233, 0.96);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 30px 94px rgba(10, 40, 48, 0.32);
+}
+
+.review-modal .modal-header p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.review-modal-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(160px, 0.4fr);
+  gap: 12px;
+}
+
+.review-modal-grid section {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fbfb;
+}
+
+.review-modal-grid strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text);
+}
+
+.review-modal-grid p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.review-context-panel {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(217, 231, 233, 0.95);
+  border-radius: 8px;
+  background: #f8fbfb;
+}
+
+.review-context-panel p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.review-context-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+}
+
+.review-context-list li {
+  overflow-wrap: anywhere;
+}
+
+.review-preset-row {
+  justify-content: flex-start;
+  gap: 8px;
 }
 
 .checkbox-chip {
@@ -4150,14 +4333,16 @@ code {
     grid-template-columns: 1fr;
   }
 
-  .admin-filter-row,
-  .admin-project-toolbar,
-  .form-grid,
-  .markdown-import-actions,
-  .markdown-import-row,
-  .my-task-card,
-  .task-detail-summary,
-  .workspace-row,
+	  .admin-filter-row,
+	  .admin-project-toolbar,
+	  .form-grid,
+	  .markdown-import-actions,
+	  .markdown-import-row,
+	  .application-card,
+	  .my-task-card,
+	  .review-modal-grid,
+	  .task-detail-summary,
+	  .workspace-row,
   .approved-project-row,
   .project-document-admin-row,
   .project-document-upload,
@@ -4183,19 +4368,24 @@ code {
     width: 100%;
   }
 
-  .admin-table {
-    overflow: visible;
-  }
+	  .admin-table {
+	    overflow: visible;
+	  }
+
+	  .application-card .my-task-actions,
+	  .my-task-card .my-task-actions {
+	    align-items: stretch;
+	  }
 
   .admin-table-head {
     display: none;
   }
 
-  .contribution-review-table .admin-table-head,
-  .contribution-review-table .admin-table-row {
-    grid-template-columns: 1fr;
-    min-width: 0;
-  }
+	  .contribution-review-table .admin-table-head,
+	  .contribution-review-table .admin-table-row {
+	    grid-template-columns: 1fr;
+	    min-width: 0;
+	  }
 
   .project-grid {
     grid-template-columns: 1fr;
@@ -4476,7 +4666,7 @@ code {
   .project-card-headline--self-related {
     position: absolute;
     top: 18px;
-    left: 14px;
+    left: 72px;
     right: 14px;
     margin-bottom: 0;
     transform: none;
@@ -4484,15 +4674,11 @@ code {
 
   .project-card--self-related .project-card-headline .project-card-meta,
   .project-card-headline--self-related .project-card-meta {
-    padding-left: 82px;
+    padding-left: 0;
   }
 
   .project-card-headline--self-related .project-card-side {
     display: none;
-  }
-
-  .project-card--self-related .project-list-main {
-    padding-left: var(--self-relation-content-offset, 82px);
   }
 
   .project-interaction-actions {
@@ -4510,8 +4696,18 @@ code {
   }
 }
 
-@media (max-width: 340px) {
-  .project-card--self-related .project-list-main {
-    padding-left: 82px;
-  }
+.project-card.project-card--self-related .project-list-main,
+.project-card.project-card--self-related .project-card-body {
+  margin-left: 0 !important;
+  padding-left: 0 !important;
+  transform: none !important;
+}
+
+.project-card.project-card--self-related > .project-list-main,
+.project-card.project-card--self-related > .project-card-body,
+.project-card.project-card--self-related > .project-card-bottom,
+.project-card.project-card--self-related > .project-card-footer {
+  margin-left: 0 !important;
+  padding-left: 0 !important;
+  transform: none !important;
 }

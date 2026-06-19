@@ -30,7 +30,9 @@ test("project title opens progress page while pdf actions still open documents",
   assert.match(mainSource, /parts\[0\] === "project"/);
   assert.match(mainSource, /api\.projectProgress/);
   assert.match(mainSource, /function projectPdfHref\(project\)/);
+  assert.match(mainSource, /function projectCardTitle\(project\)/);
   assert.match(mainSource, /class="project-title-link"[^>]*:href="projectDetailHref\(project\)"/);
+  assert.match(mainSource, /data-testid="project-title-link"[\s\S]*?\{\{\s*projectCardTitle\(project\)\s*\}\}/);
   assert.match(mainSource, />查看PDF</);
   assert.match(mainSource, />下载PDF</);
   assert.match(mainSource, /target="_blank"\s+rel="noopener"/);
@@ -50,7 +52,7 @@ test("admin project form exposes progress document upload separately from the ma
 
 test("planned recruitment theme progress discussion and faq entry features are wired", () => {
   assert.match(mainSource, /overfilled/);
-  assert.match(mainSource, /· 超额/);
+  assert.doesNotMatch(mainSource, /超额/);
   assert.match(stylesSource, /\.project-role-chip-row > span\.overfilled\s*\{/);
 
   assert.match(apiSource, /adminReorderThemes/);
@@ -153,22 +155,27 @@ test("self-related project cards align meta chips near the corner ribbon without
 
   assert.match(mainSource, /project-card-headline--self-related/);
   assert.match(mainSource, /primarySelfRelationLabel\(project\)/);
-  assert.match(mainSource, /function selfRelationContentStyle\(project\)/);
-  assert.match(mainSource, /secondarySelfRelationLabels\(project\)\.length \* 72/);
-  assert.match(mainSource, /:style="selfRelationContentStyle\(project\)"/);
+  assert.doesNotMatch(mainSource, /function selfRelationContentStyle\(project\)/);
+  assert.doesNotMatch(mainSource, /--self-relation-content-offset/);
+  assert.doesNotMatch(mainSource, /:style="selfRelationContentStyle\(project\)"/);
+  assert.match(mainSource, /class="project-card-body" data-testid="project-card-body"/);
   assert.match(stylesSource, /\.project-card--self-related\s*\{[\s\S]*?padding-top:\s*108px;/);
   assert.match(stylesSource, /\.project-card-headline\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;/);
-  assert.match(stylesSource, /\.project-card--self-related \.project-card-headline,\s*\.project-card-headline--self-related\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?top:\s*16px;[\s\S]*?left:\s*18px;[\s\S]*?right:\s*18px;[\s\S]*?align-items:\s*start;/);
-  assert.match(stylesSource, /\.project-card--self-related \.project-card-headline \.project-card-meta,\s*\.project-card-headline--self-related \.project-card-meta\s*\{[\s\S]*?padding-left:\s*82px;/);
-  assert.match(stylesSource, /\.project-card--self-related \.project-list-main\s*\{[\s\S]*?padding-left:\s*var\(--self-relation-content-offset,\s*82px\);/);
+  assert.match(stylesSource, /\.project-card--self-related \.project-card-headline,\s*\.project-card-headline--self-related\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?top:\s*16px;[\s\S]*?left:\s*72px;[\s\S]*?right:\s*18px;[\s\S]*?align-items:\s*start;/);
+  assert.match(stylesSource, /\.project-card--self-related \.project-card-headline \.project-card-meta,\s*\.project-card-headline--self-related \.project-card-meta\s*\{[\s\S]*?padding-left:\s*0;/);
+  assert.doesNotMatch(stylesSource, /--self-relation-content-offset/);
+  assert.match(stylesSource, /\.project-card--self-related \.project-list-main,\s*\.project-card--self-related \.project-card-body\s*\{[\s\S]*?margin-left:\s*0;[\s\S]*?padding-left:\s*0;[\s\S]*?transform:\s*none;/);
+  assert.match(stylesSource, /\.project-card--self-related > \.project-list-main,\s*\.project-card--self-related > \.project-card-body,\s*\.project-card--self-related > \.project-card-bottom,\s*\.project-card--self-related > \.project-card-footer\s*\{[\s\S]*?grid-column:\s*1 \/ -1;[\s\S]*?justify-self:\s*stretch;[\s\S]*?width:\s*100%;/);
+  assert.match(stylesSource, /\.project-card\.project-card--self-related \.project-list-main,\s*\.project-card\.project-card--self-related \.project-card-body\s*\{[\s\S]*?margin-left:\s*0 !important;[\s\S]*?padding-left:\s*0 !important;[\s\S]*?transform:\s*none !important;/);
+  assert.match(stylesSource, /\.project-card\.project-card--self-related > \.project-list-main,\s*\.project-card\.project-card--self-related > \.project-card-body,\s*\.project-card\.project-card--self-related > \.project-card-bottom,\s*\.project-card\.project-card--self-related > \.project-card-footer\s*\{[\s\S]*?margin-left:\s*0 !important;[\s\S]*?padding-left:\s*0 !important;[\s\S]*?transform:\s*none !important;/);
+  assert.doesNotMatch(stylesSource, /\.project-card--self-related \.project-list-main\s*\{[\s\S]*?padding-left:\s*var/);
   assert.notEqual(max980Start, -1);
   assert.notEqual(max640Start, -1);
   assert.doesNotMatch(max980Block, /\.project-card-headline--self-related/);
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card--self-related\s*\{[\s\S]*?padding-top:\s*96px;/);
-  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card--self-related \.project-card-headline,\s*\.project-card-headline--self-related\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?top:\s*18px;[\s\S]*?left:\s*14px;[\s\S]*?right:\s*14px;/);
-  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card--self-related \.project-card-headline \.project-card-meta,\s*\.project-card-headline--self-related \.project-card-meta\s*\{[\s\S]*?padding-left:\s*82px;/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card--self-related \.project-card-headline,\s*\.project-card-headline--self-related\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?top:\s*18px;[\s\S]*?left:\s*72px;[\s\S]*?right:\s*14px;/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card--self-related \.project-card-headline \.project-card-meta,\s*\.project-card-headline--self-related \.project-card-meta\s*\{[\s\S]*?padding-left:\s*0;/);
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card-headline--self-related \.project-card-side\s*\{[\s\S]*?display:\s*none;/);
-  assert.match(stylesSource, /@media \(max-width:\s*340px\)\s*\{[\s\S]*?\.project-card--self-related \.project-list-main\s*\{[\s\S]*?padding-left:\s*82px;/);
 });
 
 test("project interaction buttons use a compact responsive grid without stretching", () => {
@@ -349,7 +356,13 @@ test("workspace lifecycle UI exposes user/admin spaces and always-expanded proje
   assert.match(mainSource, /可在这里选择 PDF，保存课题时自动上传。/);
   assert.match(mainSource, /PDF 会随课题一起上传或替换。/);
   assert.match(apiSource, /project-documents\/upload/);
-  assert.doesNotMatch(mainSource, />我的申请<\/button>/);
+  assert.match(mainSource, /const WORKSPACE_TABS = new Set\(\[[^\]]*"applications"/);
+  assert.match(mainSource, />我的申请<\/button>/);
+  assert.match(mainSource, /myApplicationRows/);
+  assert.match(mainSource, /class="application-list"/);
+  assert.match(mainSource, /class="application-card"/);
+  assert.match(stylesSource, /\.application-card > div\s*\{[\s\S]*?min-width:\s*0;/);
+  assert.match(stylesSource, /\.application-card p,\s*\.application-card small\s*\{[\s\S]*?overflow-wrap:\s*anywhere;/);
   assert.doesNotMatch(mainSource, />我的任务结果<\/button>/);
   assert.doesNotMatch(mainSource, />我的贡献<\/button>/);
   assert.doesNotMatch(mainSource, />积分流水<\/button>/);
@@ -513,8 +526,9 @@ test("admin project management supports bulk archive selection", () => {
   assert.match(stylesSource, /\.admin-select-cell\s*\{/);
 });
 
-test("admin task approval keeps only interaction review in the approval panel", () => {
-  assert.match(mainSource, />任务审批<\/button>/);
+test("admin application approval keeps only interaction review in the approval panel", () => {
+  assert.match(mainSource, />申请审批<\/button>/);
+  assert.doesNotMatch(mainSource, />任务审批<\/button>/);
   assert.doesNotMatch(mainSource, />协作管理<\/button>/);
   assert.doesNotMatch(mainSource, />协作审核<\/button>/);
   assert.doesNotMatch(mainSource, /组队看板/);
@@ -522,8 +536,24 @@ test("admin task approval keeps only interaction review in the approval panel", 
   assert.match(mainSource, />任务管理<\/button>/);
   assert.doesNotMatch(mainSource, /prepareTaskForProject\(group\.project\)/);
   assert.doesNotMatch(mainSource, /reviewInteraction\(item,\s*'recorded'\)/);
+  assert.doesNotMatch(mainSource.match(/function reviewInteraction\(item,\s*status,\s*event = null\)[\s\S]*?\n    \}/)?.[0] || "", /window\.prompt/);
+  assert.match(mainSource, /function openReviewModal\(item,\s*status,\s*event = null\)/);
+  assert.match(mainSource, /function loadReviewContext\(item\)/);
+  assert.match(mainSource, /function reviewContextSummary\(\)/);
+  assert.match(mainSource, /class="review-context-panel"/);
+  assert.match(mainSource, /审批上下文/);
+  assert.match(mainSource, /function submitReviewModal\(\)/);
+  assert.match(mainSource, /拒绝申请时必须填写审核意见/);
+  assert.match(mainSource, /data-testid="admin-review-modal"/);
+  assert.match(mainSource, /:data-testid="item\.isSponsorGroup \? 'admin-sponsor-group' : null"/);
+  assert.match(mainSource, /reviewModalRef/);
   assert.match(stylesSource, /\.collaboration-management\s*\{/);
   assert.match(stylesSource, /\.collaboration-grid\.single-column\s*\{/);
+  assert.match(stylesSource, /\.review-modal-backdrop\s*\{/);
+  assert.match(stylesSource, /\.review-modal\s*\{/);
+  assert.match(stylesSource, /\.review-modal-grid\s*\{/);
+  assert.match(stylesSource, /\.review-context-panel\s*\{/);
+  assert.match(stylesSource, /\.sponsor-intent-group\s*\{/);
 });
 
 test("project lifecycle actions are gated by project stage and review status", () => {
@@ -564,7 +594,7 @@ test("project lifecycle actions are gated by project stage and review status", (
   assert.match(mainSource, /撤回论文第一单位认领/);
   assert.doesNotMatch(mainSource, /撤回第一单位/);
   assert.match(mainSource, /function markProjectLeadClaimWithdrawn\(project/);
-  assert.match(mainSource, /async function submitSponsor\(project,\s*event = null\)/);
+  assert.match(mainSource, /async function submitSponsor\(project,\s*event = null,\s*options = \{\}\)/);
   assert.match(mainSource, /QUICK_SPONSOR_TYPES = \["labor_fee", "compute"\]/);
   assert.match(mainSource, /v-model="state\.forms\.sponsor\.sponsor_types"/);
   assert.match(mainSource, /class="sponsor-popover"/);
@@ -599,15 +629,23 @@ test("project lifecycle actions are gated by project stage and review status", (
   assert.match(mainSource, /async function submitLeadClaim\(project,\s*event = null\)[\s\S]*?await refreshProjectStatus\(project\);[\s\S]*?async function withdrawLeadClaim/);
   assert.match(mainSource, /async function withdrawLeadClaim\(project\)[\s\S]*?await refreshProjectStatus\(project\);[\s\S]*?async function submitPaperClaim/);
   assert.doesNotMatch(mainSource, /async function withdrawParticipationRequest\(project\)[\s\S]*?openConfirmDialog[\s\S]*?async function submitLeadClaim/);
-  assert.doesNotMatch(mainSource, /重新申请/);
-  assert.doesNotMatch(mainSource, /重新资助/);
+  assert.match(mainSource, /重新提交申请/);
+  assert.match(mainSource, /重新提交资助/);
+  assert.match(mainSource, /handleApplicationAction\(row,\s*event = null\)/);
+  assert.match(mainSource, /preselectedTypes:\s*\[row\.sponsor_type\]/);
+  assert.match(mainSource, /previousReviewComment:\s*row\.review_comment/);
   assert.doesNotMatch(mainSource, /重新点赞/);
   assert.match(mainSource, /v-if="canReviewInteraction\(item\)"/);
-  assert.match(mainSource, /Only pending interactions can be reviewed|只有待处理申请可以审核/);
+  assert.match(mainSource, /只有待处理申请可以审核/);
   assert.match(mainSource, /拟认领第一单位/);
   assert.match(mainSource, /请填写拟认领的论文第一单位。/);
+  assert.match(mainSource, /申请说明/);
+  assert.match(mainSource, /负责人职责说明/);
+  assert.match(mainSource, /state\.forms\.sponsor\.previous_review_comment/);
+  assert.match(mainSource, /上次审核意见：/);
   assert.match(mainSource, /claimed_unit_name/);
   assert.match(mainSource, /state\.paperClaimRequestsByProjectId = \{\}/);
+  assert.match(mainSource, /state\.forms\.leadClaim/);
   assert.match(mainSource, /closeSponsorModal\(\)/);
   assert.match(mainSource, /closePaperClaimModal\(\)/);
 });
@@ -620,6 +658,15 @@ test("task management reuses existing project patch flows for stage changes", ()
   assert.match(mainSource, /api\.adminUpdateProject\(project\.id,\s*payload\)/);
   assert.doesNotMatch(mainSource, /is_public:\s*stage !== "archived"/);
   assert.doesNotMatch(apiSource, /\b(publishProject|startProject|pauseProject|archiveProject)\b/);
+});
+
+test("admin archive stage changes do not show confirmation dialogs", () => {
+  assert.doesNotMatch(
+    mainSource,
+    /async function updateAdminProjectStage\(project,\s*stage,\s*event = null\)[\s\S]*?openConfirmDialog\(\{[\s\S]*?确认归档课题[\s\S]*?const payload = \{ stage \};/
+  );
+  assert.match(mainSource, /async function archiveProject\(project\)[\s\S]*?api\.adminUpdateProject\(project\.id,\s*\{\s*stage:\s*"archived",\s*is_public:\s*false\s*\}\)/);
+  assert.match(mainSource, /async function deleteAdminProject\(project\)[\s\S]*?openConfirmDialog\(\{[\s\S]*?确认物理删除课题/);
 });
 
 test("project cards no longer keep hover status-card state after lifecycle writes", () => {
@@ -837,8 +884,10 @@ test("modal accessibility hooks keep focus inside dialogs and restore triggers",
   assert.match(mainSource, /function restoreLastModalTrigger\(\)/);
   assert.match(mainSource, /ref="confirmDialogRef"[\s\S]*?@keydown="trapModalFocus\(\$event, confirmDialogRef\)"/);
   assert.match(mainSource, /ref="participationModalRef"[\s\S]*?@keydown="trapModalFocus\(\$event, participationModalRef\)"/);
+  assert.match(mainSource, /ref="leadClaimModalRef"[\s\S]*?@keydown="trapModalFocus\(\$event, leadClaimModalRef\)"/);
   assert.match(mainSource, /ref="paperClaimModalRef"[\s\S]*?@keydown="trapModalFocus\(\$event, paperClaimModalRef\)"/);
   assert.match(mainSource, /ref="sponsorModalRef"[\s\S]*?@keydown="trapModalFocus\(\$event, sponsorModalRef\)"/);
+  assert.match(mainSource, /ref="reviewModalRef"[\s\S]*?@keydown="trapModalFocus\(\$event, reviewModalRef\)"/);
   assert.match(mainSource, /ref="contributionModalRef"[\s\S]*?@keydown="trapModalFocus\(\$event, contributionModalRef\)"/);
 });
 

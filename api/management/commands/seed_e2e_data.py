@@ -6,6 +6,7 @@ from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.utils import timezone
 
 from accounts.models import RoleType
 from interactions.models import (
@@ -54,6 +55,7 @@ class Command(BaseCommand):
 
             owner = self.user("e2e_owner", RoleType.PHD_OR_ABOVE, "E2E 课题创建者", "owner-wechat")
             participant = self.user("e2e_participant", RoleType.UNDERGRAD_OR_BELOW, "E2E 参与者", "participant-wechat")
+            extra_student = self.user("e2e_extra_student", RoleType.UNDERGRAD_OR_BELOW, "E2E 额外学生", "extra-student-wechat")
             claimant = self.user("e2e_claimant", RoleType.PHD_OR_ABOVE, "E2E 认领者", "claimant-wechat")
             sponsor = self.user("e2e_sponsor", RoleType.ENGINEER, "E2E 资助者", "sponsor-wechat")
             occupied = self.user("e2e_occupied", RoleType.PHD_OR_ABOVE, "E2E 已占用负责人", "occupied-wechat")
@@ -104,8 +106,15 @@ class Command(BaseCommand):
                 owner=owner,
                 theme=theme,
             )
+            rejected_application = self.project(
+                topic_id=9906,
+                title="E2E_REJECTED_APPLICATION 可重新提交课题",
+                stage=ProjectStage.OPEN_RECRUITING,
+                owner=owner,
+                theme=theme,
+            )
 
-            for project in [public_project, with_relations, claim_pending, claim_occupied, stage_blocked]:
+            for project in [public_project, with_relations, claim_pending, claim_occupied, stage_blocked, rejected_application]:
                 project.tags.set([tag])
 
             ProjectInterest.objects.update_or_create(
@@ -117,6 +126,17 @@ class Command(BaseCommand):
                     "available_hours_per_week": 6,
                     "authorship_intention": AuthorshipIntent.CONTRIBUTION,
                     "message": "E2E approved participation",
+                },
+            )
+            ProjectInterest.objects.update_or_create(
+                user=extra_student,
+                project=with_relations,
+                role="学生",
+                defaults={
+                    "status": InteractionStatus.APPROVED,
+                    "available_hours_per_week": 5,
+                    "authorship_intention": AuthorshipIntent.CONTRIBUTION,
+                    "message": "E2E approved extra student participation",
                 },
             )
             ProjectInterest.objects.update_or_create(
@@ -166,6 +186,43 @@ class Command(BaseCommand):
                 claim_type=ClaimType.LEADER,
                 defaults={"status": InteractionStatus.APPROVED, "message": "E2E occupied leader"},
             )
+            ProjectClaimIntent.objects.update_or_create(
+                user=claimant,
+                project=rejected_application,
+                claim_type=ClaimType.LEADER,
+                defaults={
+                    "status": InteractionStatus.REJECTED,
+                    "message": "E2E rejected leader message",
+                    "review_comment": "请补充项目负责人职责说明",
+                    "reviewed_by": admin,
+                    "reviewed_at": timezone.now(),
+                },
+            )
+            ProjectClaimIntent.objects.update_or_create(
+                user=claimant,
+                project=rejected_application,
+                claim_type=ClaimType.PAPER_FIRST_UNIT,
+                defaults={
+                    "status": InteractionStatus.REJECTED,
+                    "claimed_unit_name": "E2E 被驳回第一单位",
+                    "message": "E2E rejected first unit message",
+                    "review_comment": "请补充第一单位认领依据",
+                    "reviewed_by": admin,
+                    "reviewed_at": timezone.now(),
+                },
+            )
+            SponsorIntent.objects.update_or_create(
+                user=sponsor,
+                project=rejected_application,
+                sponsor_type=SponsorType.TOKEN,
+                defaults={
+                    "status": InteractionStatus.REJECTED,
+                    "note": "E2E rejected token note",
+                    "review_comment": "请补充 token 额度和周期",
+                    "reviewed_by": admin,
+                    "reviewed_at": timezone.now(),
+                },
+            )
 
             FIXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
             FIXTURE_PATH.write_text(
@@ -190,6 +247,8 @@ class Command(BaseCommand):
                             "claim_occupied_id": claim_occupied.id,
                             "claim_occupied_title": claim_occupied.title,
                             "stage_blocked_id": stage_blocked.id,
+                            "rejected_application_id": rejected_application.id,
+                            "rejected_application_title": rejected_application.title,
                         },
                     },
                     ensure_ascii=False,

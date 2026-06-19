@@ -1,5 +1,7 @@
 # 课题生命周期产品设计文档
 
+> 历史归档说明：本文档记录旧版生命周期产品设计，部分接口语义已被当前产品基准替换。当前有效规则以根目录 `AGENTS.md` 为准：管理员归档通过 `PATCH /api/admin/projects/{id}/` 设置 `stage=archived,is_public=false`，不需要确认；`DELETE /api/admin/projects/{id}/` 为物理删除，前端必须弹确认。
+
 生成日期：2026-06-10
 
 本文从资深产品经理视角，基于当前代码仓库已有模型、API 和前端页面，重新固定 OpenMedAILab 的课题生命周期。本文是后续实现和验收的产品依据；如旧文档仍包含“写作中、投稿中、已发表、任务拆分、任务分配、任务积分、收藏课题”等旧口径，以本文为准。
@@ -47,7 +49,7 @@
 | 管理员课题详情 | `GET /api/admin/projects/{id}/` | 保留 |
 | 管理员创建课题 | `POST /api/admin/projects/` | 保留，默认草稿 |
 | 管理员编辑课题 | `PATCH /api/admin/projects/{id}/` | 保留 |
-| 管理员归档课题 | `DELETE /api/admin/projects/{id}/` | 保留，产品语义为归档 |
+| 管理员归档课题 | `PATCH /api/admin/projects/{id}/` | 当前有效语义：设置 `stage=archived,is_public=false`；历史 `DELETE` 归档口径已失效 |
 | 主题管理 | `GET/POST/PATCH/DELETE /api/admin/themes/` | 保留 |
 | 主题文件域管理 | `GET/POST/PATCH/DELETE /api/admin/theme-files/` | 保留 |
 | 用户关注/取消关注 | `/api/projects/{id}/follow/` 和 `/unfollow/` | 保留，前端文案不使用“收藏” |

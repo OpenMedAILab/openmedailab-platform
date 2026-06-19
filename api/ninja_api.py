@@ -135,7 +135,7 @@ SIDEBAR_QR_DEFINITIONS = [
 SIDEBAR_QR_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp"]
 SIDEBAR_QR_MAX_BYTES = 2 * 1024 * 1024
 CONTRIBUTION_DOCUMENT_EXTENSIONS = {".pdf", ".md", ".markdown"}
-CONTRIBUTION_DOCUMENT_MAX_BYTES = 10 * 1024 * 1024
+CONTRIBUTION_DOCUMENT_MAX_BYTES = 20 * 1024 * 1024
 PDF_DOCUMENT_MAX_BYTES = 20 * 1024 * 1024
 
 
@@ -1328,9 +1328,27 @@ def admin_interaction_list(
                 | Q(user__username__icontains=q)
                 | Q(user__profile__uid__icontains=q)
             )
-        rows.extend(interaction_payload(kind, item) for item in query[:500])
-    rows.sort(key=lambda item: item["updated_at"], reverse=True)
+        rows.extend(interaction_payload(kind, item) for item in ordered_review_interactions(query))
+
+    def interaction_list_sort_key(item):
+        status_rank = 0 if item.get("status") == InteractionStatus.PENDING else 1
+        created_at = item.get("created_at")
+        updated_at = item.get("updated_at")
+        created_ts = created_at.timestamp() if hasattr(created_at, "timestamp") else 0
+        updated_ts = updated_at.timestamp() if hasattr(updated_at, "timestamp") else 0
+        return (status_rank, created_ts if status_rank == 0 else -updated_ts)
+
+    rows.sort(key=interaction_list_sort_key)
     return ok(paginated_list(rows, page, page_size))
+
+
+def ordered_review_interactions(query, limit=500):
+    pending_items = list(query.filter(status=InteractionStatus.PENDING).order_by("created_at", "pk")[:limit])
+    remaining = max(0, limit - len(pending_items))
+    if not remaining:
+        return pending_items
+    processed_items = list(query.exclude(status=InteractionStatus.PENDING).order_by("-updated_at", "-pk")[:remaining])
+    return pending_items + processed_items
 
 
 @api.patch(
@@ -1350,13 +1368,14 @@ def admin_interaction_update_status(request, type: str, interaction_id: int, pay
             interaction_id,
             fail("管理员只审批认领和资助意向。", status=422, code="invalid_interaction_type"),
         )
+    review_note = (payload.review_note or "").strip()
     if payload.status not in REVIEWABLE_INTERACTION_STATUSES:
         return audit_failed_response(
             request.user,
             "interaction.review",
             interaction_model(type).__name__,
             interaction_id,
-            fail("Invalid interaction status.", status=422, code="validation_error"),
+            fail("审核状态不合法。", status=422, code="validation_error"),
         )
     with transaction.atomic():
         item = get_interaction_or_404(type, interaction_id)
@@ -1377,7 +1396,21 @@ def admin_interaction_update_status(request, type: str, interaction_id: int, pay
                 "interaction.review",
                 item.__class__.__name__,
                 item.pk,
-                fail("Only pending interactions can be reviewed.", status=422, code="interaction_not_pending"),
+                fail("只有待处理申请可以审核。", status=422, code="interaction_not_pending"),
+                before=before,
+            )
+        if payload.status == InteractionStatus.REJECTED and not review_note:
+            return audit_failed_response(
+                request.user,
+                "interaction.review",
+                item.__class__.__name__,
+                item.pk,
+                fail(
+                    "拒绝申请时必须填写审核意见。",
+                    status=422,
+                    code="review_note_required",
+                    errors={"review_note": ["拒绝申请时必须填写审核意见。"]},
+                ),
                 before=before,
             )
         if type == "claim" and payload.status == InteractionStatus.APPROVED and item.claim_type in REVIEW_REQUIRED_CLAIM_TYPES:
@@ -1398,7 +1431,7 @@ def admin_interaction_update_status(request, type: str, interaction_id: int, pay
         item.status = payload.status
         update_fields = ["status", "updated_at"]
         if type in {"claim", "sponsor"}:
-            item.review_comment = payload.review_note or ""
+            item.review_comment = review_note
             item.reviewed_by = request.user
             item.reviewed_at = timezone.now()
             update_fields.extend(["review_comment", "reviewed_by", "reviewed_at"])
@@ -1413,7 +1446,7 @@ def admin_interaction_update_status(request, type: str, interaction_id: int, pay
             item.__class__.__name__,
             item.pk,
             before=before,
-            after={**after, "review_note": payload.review_note or "", "previous_project_stage": previous_project_stage},
+            after={**after, "review_note": review_note, "previous_project_stage": previous_project_stage},
         )
     return ok(after)
 
@@ -3840,13 +3873,13 @@ def save_contribution_document(uploaded, project, user):
     if suffix not in CONTRIBUTION_DOCUMENT_EXTENSIONS:
         return "", "", fail("任务结果文档只支持 PDF 或 Markdown。", status=422, code="validation_error")
     if getattr(uploaded, "size", 0) > CONTRIBUTION_DOCUMENT_MAX_BYTES:
-        return "", "", fail("任务结果文档不能超过 10MB。", status=422, code="validation_error")
+        return "", "", fail("任务结果文档不能超过 20MB。", status=422, code="validation_error")
     if suffix == ".pdf":
         _, pdf_error = validate_uploaded_pdf(
             uploaded,
             max_bytes=CONTRIBUTION_DOCUMENT_MAX_BYTES,
             invalid_suffix_message="任务结果文档只支持 PDF 或 Markdown。",
-            too_large_message="任务结果文档不能超过 10MB。",
+            too_large_message="任务结果文档不能超过 20MB。",
         )
         if pdf_error:
             return "", "", pdf_error
@@ -4177,11 +4210,10 @@ def interaction_kinds(type_filter=""):
 
 def interaction_queryset(kind):
     model = interaction_model(kind)
-    queryset = (
-        model.objects.select_related("user", "user__profile", "project", "project__theme")
-        .prefetch_related("project__tags")
-        .order_by("-updated_at")
-    )
+    related_fields = ["user", "user__profile", "project", "project__theme"]
+    if kind in {"claim", "sponsor"}:
+        related_fields.extend(["reviewed_by", "reviewed_by__profile"])
+    queryset = model.objects.select_related(*related_fields).prefetch_related("project__tags").order_by("-updated_at")
     if kind == "claim":
         queryset = queryset.filter(claim_type__in=REVIEW_REQUIRED_CLAIM_TYPES)
     return queryset
@@ -4327,6 +4359,7 @@ def viewer_state(user, project):
         "interest_roles": [interest.role for interest in active_interests],
         "claim_types": [claim.claim_type for claim in active_claims],
         "sponsor_types": [sponsor.sponsor_type for sponsor in active_sponsors],
+        "sponsor_requests": [sponsor_payload(sponsor) for sponsor in active_sponsors],
         "activity_labels": activity_labels,
     }
 

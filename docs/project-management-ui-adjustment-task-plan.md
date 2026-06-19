@@ -1,5 +1,7 @@
 # 课题管理与空间界面调整执行文档
 
+> 历史归档说明：本文档记录旧版课题管理 UI 调整计划，部分接口语义已被当前产品基准替换。当前有效规则以根目录 `AGENTS.md` 为准：管理员归档通过 `PATCH /api/admin/projects/{id}/` 设置 `stage=archived,is_public=false`，不需要确认；`DELETE /api/admin/projects/{id}/` 为物理删除，前端必须弹确认。
+
 ## 1. 目标
 
 本轮只针对现有课题生命周期和用户/管理员空间的界面细节做收敛与修复，保持 API 简洁，不新增复杂或冗余接口。
@@ -30,7 +32,7 @@
 - `GET /api/meta/` 返回 `project_stages`。
 - `GET /api/admin/projects/` 已支持 `stage` 查询参数。
 - `PATCH /api/admin/projects/{id}/` 已支持更新 `stage` 与 `is_public`。
-- `DELETE /api/admin/projects/{id}/` 语义为软归档。
+- 历史旧口径：`DELETE /api/admin/projects/{id}/` 曾被规划为归档动作；当前已失效，现以 `PATCH stage=archived,is_public=false` 表示归档，`DELETE` 表示物理删除。
 
 因此状态下拉不需要新增 API，直接复用 `api.adminUpdateProject(id, payload)`。
 
@@ -106,7 +108,7 @@
 ### 3.2 必须复用的 API
 
 - 修改课题状态：`PATCH /api/admin/projects/{id}/`
-- 软归档课题：`DELETE /api/admin/projects/{id}/` 或 `PATCH stage=archived,is_public=false`
+- 归档课题：当前仅使用 `PATCH stage=archived,is_public=false`；历史 `DELETE` 软归档口径已失效。
 - 用户列表：`GET /api/admin/users/`
 - 课题状态卡：`GET /api/projects/{id}/status-card/`
 - 用户空间：`GET /api/me/dashboard/`
@@ -154,7 +156,7 @@
 - 下拉修改期间禁用该行下拉，避免重复提交。
 - 成功 toast：`课题状态已更新`。
 - 失败 toast：展示后端错误信息，并回滚到原状态。
-- 对 `archived` 应弹确认框：`归档后公开课题库不可见，但会保留审计记录。`
+- 当前规则：对 `archived` 不弹确认框；只有物理删除需要确认。
 
 #### 实现范围
 
@@ -396,7 +398,7 @@
 2. 进入 `#/admin` → `课题管理`。
 3. 修改某课题阶段为 `暂停`，确认列表更新。
 4. 修改某课题阶段为 `进行中`，确认任务管理可看到。
-5. 修改某课题阶段为 `归档`，确认有确认框，确认后公开课题库不可见。
+5. 修改某课题阶段为 `归档`，不弹确认框，归档后公开课题库不可见。
 6. 进入 `用户管理`，确认管理员第一行，其他用户按 UID 排列。
 7. 打开任务管理详情弹窗，确认无遮挡。
 
