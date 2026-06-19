@@ -13,6 +13,7 @@ class InteractionStatus(models.TextChoices):
 class ParticipationRole(models.TextChoices):
     DOCTOR = "医生", "医生"
     STUDENT = "学生", "学生"
+    TEACHER = "大学老师", "大学老师"
     LEADER = "Leader", "Leader"
     AI_ENGINEER = "AI工程师", "AI 工程师"
     STATISTICIAN = "医学统计", "医学统计"
@@ -23,8 +24,17 @@ class ParticipationRole(models.TextChoices):
     OTHER = "其他", "其他"
 
 
+class AuthorshipIntent(models.TextChoices):
+    NO_INTEREST = "no_interest", "对署名没有兴趣"
+    CONTRIBUTION = "contribution", "普通参与，按贡献"
+    CO_FIRST_OR_CORRESPONDING = "co_first_or_corresponding", "主要参与，共同一作/共同通讯"
+    FIRST_NON_PRIMARY_UNIT = "first_non_primary_unit", "主要参与，一作非一单位可"
+    FIRST_PRIMARY_UNIT = "first_primary_unit", "主要参与，一作一单位"
+
+
 class ClaimType(models.TextChoices):
     LEADER = "leader", "认领项目负责人"
+    PAPER_FIRST_UNIT = "paper_first_unit", "认领课题（论文第一单位）"
     EXPERIMENT = "experiment", "认领实验"
     LITERATURE = "literature", "认领文献整理"
     DATA = "data", "认领数据处理"
@@ -36,7 +46,9 @@ class ClaimType(models.TextChoices):
 class SponsorType(models.TextChoices):
     FUNDING = "funding", "经费"
     CREDITS = "credits", "积分池"
-    COMPUTE = "compute", "算力"
+    COMPUTE = "compute", "资助算力"
+    TOKEN = "token", "资助 token"
+    LABOR_FEE = "labor_fee", "资助劳务费"
     DATA_BUDGET = "data_budget", "数据整理预算"
     LABEL_BUDGET = "label_budget", "标注预算"
     EXPERT = "expert", "专家咨询"
@@ -92,6 +104,11 @@ class ProjectInterest(models.Model):
     available_hours_per_week = models.PositiveSmallIntegerField(default=0)
     experience = models.TextField(blank=True)
     message = models.TextField(blank=True)
+    authorship_intention = models.CharField(
+        max_length=64,
+        choices=AuthorshipIntent.choices,
+        default=AuthorshipIntent.CONTRIBUTION,
+    )
     status = models.CharField(max_length=32, choices=InteractionStatus.choices, default=InteractionStatus.PENDING)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -113,14 +130,32 @@ class ProjectClaimIntent(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="project_claim_intents")
     project = models.ForeignKey("projects.Project", on_delete=models.CASCADE, related_name="claim_intents")
     claim_type = models.CharField(max_length=40, choices=ClaimType.choices)
+    claimed_unit_name = models.CharField(max_length=100, blank=True)
     message = models.TextField(blank=True)
     status = models.CharField(max_length=32, choices=InteractionStatus.choices, default=InteractionStatus.PENDING)
+    review_comment = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_project_claim_intents",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         constraints = [
             models.UniqueConstraint(fields=["user", "project", "claim_type"], name="unique_project_claim_intent"),
+            models.UniqueConstraint(
+                fields=["project", "claim_type"],
+                condition=models.Q(
+                    claim_type__in=[ClaimType.LEADER, ClaimType.PAPER_FIRST_UNIT],
+                    status__in=[InteractionStatus.PENDING, InteractionStatus.APPROVED],
+                ),
+                name="unique_active_review_claim_slot",
+            ),
         ]
         indexes = [
             models.Index(fields=["project", "claim_type", "status"]),
@@ -137,6 +172,15 @@ class SponsorIntent(models.Model):
     sponsor_type = models.CharField(max_length=40, choices=SponsorType.choices)
     note = models.TextField(blank=True)
     status = models.CharField(max_length=32, choices=InteractionStatus.choices, default=InteractionStatus.PENDING)
+    review_comment = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_sponsor_intents",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

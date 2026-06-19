@@ -55,13 +55,18 @@ MIDDLEWARE = [
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
+    'api.middleware.RequestIDMiddleware',
     'api.middleware.SimpleCorsMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'api.middleware.LastSeenMiddleware',
     'api.middleware.PasswordChangeRequiredMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+
+OPENMEDAILAB_ONLINE_WINDOW_SECONDS = int(os.getenv("OPENMEDAILAB_ONLINE_WINDOW_SECONDS", "300"))
+OPENMEDAILAB_LAST_SEEN_UPDATE_INTERVAL_SECONDS = int(os.getenv("OPENMEDAILAB_LAST_SEEN_UPDATE_INTERVAL_SECONDS", "60"))
 
 ROOT_URLCONF = 'config.urls'
 
@@ -145,6 +150,7 @@ WHITENOISE_MANIFEST_STRICT = os.getenv("WHITENOISE_MANIFEST_STRICT", "0" if DEBU
 
 MEDIA_URL = "media/"
 MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", BASE_DIR / "media"))
+OPENMEDAILAB_FILE_SPACE_ROOT = Path(os.getenv("OPENMEDAILAB_FILE_SPACE_ROOT", MEDIA_ROOT / "theme-file-space"))
 
 LOGIN_URL = "login"
 LOGIN_REDIRECT_URL = "dashboard"

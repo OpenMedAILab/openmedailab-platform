@@ -1,97 +1,38 @@
 PROJECT_FIELD_CONTRACT = [
-    {"name": "topic_id", "label": "课题 ID", "type": "string", "required": True, "source": "project.topic_id"},
+    {"name": "id", "label": "课题编号（选填，可填 T0001，留空自动生成）", "type": "string", "required": False, "source": "project.topic_id"},
     {"name": "theme", "label": "主题", "type": "string", "required": True, "source": "theme.name 或 theme.slug"},
-    {"name": "project_no", "label": "主题内编号", "type": "integer", "required": False, "source": "project.project_no"},
-    {"name": "title", "label": "标题", "type": "string", "required": True, "source": "project.title"},
-    {"name": "summary", "label": "摘要", "type": "text", "required": False, "source": "project.summary"},
-    {"name": "problem_statement", "label": "科学问题", "type": "text", "required": False, "source": "project.problem_statement"},
-    {"name": "research_goal", "label": "研究目标", "type": "text", "required": False, "source": "project.research_goal"},
-    {"name": "technical_route", "label": "技术路线", "type": "text", "required": False, "source": "project.technical_route"},
-    {"name": "data_requirements", "label": "数据需求", "type": "object", "required": False, "source": "project.data_requirements"},
-    {"name": "evaluation_metrics", "label": "评价指标", "type": "array", "required": False, "source": "project.evaluation_metrics"},
-    {"name": "expected_outputs", "label": "预期成果", "type": "array", "required": False, "source": "project.expected_outputs"},
-    {"name": "compliance_notes", "label": "合规说明", "type": "text", "required": False, "source": "project.compliance_notes"},
+    {"name": "title", "label": "Title（中文）", "type": "string", "required": True, "source": "project.title"},
+    {"name": "title_en", "label": "Title（英文，选填）", "type": "string", "required": False, "source": "project.title_en"},
+    {"name": "summary", "label": "摘要", "type": "text", "required": True, "source": "project.summary"},
+    {"name": "problem_statement", "label": "科学问题（选填，250字以内）", "type": "text", "required": False, "source": "project.problem_statement"},
+    {"name": "clinical_endpoint", "label": "临床终点（选填，250字以内）", "type": "string", "required": False, "source": "project.clinical_endpoint"},
+    {"name": "existing_foundation", "label": "已有基础（选填，250字以内）", "type": "string", "required": False, "source": "project.existing_foundation"},
+    {"name": "tags", "label": "标签/关键词（选填，数组或逗号分隔字符串）", "type": "array|string", "required": False, "source": "project.tags"},
+    {"name": "target_venue", "label": "目标期刊/会议（选填，255字以内）", "type": "string", "required": False, "source": "project.target_venue"},
     {"name": "stage", "label": "阶段", "type": "enum", "required": False, "source": "ProjectStage"},
-    {"name": "tags", "label": "标签", "type": "array", "required": False, "source": "Project.tags"},
-    {"name": "llm_score", "label": "初始评分", "type": "decimal", "required": False, "source": "project.llm_score"},
-    {"name": "community_score", "label": "社区评分", "type": "decimal", "required": False, "source": "project.community_score"},
-    {"name": "composite_score", "label": "综合评分", "type": "decimal", "required": False, "source": "project.composite_score"},
-    {"name": "recommended_journal", "label": "推荐期刊", "type": "string", "required": False, "source": "project.recommended_journal"},
-    {"name": "needed_roles", "label": "需要角色", "type": "array", "required": False, "source": "project.needed_roles"},
-    {"name": "score_dimensions", "label": "评分维度", "type": "object", "required": False, "source": "project.score_dimensions"},
-    {"name": "source_md_path", "label": "Markdown 路径", "type": "string", "required": False, "source": "project.source_md_path"},
-    {"name": "source_pdf_path", "label": "PDF 路径", "type": "string", "required": False, "source": "project.source_pdf_path"},
-    {"name": "page_path", "label": "公开页路径", "type": "string", "required": False, "source": "project.page_path"},
-    {"name": "documents", "label": "文件", "type": "array", "required": False, "source": "ProjectDocument"},
-    {"name": "has_pdf", "label": "是否有 PDF", "type": "boolean", "required": False, "source": "project.has_pdf"},
     {"name": "is_public", "label": "是否公开", "type": "boolean", "required": False, "source": "project.is_public"},
 ]
 
 
-PROJECT_MARKDOWN_TEMPLATE = """# 课题标题
-
-## 基本信息
-- 模板版本：v1
-- 课题ID：
-- 主题：
-- 主题内编号：
-- 阶段：开放招募
-- 是否公开：否
-- 标签：
-- 需要角色：
-- 推荐期刊：
-- 初始评分：
-- 综合评分：
-
-## 摘要
-
-## 科学问题
-
-## 研究目标
-
-## 技术路线
-
-## 数据需求
-- 数据类型：
-- 最小样本量：
-- 数据来源：
-- 隐私要求：
-
-## 评价指标
--
-
-## 预期成果
--
-
-## 合规说明
-
-## 前沿依据
-
-## 分析单位和任务定义
-
-## 金标准或终点设计
-
-## 方法和系统框架
-
-## 基线方法
-
-## 实验设计
-
-## MVP
-
-## Go/No-Go
-
-## 可防守主张和不可主张
-
-## 预期图表
-
-## 质量评分和风险
+PROJECT_JSON_TEMPLATE = """[
+  {
+    "id": "T0001",
+    "theme": "示例主题",
+    "title": "中文课题标题",
+    "title_en": "English title optional",
+    "summary": "用一段话概括课题要解决的问题、核心方法和预期价值",
+    "problem_statement": "250字以内说明科学问题",
+    "clinical_endpoint": "250字以内说明临床终点",
+    "existing_foundation": "250字以内说明已有基础",
+    "tags": ["关键词1", "关键词2"],
+    "target_venue": "目标期刊/会议"
+  },
+  {
+    "theme": "示例主题",
+    "title": "第二个中文课题标题",
+    "title_en": "",
+    "summary": "第二个课题摘要",
+    "tags": "关键词1，关键词2"
+  }
+]
 """
-
-
-DEFAULT_THEME_FILE_SPACE = {
-    "access_level": "restricted_metadata",
-    "storage_policy": "主题文件域只登记与该主题相关的数据资产元信息，例如公开数据集链接、数据字典、标注规范、伦理合规材料和模型实验资产；不登记单个课题原文、PDF 或公开页面。",
-    "allowed_file_types": ["dataset", "data_dictionary", "annotation_guide", "ethics", "model_artifact", "dataset_meta", "link", "other"],
-    "sections": ["数据集文件", "数据字典", "标注规范", "伦理合规材料", "模型与实验资产"],
-}

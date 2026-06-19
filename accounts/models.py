@@ -9,12 +9,17 @@ PLATFORM_ADMIN_UID = "ADM00000001"
 
 
 ROLE_UID_PREFIXES = {
-    "student": "S",
     "doctor": "D",
-    "teacher": "T",
+    "undergrad_or_below": "U",
+    "master_student": "M",
+    "phd_student": "P",
+    "phd_or_above": "R",
+    "engineer": "E",
+    "student": "S",
+    "teacher": "R",
     "ai_engineer": "E",
-    "statistician": "M",
-    "sponsor": "F",
+    "statistician": "E",
+    "sponsor": "U",
     "other": "U",
 }
 
@@ -45,12 +50,38 @@ def uid_for_user(user, role_type=None):
 
 class RoleType(models.TextChoices):
     DOCTOR = "doctor", "医生"
-    STUDENT = "student", "学生"
-    TEACHER = "teacher", "老师"
-    AI_ENGINEER = "ai_engineer", "AI 工程师"
-    STATISTICIAN = "statistician", "医学统计"
-    SPONSOR = "sponsor", "资助者"
+    UNDERGRAD_OR_BELOW = "undergrad_or_below", "在读本科及以下"
+    MASTER_STUDENT = "master_student", "在读硕士"
+    PHD_STUDENT = "phd_student", "在读博士"
+    PHD_OR_ABOVE = "phd_or_above", "博士毕业及以上"
+    ENGINEER = "engineer", "工程师"
     OTHER = "other", "其他"
+
+
+PUBLIC_ROLE_CHOICES = [
+    (RoleType.DOCTOR, RoleType.DOCTOR.label),
+    (RoleType.UNDERGRAD_OR_BELOW, RoleType.UNDERGRAD_OR_BELOW.label),
+    (RoleType.MASTER_STUDENT, RoleType.MASTER_STUDENT.label),
+    (RoleType.PHD_STUDENT, RoleType.PHD_STUDENT.label),
+    (RoleType.PHD_OR_ABOVE, RoleType.PHD_OR_ABOVE.label),
+    (RoleType.ENGINEER, RoleType.ENGINEER.label),
+]
+
+
+LEGACY_ROLE_ALIASES = {
+    "student": RoleType.UNDERGRAD_OR_BELOW,
+    "teacher": RoleType.PHD_OR_ABOVE,
+    "ai_engineer": RoleType.ENGINEER,
+    "statistician": RoleType.ENGINEER,
+}
+
+
+def normalize_public_role(role_type):
+    value = str(role_type or "").strip()
+    public_values = {choice[0] for choice in PUBLIC_ROLE_CHOICES}
+    if value in public_values:
+        return value
+    return LEGACY_ROLE_ALIASES.get(value, "")
 
 
 class UserProfile(models.Model):
@@ -71,6 +102,7 @@ class UserProfile(models.Model):
     bio = models.TextField(blank=True)
     credit_balance = models.IntegerField(default=100)
     reputation_score = models.IntegerField(default=0)
+    last_seen_at = models.DateTimeField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

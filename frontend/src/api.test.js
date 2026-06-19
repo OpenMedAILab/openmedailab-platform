@@ -98,6 +98,31 @@ test("auth api does not expose email verification or email password reset method
   assert.equal(api.confirmPasswordReset, undefined);
 });
 
+test("ApiError exposes validation errors alias from top-level or detail payloads", async () => {
+  globalThis.window = { OPENMEDAILAB_API_BASE: "" };
+  globalThis.location = { port: "5173" };
+  globalThis.fetch = async () => jsonResponse(422, {
+    ok: false,
+    error: {
+      code: "validation_error",
+      message: "Validation failed.",
+      details: { email: [{ message: "邮箱格式不正确" }] }
+    },
+    errors: { email: [{ message: "邮箱格式不正确" }] }
+  });
+
+  const { api, ApiError } = await import(`./api.js?api-error-errors-alias=${Date.now()}`);
+
+  await assert.rejects(
+    () => api.register({}),
+    (error) => {
+      assert.ok(error instanceof ApiError);
+      assert.deepEqual(error.errors, { email: [{ message: "邮箱格式不正确" }] });
+      return true;
+    }
+  );
+});
+
 test("workspace lifecycle api wrappers are exposed", async () => {
   globalThis.window = { OPENMEDAILAB_API_BASE: "" };
   globalThis.location = { port: "5173" };
@@ -109,8 +134,16 @@ test("workspace lifecycle api wrappers are exposed", async () => {
 
   [
     "projectStatusCard",
+    "meProjects",
+    "createProject",
+    "updateProject",
+    "deleteProject",
+    "uploadProjectDocuments",
+    "deleteProjectDocument",
+    "unscore",
     "updateMeTaskStatus",
     "createMeContribution",
+    "createMeContributionWithFile",
     "withdrawInteraction",
     "adminOverview",
     "adminInteractions",
@@ -120,25 +153,52 @@ test("workspace lifecycle api wrappers are exposed", async () => {
     "assignAdminTask",
     "updateAdminTaskStatus",
     "adminContributions",
-    "reviewAdminContribution",
     "adminCredits",
-    "adminAuditLogs"
+    "adminAuditLogs",
+    "adminUploadThemeFileDetailPdf",
+    "adminExportContentBackup",
+    "adminRestoreContentBackup"
   ].forEach((method) => assert.equal(typeof api[method], "function", `${method} should be exposed`));
 });
 
-test("project lifecycle api does not expose legacy json import wrapper", async () => {
+test("project lifecycle api exposes backend json import endpoint", async () => {
   globalThis.window = { OPENMEDAILAB_API_BASE: "" };
   globalThis.location = { port: "5173" };
   globalThis.fetch = async () => {
     throw new Error("No network calls expected");
   };
 
-  const { api } = await import(`./api.js?project-lifecycle-no-json-import=${Date.now()}`);
+  const { api } = await import(`./api.js?project-lifecycle-json-import=${Date.now()}`);
 
-  assert.equal(api.adminImportProjects, undefined);
+  assert.equal(typeof api.adminImportProjects, "function");
   assert.equal(typeof api.adminCreateProject, "function");
   assert.equal(typeof api.adminUpdateProject, "function");
   assert.equal(typeof api.adminProjects, "function");
+  assert.equal(typeof api.adminBulkArchiveProjects, "function");
+  assert.equal(typeof api.adminBulkProjectAction, "function");
+});
+
+test("project progress discussion and theme reorder api wrappers are exposed", async () => {
+  globalThis.window = { OPENMEDAILAB_API_BASE: "" };
+  globalThis.location = { port: "5173" };
+  globalThis.fetch = async () => {
+    throw new Error("No network calls expected");
+  };
+
+  const { api } = await import(`./api.js?project-progress-discussions=${Date.now()}`);
+
+  [
+    "projectProgress",
+    "projectDiscussions",
+    "createProjectDiscussion",
+    "updateProjectDiscussion",
+    "deleteProjectDiscussion",
+    "adminProjectDiscussions",
+    "moderateProjectDiscussion",
+    "adminReorderThemes",
+    "sidebarQrs",
+    "adminUploadSidebarQr"
+  ].forEach((method) => assert.equal(typeof api[method], "function", `${method} should be exposed`));
 });
 
 test("project lifecycle api reuses admin project update/delete instead of redundant stage wrappers", async () => {
@@ -155,6 +215,8 @@ test("project lifecycle api reuses admin project update/delete instead of redund
   });
   assert.equal(typeof api.adminUpdateProject, "function");
   assert.equal(typeof api.adminDeleteProject, "function");
+  assert.equal(typeof api.adminBulkArchiveProjects, "function");
+  assert.equal(typeof api.adminBulkProjectAction, "function");
 });
 
 function jsonResponse(status, payload) {

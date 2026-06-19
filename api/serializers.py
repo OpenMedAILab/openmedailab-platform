@@ -64,7 +64,6 @@ def theme_payload(theme):
         "slug": theme.slug,
         "description": theme.description,
         "cover_image": theme.cover_image,
-        "file_space": theme.file_space,
         "sort_order": theme.sort_order,
         "is_active": theme.is_active,
     }
@@ -79,9 +78,14 @@ def document_payload(document):
         "id": document.id,
         "doc_type": document.doc_type,
         "doc_type_label": document.get_doc_type_display(),
+        "document_kind": document.document_kind,
+        "document_kind_label": document.get_document_kind_display(),
         "title": document.title,
+        "description": document.description,
         "path": document.path,
         "content_hash": document.content_hash,
+        "uploaded_by": uid_only_user_payload(document.uploaded_by) if getattr(document, "uploaded_by_id", None) else None,
+        "visibility": getattr(document, "visibility", "public"),
         "created_at": document.created_at,
     }
 
@@ -91,8 +95,12 @@ def public_document_payload(document):
         "id": document.id,
         "doc_type": document.doc_type,
         "doc_type_label": document.get_doc_type_display(),
+        "document_kind": document.document_kind,
+        "document_kind_label": document.get_document_kind_display(),
         "title": document.title,
+        "description": document.description,
         "path": public_document_path(document.path),
+        "visibility": getattr(document, "visibility", "public"),
         "created_at": document.created_at,
     }
 
@@ -107,6 +115,8 @@ def theme_file_payload(file):
         "title": file.title,
         "description": file.description,
         "path": file.path,
+        "detail_pdf_title": file.detail_pdf_title,
+        "detail_pdf_path": public_document_path(file.detail_pdf_path),
         "sort_order": file.sort_order,
         "is_active": file.is_active,
         "created_at": file.created_at,
@@ -114,35 +124,47 @@ def theme_file_payload(file):
     }
 
 
+def project_detail_document_payload(project):
+    documents = list(project.documents.all())
+    for document in documents:
+        if (
+            document.document_kind == document.DocumentKind.DETAIL
+            and document.doc_type == document.DocumentType.PDF
+            and public_document_path(document.path)
+        ):
+            return public_document_payload(document)
+    for document in documents:
+        if document.doc_type == document.DocumentType.PDF and public_document_path(document.path):
+            return public_document_payload(document)
+    return None
+
+
 def project_summary_payload(project):
     return {
         "id": project.id,
         "topic_id": project.topic_id,
+        "topic_code": project.topic_code,
         "title": project.title,
+        "title_en": project.title_en,
         "summary": project.summary,
         "problem_statement": project.problem_statement,
-        "research_goal": project.research_goal,
-        "technical_route": project.technical_route,
-        "data_requirements": project.data_requirements,
-        "evaluation_metrics": project.evaluation_metrics,
-        "expected_outputs": project.expected_outputs,
-        "compliance_notes": project.compliance_notes,
+        "clinical_endpoint": project.clinical_endpoint,
+        "existing_foundation": project.existing_foundation,
+        "team_requirements": project.team_requirements,
+        "project_progress": project.project_progress,
+        "target_venue": project.target_venue,
         "theme": theme_payload(project.theme),
-        "project_no": project.project_no,
+        "created_by": uid_only_user_payload(project.created_by) if getattr(project, "created_by_id", None) else None,
         "stage": project.stage,
         "stage_label": project.get_stage_display(),
         "tags": [tag_payload(tag) for tag in project.tags.all()],
-        "llm_score": decimal_value(project.llm_score),
-        "community_score": decimal_value(project.community_score),
-        "composite_score": decimal_value(project.composite_score),
-        "recommended_journal": project.recommended_journal,
-        "needed_roles": project.needed_roles,
-        "has_pdf": project.has_pdf,
         "is_public": project.is_public,
+        "team_status": project.team_status,
         "follow_count": getattr(project, "follow_count", None),
         "score_count": getattr(project, "score_count", None),
         "interest_count": getattr(project, "interest_count", None),
         "sponsor_count": getattr(project, "sponsor_count", None),
+        "detail_document": project_detail_document_payload(project),
         "created_at": project.created_at,
         "updated_at": project.updated_at,
     }
@@ -150,15 +172,7 @@ def project_summary_payload(project):
 
 def admin_project_summary_payload(project):
     payload = project_summary_payload(project)
-    payload.update(
-        {
-            "source_md_path": project.source_md_path,
-            "source_pdf_path": project.source_pdf_path,
-            "page_path": project.page_path,
-            "content_hash": project.content_hash,
-            "imported_at": project.imported_at,
-        }
-    )
+    payload["imported_at"] = project.imported_at
     return payload
 
 
@@ -166,12 +180,6 @@ def project_detail_payload(project):
     payload = project_summary_payload(project)
     payload.update(
         {
-            "body_markdown": project.body_markdown,
-            "source_md_path": project.source_md_path,
-            "source_pdf_path": project.source_pdf_path,
-            "page_path": project.page_path,
-            "content_hash": project.content_hash,
-            "score_dimensions": project.score_dimensions,
             "team_status": project.team_status,
             "documents": [document_payload(document) for document in project.documents.all()],
             "source_payload": project.source_payload,
@@ -183,14 +191,55 @@ def project_detail_payload(project):
 
 def public_project_detail_payload(project):
     payload = project_summary_payload(project)
+    detail_document = project_detail_document_payload(project)
+    documents = [detail_document] if detail_document else []
     payload.update(
         {
-            "body_markdown": project.body_markdown,
-            "score_dimensions": project.score_dimensions,
             "team_status": project.team_status,
-            "documents": [public_document_payload(document) for document in project.documents.all()],
+            "detail_document": detail_document,
+            "documents": documents,
         }
     )
+    return payload
+
+
+def project_progress_entry_payload(entry):
+    return {
+        "id": entry.id,
+        "entry_type": entry.entry_type,
+        "entry_type_label": entry.get_entry_type_display(),
+        "title": entry.title,
+        "description": entry.description,
+        "occurred_at": entry.occurred_at,
+        "created_by": uid_only_user_payload(entry.created_by) if entry.created_by else None,
+        "visibility": entry.visibility,
+        "document": public_document_payload(entry.document) if entry.document and public_document_path(entry.document.path) else None,
+    }
+
+
+def project_progress_payload(project, documents, timeline):
+    return {
+        "project": public_project_detail_payload(project),
+        "progress_text": project.project_progress,
+        "documents": [public_document_payload(document) for document in documents],
+        "timeline": [project_progress_entry_payload(entry) for entry in timeline],
+    }
+
+
+def discussion_payload(discussion, replies=None):
+    payload = {
+        "id": discussion.id,
+        "project_id": discussion.project_id,
+        "parent_id": discussion.parent_id,
+        "content": discussion.content,
+        "author": uid_only_user_payload(discussion.author) if discussion.author else None,
+        "status": discussion.status,
+        "created_at": discussion.created_at,
+        "updated_at": discussion.updated_at,
+    }
+    if replies is not None:
+        payload["reply_count"] = getattr(discussion, "reply_count", len(replies))
+        payload["replies"] = [discussion_payload(reply) for reply in replies]
     return payload
 
 
@@ -198,26 +247,25 @@ def public_document_path(path):
     value = str(path or "").strip()
     if not value:
         return ""
-    if value.startswith("/") or value.startswith("\\") or ".." in value.replace("\\", "/").split("/"):
+    parts = value.replace("\\", "/").split("/")
+    if value.startswith("/media/"):
+        if ".." in parts:
+            return ""
+        return value
+    if value.startswith("/") or value.startswith("\\") or ".." in parts:
         return ""
     if ":" in value and not value.startswith(("http://", "https://")):
         return ""
     return value
 
 
-def theme_space_payload(theme, projects, files):
+def theme_dataset_payload(theme, projects, files):
     sections = {}
     for file in files:
         sections.setdefault(file.section, []).append(theme_file_payload(file))
-    configured_sections = theme.file_space.get("sections", []) if isinstance(theme.file_space, dict) else []
     ordered_sections = []
-    used_sections = set()
-    for section_name in configured_sections:
-        ordered_sections.append({"name": section_name, "files": sections.get(section_name, [])})
-        used_sections.add(section_name)
     for section_name, section_files in sections.items():
-        if section_name not in used_sections:
-            ordered_sections.append({"name": section_name, "files": section_files})
+        ordered_sections.append({"name": section_name, "files": section_files})
     return {
         "theme": theme_payload(theme),
         "project_count": len(projects),
@@ -248,6 +296,8 @@ def interest_payload(interest):
         "available_hours_per_week": interest.available_hours_per_week,
         "experience": interest.experience,
         "message": interest.message,
+        "authorship_intention": getattr(interest, "authorship_intention", ""),
+        "authorship_intention_label": interest.get_authorship_intention_display() if getattr(interest, "authorship_intention", "") else "",
         "status": interest.status,
         "status_label": interest.get_status_display(),
         "created_at": interest.created_at,
@@ -261,9 +311,13 @@ def claim_payload(claim):
         "project": project_summary_payload(claim.project),
         "claim_type": claim.claim_type,
         "claim_type_label": claim.get_claim_type_display(),
+        "claimed_unit_name": getattr(claim, "claimed_unit_name", ""),
         "message": claim.message,
         "status": claim.status,
         "status_label": claim.get_status_display(),
+        "review_comment": getattr(claim, "review_comment", ""),
+        "reviewed_by": uid_only_user_payload(claim.reviewed_by) if getattr(claim, "reviewed_by_id", None) else None,
+        "reviewed_at": getattr(claim, "reviewed_at", None),
         "created_at": claim.created_at,
         "updated_at": claim.updated_at,
     }
@@ -278,6 +332,9 @@ def sponsor_payload(sponsor):
         "note": sponsor.note,
         "status": sponsor.status,
         "status_label": sponsor.get_status_display(),
+        "review_comment": getattr(sponsor, "review_comment", ""),
+        "reviewed_by": uid_only_user_payload(sponsor.reviewed_by) if getattr(sponsor, "reviewed_by_id", None) else None,
+        "reviewed_at": getattr(sponsor, "reviewed_at", None),
         "created_at": sponsor.created_at,
         "updated_at": sponsor.updated_at,
     }
@@ -377,6 +434,11 @@ def audit_log_payload(entry):
         "action_label": audit_action_label(entry.action),
         "target_type": entry.target_type,
         "target_id": entry.target_id,
+        "request_id": entry.request_id,
+        "source": entry.source,
+        "status": entry.status,
+        "error_code": entry.error_code,
+        "error_message": entry.error_message,
         "summary": audit_log_summary(entry),
         "before": entry.before,
         "after": entry.after,
@@ -385,9 +447,29 @@ def audit_log_payload(entry):
 
 
 AUDIT_ACTION_LABELS = {
+    "auth.register": "注册",
+    "auth.login": "登录",
+    "auth.logout": "退出登录",
+    "auth.password_change_required": "强制修改密码",
+    "profile.update": "更新个人资料",
     "interaction.review": "审核协作意向",
     "interaction.withdraw": "撤回协作意向",
     "project.stage_auto_team_building": "自动进入组队中",
+    "project.follow": "收藏课题",
+    "project.unfollow": "取消收藏",
+    "project.score": "点赞课题",
+    "project.unscore": "取消点赞",
+    "project.user_create": "用户上传课题",
+    "project.user_update": "用户更新课题",
+    "project.user_archive": "用户归档课题",
+    "interaction.auto_approve": "自动通过参与/认领",
+    "interaction.submit_claim_for_review": "提交认领审核",
+    "interaction.submit_sponsor": "提交资助意向",
+    "credit.profile_completion_bonus": "完善资料奖励",
+    "credit.project_participation_cost": "参与课题扣除积分",
+    "credit.project_completion_return": "课题结题返还积分",
+    "credit.transfer_send": "转赠积分",
+    "credit.transfer_receive": "收到转赠积分",
     "task.create": "创建任务",
     "task.update": "更新任务",
     "task.cancel": "取消任务",
@@ -395,12 +477,15 @@ AUDIT_ACTION_LABELS = {
     "task.status": "更新任务状态",
     "task.user_status": "用户更新任务",
     "task.submit_for_review": "任务提交审核",
+    "task.result_submit": "提交任务结果",
     "contribution.submit": "提交任务结果",
     "contribution.review": "审核任务结果",
     "user.reset_password": "恢复默认密码",
     "theme.create": "创建主题",
     "theme.update": "更新主题",
+    "theme.reorder": "调整主题排序",
     "theme.deactivate": "停用主题",
+    "theme.delete": "删除主题",
     "theme_file.create": "创建主题文件",
     "theme_file.update": "更新主题文件",
     "theme_file.deactivate": "停用主题文件",
@@ -408,7 +493,22 @@ AUDIT_ACTION_LABELS = {
     "project.update": "更新课题",
     "project.upsert": "更新课题",
     "project.archive": "归档课题",
+    "project.bulk_archive": "批量归档课题",
+    "project.bulk_delete": "批量删除课题",
+    "project.bulk_set_public": "批量设置课题公开状态",
+    "project.bulk_set_stage": "批量设置课题阶段",
     "project.import_json": "导入课题",
+    "project_document.upload": "上传课题文档",
+    "project_document.update": "更新课题文档",
+    "project_document.delete": "删除课题文档",
+    "project_document.user_upload": "用户上传课题文档",
+    "project_document.user_delete": "用户删除课题文档",
+    "project_progress.document_create": "上传项目进度文档",
+    "project_discussion.create": "发布课题讨论",
+    "project_discussion.update": "更新课题讨论",
+    "project_discussion.delete": "删除课题讨论",
+    "project_discussion.moderate": "管理课题讨论",
+    "platform_qr.upload": "更新系统二维码",
 }
 
 
@@ -420,6 +520,22 @@ def audit_log_summary(entry):
     data = entry.after or entry.before or {}
     if not isinstance(data, dict):
         return audit_action_label(entry.action)
+
+    if entry.action.startswith("auth.") or entry.action.startswith("profile."):
+        if entry.status == "failed":
+            return compact_join(
+                [
+                    data.get("uid"),
+                    data.get("username"),
+                    entry.error_message,
+                ]
+            ) or audit_action_label(entry.action)
+        return compact_join(
+            [
+                data.get("uid"),
+                data.get("role_label"),
+            ]
+        ) or audit_action_label(entry.action)
 
     note = first_present(data, "review_note", "reason", "note")
     if entry.action.startswith("interaction."):

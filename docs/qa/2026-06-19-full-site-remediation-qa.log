@@ -1,0 +1,223 @@
+System check identified no issues (0 silenced).
+No changes detected
+Creating test database for alias 'default'...
+/Users/wang/CodeWz/lingyi/openmedailab-platform/.venv/lib/python3.13/site-packages/django/core/handlers/base.py:61: UserWarning: No directory at: /Users/wang/CodeWz/lingyi/openmedailab-platform/staticfiles/
+  mw_instance = middleware(adapted_handler)
+...........................................................................................................
+----------------------------------------------------------------------
+Ran 107 tests in 11.857s
+
+OK
+Destroying test database for alias 'default'...
+Found 107 test(s).
+System check identified no issues (0 silenced).
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin updated: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Projects: total=1 created=1 updated=0. Documents: total=1 bound=1 missing=0 skipped=0.
+Projects: total=2 created=2 updated=0. Documents: total=1 bound=1 missing=0 skipped=0.
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+Platform admin created: platform_admin (ADM00000001)
+✔ unsafe requests refresh csrf token and retry once after csrf failure (21.016417ms)
+✔ logout resolves when the server session is already expired (0.606584ms)
+✔ auth api does not expose email verification or email password reset methods (0.290583ms)
+✔ ApiError exposes validation errors alias from top-level or detail payloads (0.476625ms)
+✔ workspace lifecycle api wrappers are exposed (0.274125ms)
+✔ project lifecycle api exposes backend json import endpoint (0.272167ms)
+✔ project progress discussion and theme reorder api wrappers are exposed (0.27625ms)
+✔ project lifecycle api reuses admin project update/delete instead of redundant stage wrappers (0.286084ms)
+✔ profile hover zone keeps the popover open while moving from trigger to popover (0.579375ms)
+✔ parseProjectJsonImport maps json array records to strict project payloads (2.0695ms)
+✔ parseProjectJsonImport rejects jsonl files (0.168292ms)
+✔ parseProjectJsonImport supports arrays and projects wrapper in json files (0.107541ms)
+✔ parseProjectJsonImport rejects legacy topic_id and unknown fields (0.099709ms)
+✔ qualityCheckProjectPayload requires core fields and enforces 250 characters (0.554292ms)
+✔ summarizeProjectImportFiles counts only project json and matching pdf files (0.166084ms)
+✔ project import file keys prefer relative paths for duplicate filenames (0.064583ms)
+✔ showDirectoryPicker file wrappers keep relative paths and unwrap upload files (0.128ms)
+✔ actual directory selection matches project json with same-name pdf (5.362708ms)
+✔ sortProjectImportRows orders import preview by topic id (0.223416ms)
+✔ release helpers expose latest release and filter empty sections (1.043167ms)
+✔ legacy project detail modal state and styles are removed (1.33325ms)
+✔ project title opens progress page while pdf actions still open documents (1.238ms)
+✔ admin project form exposes progress document upload separately from the main pdf (0.333792ms)
+✔ planned recruitment theme progress discussion and faq entry features are wired (1.214166ms)
+✔ route changes close workspace and admin modal overlays (0.792209ms)
+✔ profile menu action clicks blur the focused button after closing (0.298791ms)
+✔ desktop layout uses a left sidebar and mobile restores the top navigation (0.593625ms)
+✔ topbar account actions are consolidated into the profile menu (0.141667ms)
+✔ project cards and headers keep small-screen overflow guards (0.182ms)
+✔ self-related project cards align meta chips near the corner ribbon without overlap (0.926458ms)
+✔ project interaction buttons use a compact responsive grid without stretching (0.602458ms)
+✔ small-screen tab and chip rows wrap instead of hiding content horizontally (0.256708ms)
+✔ homepage removes the hero copy and keeps compact library stats (0.52ms)
+✔ modal overlays lock the page scroll behind dialogs (0.049834ms)
+✔ admin theme management exposes dataset description pdf workflow (0.641042ms)
+✔ admin backup restore is exposed as a dedicated management tab (0.307125ms)
+✔ homepage search toolbar is lifted and visually emphasized (0.500541ms)
+✔ homepage theme selector uses image-backed topic cards (2.78025ms)
+✔ topbar exposes only aggregate platform stats (0.292ms)
+✔ workspace lifecycle UI exposes user/admin spaces and always-expanded project cards (1.578584ms)
+✔ project cards keep compact summary UI without hover status styles (2.937417ms)
+✔ legacy duplicated project detail view has been removed (1.295417ms)
+✔ audit log table uses readable summaries instead of raw json (0.257666ms)
+✔ admin overview cards are navigable and have hover affordance (0.135667ms)
+✔ admin project management supports bulk archive selection (1.282333ms)
+✔ admin task approval keeps only interaction review in the approval panel (0.617459ms)
+✔ project lifecycle actions are gated by project stage and review status (4.615709ms)
+✔ task management reuses existing project patch flows for stage changes (0.719917ms)
+✔ admin archive stage changes do not show confirmation dialogs (0.61275ms)
+✔ project cards no longer keep hover status-card state after lifecycle writes (0.645ms)
+✔ project contact hover cards are fixed viewport-safe overlays (0.494ms)
+✔ project progress page exposes the same core interaction actions as project cards (0.359791ms)
+✔ claim reason controls remain focusable when unavailable (0.118792ms)
+✔ task result submission supports documents without admin review actions (0.85825ms)
+✔ workspace lifecycle people fields render uid-only payloads (0.317792ms)
+✔ admin project lifecycle exposes json import with confirmation preview (1.4295ms)
+✔ admin project form uses structured project inputs instead of json textareas for core fields (1.061917ms)
+✔ admin project form is opened in a modal instead of occupying the normal project list view (0.294417ms)
+✔ admin project form no longer exposes score dimension fields (0.410583ms)
+✔ admin project list loads every matching project page at once (0.3145ms)
+✔ admin project list changes stages through the existing project patch api (0.415292ms)
+✔ workspace overview uses the same clickable card affordance as admin overview (0.338667ms)
+✔ user uploaded projects can be edited while archived projects stay locked (0.256959ms)
+✔ business modals use an explicit z-index scale and close competing overlays (0.297417ms)
+✔ modal accessibility hooks keep focus inside dialogs and restore triggers (0.627917ms)
+✔ visual e2e hooks and decorative icon semantics are present (0.523417ms)
+✔ small-screen controls keep touch targets and avoid duplicate theme controls (0.266791ms)
+✔ sponsor popover keeps two quick choices and exposes token progressively (0.191041ms)
+✔ legacy approved-project handoff helpers are not returned as product entry points (0.259541ms)
+ℹ tests 69
+ℹ suites 0
+ℹ pass 69
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 112.407291
+
+> openmedailab-frontend@0.14.0 build
+> vite build
+
+vite v6.4.3 building for production...
+transforming...
+✓ 15 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.88 kB │ gzip:   0.50 kB
+dist/assets/index-o8WV4IHJ.css   62.56 kB │ gzip:  12.25 kB
+dist/assets/index-bBPS-io1.js   464.52 kB │ gzip: 130.37 kB
+✓ built in 339ms
+
+> openmedailab-frontend@0.14.0 test:e2e
+> playwright test
+
+Operations to perform:
+  Apply all migrations: accounts, admin, auth, contenttypes, credits, interactions, projects, sessions
+Running migrations:
+  No migrations to apply.
+Platform admin updated: platform_admin (ADM00000001)
+E2E fixture written to /Users/wang/CodeWz/lingyi/openmedailab-platform/frontend/e2e/.state/fixture.json
+
+Running 45 tests using 1 worker
+
+(node:23880) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 [desktop-1440] › e2e/accessibility.spec.js:8:1 › release modal traps focus, closes with escape, and restores focus (6.9s)
+  ✓   2 [desktop-1440] › e2e/accessibility.spec.js:30:1 › toast announces login-required feedback through a polite live region (7.5s)
+  ✓   3 [desktop-1440] › e2e/accessibility.spec.js:39:1 › confirm overlay z-index stays above business modal overlays (6.8s)
+  ✓   4 [desktop-1440] › e2e/project-core.spec.js:17:1 › home page has no horizontal overflow and mobile first screen exposes title and status (6.4s)
+  ✓   5 [desktop-1440] › e2e/project-core.spec.js:31:1 › relationship badge geometry and hover strip match product requirement (7.0s)
+  ✓   6 [desktop-1440] › e2e/project-core.spec.js:76:1 › project detail runs a real collaboration CTA flow (7.3s)
+  ✓   7 [desktop-1440] › e2e/project-core.spec.js:109:1 › claim reason tooltip, sponsor popover and contact card stay within viewport (7.2s)
+  ✓   8 [desktop-1440] › e2e/project-core.spec.js:159:1 › pending approval labels do not overflow (6.8s)
+  ✓   9 [desktop-1440] › e2e/project-core.spec.js:171:1 › secondary token sponsor flow is reachable and reviewable (7.4s)
+(node:24992) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  10 [tablet-768] › e2e/accessibility.spec.js:8:1 › release modal traps focus, closes with escape, and restores focus (8.4s)
+  ✓  11 [tablet-768] › e2e/accessibility.spec.js:30:1 › toast announces login-required feedback through a polite live region (6.5s)
+  ✓  12 [tablet-768] › e2e/accessibility.spec.js:39:1 › confirm overlay z-index stays above business modal overlays (6.6s)
+  ✓  13 [tablet-768] › e2e/project-core.spec.js:17:1 › home page has no horizontal overflow and mobile first screen exposes title and status (6.5s)
+  ✓  14 [tablet-768] › e2e/project-core.spec.js:31:1 › relationship badge geometry and hover strip match product requirement (6.9s)
+  ✓  15 [tablet-768] › e2e/project-core.spec.js:76:1 › project detail runs a real collaboration CTA flow (7.1s)
+  ✓  16 [tablet-768] › e2e/project-core.spec.js:109:1 › claim reason tooltip, sponsor popover and contact card stay within viewport (7.1s)
+  ✓  17 [tablet-768] › e2e/project-core.spec.js:159:1 › pending approval labels do not overflow (6.8s)
+  ✓  18 [tablet-768] › e2e/project-core.spec.js:171:1 › secondary token sponsor flow is reachable and reviewable (7.3s)
+(node:25830) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  19 [mobile-360] › e2e/accessibility.spec.js:8:1 › release modal traps focus, closes with escape, and restores focus (7.4s)
+  ✓  20 [mobile-360] › e2e/accessibility.spec.js:30:1 › toast announces login-required feedback through a polite live region (6.6s)
+  ✓  21 [mobile-360] › e2e/accessibility.spec.js:39:1 › confirm overlay z-index stays above business modal overlays (6.5s)
+  ✓  22 [mobile-360] › e2e/project-core.spec.js:17:1 › home page has no horizontal overflow and mobile first screen exposes title and status (7.0s)
+  ✓  23 [mobile-360] › e2e/project-core.spec.js:31:1 › relationship badge geometry and hover strip match product requirement (7.1s)
+  ✓  24 [mobile-360] › e2e/project-core.spec.js:76:1 › project detail runs a real collaboration CTA flow (7.4s)
+  ✓  25 [mobile-360] › e2e/project-core.spec.js:109:1 › claim reason tooltip, sponsor popover and contact card stay within viewport (8.7s)
+  ✓  26 [mobile-360] › e2e/project-core.spec.js:159:1 › pending approval labels do not overflow (6.5s)
+  ✓  27 [mobile-360] › e2e/project-core.spec.js:171:1 › secondary token sponsor flow is reachable and reviewable (7.3s)
+(node:26688) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  28 [mobile-390] › e2e/accessibility.spec.js:8:1 › release modal traps focus, closes with escape, and restores focus (6.8s)
+  ✓  29 [mobile-390] › e2e/accessibility.spec.js:30:1 › toast announces login-required feedback through a polite live region (6.7s)
+  ✓  30 [mobile-390] › e2e/accessibility.spec.js:39:1 › confirm overlay z-index stays above business modal overlays (6.4s)
+  ✓  31 [mobile-390] › e2e/project-core.spec.js:17:1 › home page has no horizontal overflow and mobile first screen exposes title and status (6.6s)
+  ✓  32 [mobile-390] › e2e/project-core.spec.js:31:1 › relationship badge geometry and hover strip match product requirement (6.9s)
+  ✓  33 [mobile-390] › e2e/project-core.spec.js:76:1 › project detail runs a real collaboration CTA flow (7.4s)
+  ✓  34 [mobile-390] › e2e/project-core.spec.js:109:1 › claim reason tooltip, sponsor popover and contact card stay within viewport (7.3s)
+  ✓  35 [mobile-390] › e2e/project-core.spec.js:159:1 › pending approval labels do not overflow (6.8s)
+  ✓  36 [mobile-390] › e2e/project-core.spec.js:171:1 › secondary token sponsor flow is reachable and reviewable (7.5s)
+(node:27676) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  37 [mobile-320] › e2e/accessibility.spec.js:8:1 › release modal traps focus, closes with escape, and restores focus (6.7s)
+  ✓  38 [mobile-320] › e2e/accessibility.spec.js:30:1 › toast announces login-required feedback through a polite live region (6.4s)
+  ✓  39 [mobile-320] › e2e/accessibility.spec.js:39:1 › confirm overlay z-index stays above business modal overlays (6.5s)
+  ✓  40 [mobile-320] › e2e/project-core.spec.js:17:1 › home page has no horizontal overflow and mobile first screen exposes title and status (6.5s)
+  ✓  41 [mobile-320] › e2e/project-core.spec.js:31:1 › relationship badge geometry and hover strip match product requirement (7.4s)
+  ✓  42 [mobile-320] › e2e/project-core.spec.js:76:1 › project detail runs a real collaboration CTA flow (7.5s)
+  ✓  43 [mobile-320] › e2e/project-core.spec.js:109:1 › claim reason tooltip, sponsor popover and contact card stay within viewport (9.4s)
+  ✓  44 [mobile-320] › e2e/project-core.spec.js:159:1 › pending approval labels do not overflow (7.0s)
+  ✓  45 [mobile-320] › e2e/project-core.spec.js:171:1 › secondary token sponsor flow is reachable and reviewable (7.3s)
+
+  45 passed (5.3m)
+release version ok: 0.14.0
