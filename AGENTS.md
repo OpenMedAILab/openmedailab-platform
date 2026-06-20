@@ -131,7 +131,7 @@
 | 关系 API | `api/ninja_api.py` | `follow_project`、`unfollow_project`、`score_project`、`unscore_project`、`interest_project`、`claim_project`、`sponsor_project`、`me_interaction_withdraw`、`admin_interaction_list`、`admin_interaction_update_status` |
 | 状态辅助 | `api/ninja_api.py` | `maybe_advance_project_stage_after_interaction`、`user_has_approved_project_relation`、`viewer_state`、`claim_availability_payload` |
 | 关系序列化 | `api/serializers.py` | `interest_payload`、`claim_payload`、`sponsor_payload`、`follow_payload`、`dashboard_payload` |
-| 前端操作 | `frontend/src/main.js` | `submitLike`、`submitInterest`、`submitParticipationRequest`、`submitClaim`、`submitLeadClaim`、`submitPaperClaim`、`submitSponsor`、`withdrawInteraction` |
+| 前端操作 | `frontend/src/main.js` | `submitLike`、`submitInterest`、`submitParticipationRequest`、`submitClaim`、`submitLeadClaim`、`submitPaperClaim`、`handleSponsorAction`、`withdrawInteraction` |
 | 测试 | `api/tests.py`、`interactions/tests.py` | 自动通过、资助审批、撤回、阶段限制、UID 展示 |
 
 产品规则：
@@ -149,7 +149,7 @@
 - 资助意向提交后为 `pending`，只由管理员审批为 `approved` 或 `rejected`；审核意见、审核人 UID 和审核时间必须返回给申请人和管理端；课题 sponsor count 和“已获资助”只统计 `approved`。
 - 管理员拒绝项目负责人认领、论文第一单位认领或资助意向时，`review_note` 必须填写非空审核意见，并通过稳定错误码 `review_note_required` 同时返回 `error.details.review_note` 和顶层 `errors.review_note`；管理员通过时审核意见可选，前端默认可填 `审核通过`。
 - 个人中心必须提供 `我的申请` 入口，集中展示参与、认领和资助申请的状态、审核意见、审核人 UID、审核时间和下一步操作；不要把这些信息只埋在“我的任务”摘要里。
-- 课题卡和详情页资助主入口使用贴近按钮的多选 popover，主选项只展示资助劳务费和资助算力两个近距 checkbox，可多选；资助 token 通过同一 popover 的“更多资助类型”渐进入口可达。深链进入课题详情页时，前端必须从 `viewer_state.sponsor_requests` 恢复 active 资助明细；弹窗内必须显式展示“当前资助”区块，并为每个 active 资助项提供具体文案的撤回按钮（如 `撤回资助劳务费`）。已提交的 active 资助类型在新增资助 checkbox 中保持已勾选且禁用，撤回只能通过“当前资助”区块的显式按钮触发，不能通过取消勾选后提交触发隐式撤回。
+- 课题卡和详情页资助主入口拆为两个与“参与”同级的独立按钮：`资助劳务费` 和 `资助算力`。每个按钮只处理自己的 `sponsor_type`；没有 active 资助时点击即提交对应资助意向，已有 active 资助时按钮文案必须显示具体撤回类型（如 `撤回资助劳务费`）并通过确认弹窗撤回该条记录。前端不得再使用 `管理资助`、资助 popover、多选 checkbox 或取消勾选后提交的隐式撤回模式。
 - 用户可撤回自己的 active 关系，撤回状态为 `withdrawn`；资助只允许撤回 `pending` 或 `approved` 记录，`rejected` 和已 `withdrawn` 记录再次撤回应返回稳定业务错误。
 - 参与/认领/资助只允许在开放招募和组队中提交。
 - 任一参与或认领通过后，课题可进入组队中；当前自动推进逻辑集中在后端辅助函数中，改动前必须确认产品需求。

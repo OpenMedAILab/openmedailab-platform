@@ -54,7 +54,7 @@
 - `frontend/src/styles.css`
   - 卡片尺寸：`.project-card`、`.project-list-card`、`.project-card-bottom`、`.project-card-footer`
   - 角色 chip：`.project-role-chip-row > span`、`.ready`、`.overfilled`
-  - 资助按钮黄色覆盖：`.project-interaction-actions .sponsor-action-button`、`.sponsor-action-button.interaction-active`
+  - 资助按钮：`.project-interaction-actions .sponsor-action-button`、`.sponsor-action-button.interaction-active`
 - `projects/models.py`
   - `Project.team_status.required_roles` 已提供 `key/label/count/required/ready/overfilled/status`
 - `api/ninja_api.py`
@@ -65,7 +65,7 @@
 - 整卡“这是我的课题关系”已经有金色斜角、金色顶线和二级金色小标签。
 - 组队角色 chip 目前只知道“满足/超员/缺失”，不知道“这个角色是否对应我”。
 - 学生 `2/1` 这类超员状态目前使用黄色，容易和“我的关系”金色混淆。
-- “管理资助”按钮独立使用黄色，抢占了“我的关系”颜色语义，也和其他互动按钮不一致。
+- 资助入口已拆为 `资助劳务费` 和 `资助算力` 两个独立按钮，需要与“参与”同级且各自处理自己的提交/撤回状态。
 
 ## 用户需求拆解
 
@@ -74,7 +74,7 @@
 3. 组队角色超员，例如“学生（实验） 2/1”，不再使用独立颜色，只保留 `2/1` 计数，并按普通已满足角色视觉展示。
 4. 如果某个组队角色是“我”对应的角色，该角色 chip 使用当前个人关系系统里的金色。
 5. “我的角色”逻辑适用于医生、学生、博士毕业及以上指导、项目负责人等所有角色。
-6. “管理资助”按钮改成和其他互动按钮一样的颜色体系。
+6. `资助劳务费` 和 `资助算力` 按钮改成和其他互动按钮一样的颜色体系，并各自显示 active/撤回状态。
 7. 验收以截图为主。
 
 ## 方案对比
@@ -226,14 +226,14 @@ active 口径沿用现有前端逻辑：`pending` 和 `approved` 都能体现“
 
 - 删除 `.project-interaction-actions .sponsor-action-button` 的黄色背景/边框/文字覆盖。
 - 删除 `.sponsor-action-button.interaction-active` 的黄色激活态覆盖。
-- 资助按钮默认使用 `.ghost-button.interaction-button` 白底样式。
-- active 时使用现有 `.interaction-button.interaction-active` 青绿色样式。
+- `资助劳务费` 和 `资助算力` 默认使用 `.ghost-button.interaction-button` 白底样式。
+- 某个资助类型 active 时，仅对应按钮使用现有 `.interaction-button.interaction-active` 青绿色样式。
 - 金色只留给“我的关系”角标、关系小标签、我的角色 chip。
 - 非本人“已获资助”项目状态不得继续使用 amber/gold；建议将 `.project-funding-chip.funded` 改为青绿或蓝绿状态色，例如浅青底配深青文字，避免和个人关系金色混淆。
 
 视觉结果：
 
-- “管理资助”按钮和“取消关注”“取消参与”“撤回论文第一单位认领”等按钮在同一按钮系统内。
+- `资助劳务费` 和 `资助算力` 与“取消关注”“取消参与”“撤回论文第一单位认领”等按钮在同一按钮系统内。
 - 用户仍能通过顶部金色“我已资助”识别个人关系，不需要按钮也变黄。
 
 ### 5. 信息层级
@@ -420,25 +420,26 @@ desktop-self-overfilled-role-dual-state.png
 - 键盘 focus 到该 chip 时，可访问名称包含“我的角色，人数已超过要求”。
 - 键盘 focus 到该 chip 时焦点环清晰可见，并且不会遮挡“我的角色”主体语义。
 
-### 必须截图 5：管理资助按钮统一颜色
+### 必须截图 5：两个资助按钮统一颜色
 
 文件：
 
 ```text
-desktop-sponsor-button-unified.png
+desktop-sponsor-buttons-unified.png
 ```
 
 场景：
 
-- 登录有 active 资助关系的用户，卡片按钮文案为 `管理资助` 或相关资助状态。
+- 登录有 active 资助关系的用户，卡片展示 `资助劳务费` 和 `资助算力` 两个按钮；已提交的类型显示 `撤回资助劳务费` 或 `撤回资助算力`。
 
 验收：
 
-- 资助按钮颜色与其他 active 互动按钮一致，为青绿色体系。
+- 两个资助按钮与其他互动按钮同级排列。
+- active 资助类型对应按钮颜色与其他 active 互动按钮一致，为青绿色体系。
 - 不出现黄色/琥珀色 sponsor button。
 - 金色“我已资助”关系提示仍在 meta 区或角标中出现。
 - 非本人但已获资助的项目状态 chip 不使用金色。
-- 点击后 sponsor popover 仍贴近按钮，不超出视口。
+- 点击非 active 资助按钮直接提交对应类型；点击 active 资助按钮通过确认弹窗撤回对应类型，不再出现 sponsor popover。
 
 ### 必须截图 6：移动端紧凑与换行
 
@@ -553,4 +554,4 @@ git diff --check
 - 超员不再单独配色，避免和个人关系金色或错误红色冲突。
 - 我的角色高亮有稳定数据来源方案。
 - 资助按钮回归通用按钮体系，不再占用金色语义。
-- 截图验收覆盖桌面、宽屏、移动端、超员、我的角色、组合态和 sponsor popover。
+- 截图验收覆盖桌面、宽屏、移动端、超员、我的角色、组合态、两个资助按钮和撤回确认弹窗。
