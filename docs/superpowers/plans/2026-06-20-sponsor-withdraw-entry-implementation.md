@@ -56,12 +56,12 @@
 - [x] **Step 1: Run frontend unit tests.**
 - [x] **Step 2: Run targeted backend tests.**
 - [x] **Step 3: Run release/version and whitespace checks.**
-- [x] **Step 4: Capture screenshots showing the two sponsor buttons and per-type withdraw confirmation.**
+- [x] **Step 4: Capture a browser screenshot showing the two sponsor buttons as sibling interaction actions.**
 
 ### Verification Notes
 
 - Frontend tests: `node --test frontend/src/*.test.js` passed.
 - Backend sponsor withdraw tests: `.venv/bin/python manage.py test api.tests.ApiTests.test_user_can_withdraw_pending_and_approved_sponsor_intents api.tests.ApiTests.test_user_cannot_withdraw_inactive_sponsor_intents` passed.
 - Release/whitespace checks: `python scripts/check_release_version.py` and `git diff --check` passed.
-- Screenshot artifact: `artifacts/ui-qa/sponsor-independent-buttons.png` shows `资助劳务费` and `资助算力` as sibling interaction buttons; active sponsor types use `撤回{type}` text and confirm before withdrawal.
+- Screenshot artifact: `artifacts/ui-qa/sponsor-independent-buttons.png` shows `资助劳务费` and `资助算力` as sibling interaction buttons. Per-type withdraw confirmation is covered by source-level UI tests and the existing sponsor withdraw backend tests.
 - Review follow-up: removed the hidden uncheck-and-submit withdrawal path and then removed the sponsor popover entirely after UI review; each sponsor button now owns its own submit/withdraw flow.

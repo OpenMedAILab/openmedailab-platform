@@ -674,7 +674,11 @@ test("project lifecycle actions are gated by project stage and review status", (
   assert.doesNotMatch(mainSource, /async function withdrawParticipationRequest\(project\)[\s\S]*?openConfirmDialog[\s\S]*?async function submitLeadClaim/);
   assert.match(mainSource, /重新提交申请/);
   assert.match(mainSource, /重新提交资助/);
+  assert.match(mainSource, /function canRetrySponsorApplication\(row\)/);
+  assert.match(mainSource, /QUICK_SPONSOR_TYPES\.includes\(row\.sponsor_type\)/);
+  assert.match(mainSource, /row\.type === "sponsor"\) return canRetrySponsorApplication\(row\) \? "重新提交资助" : "查看课题";/);
   assert.match(mainSource, /handleApplicationAction\(row,\s*event = null\)/);
+  assert.match(mainSource, /if \(canRetrySponsorApplication\(row\)\) \{/);
   assert.match(mainSource, /handleSponsorAction\(row\.project,\s*row\.sponsor_type \|\| "compute"\)/);
   assert.doesNotMatch(mainSource, /重新点赞/);
   assert.match(mainSource, /v-if="canReviewInteraction\(item\)"/);

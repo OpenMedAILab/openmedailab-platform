@@ -998,9 +998,16 @@ const App = {
       return ["pending", "approved"].includes(row.status);
     }
 
+    function canRetrySponsorApplication(row) {
+      return row?.type === "sponsor" && QUICK_SPONSOR_TYPES.includes(row.sponsor_type);
+    }
+
     function applicationActionLabel(row) {
       if (canWithdrawApplication(row)) return row.type === "sponsor" ? "撤回资助意向" : "取消参与";
-      if (row?.status === "rejected") return row.type === "sponsor" ? "重新提交资助" : "重新提交申请";
+      if (row?.status === "rejected") {
+        if (row.type === "sponsor") return canRetrySponsorApplication(row) ? "重新提交资助" : "查看课题";
+        return "重新提交申请";
+      }
       return "查看课题";
     }
 
@@ -1019,7 +1026,7 @@ const App = {
           openPaperClaimModal(row.project, event, row);
           return;
         }
-        if (row.type === "sponsor") {
+        if (canRetrySponsorApplication(row)) {
           await handleSponsorAction(row.project, row.sponsor_type || "compute");
           return;
         }
