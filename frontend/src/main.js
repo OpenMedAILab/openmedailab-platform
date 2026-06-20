@@ -2316,7 +2316,7 @@ const App = {
       state.sponsorModal.maxHeight = popoverPosition.maxHeight;
       nextTick(() => {
         realignSponsorPopoverFromRenderedSize(state.sponsorModal.returnFocus);
-        document.querySelector(".sponsor-popover input:not(:disabled)")?.focus();
+        document.querySelector(".sponsor-popover .sponsor-withdraw-button:not(:disabled), .sponsor-popover input:not(:disabled)")?.focus();
       });
     }
 
@@ -2341,7 +2341,6 @@ const App = {
       const activeRequests = activeSponsorRequestsForProject(project).filter((request) => sponsorPopoverTypes.includes(request.sponsor_type));
       const activeTypes = activeRequests.map((request) => request.sponsor_type).filter(Boolean);
       const typesToAdd = selectedTypes.filter((type) => !activeTypes.includes(type));
-      const requestsToWithdraw = activeRequests.filter((request) => !selectedTypes.includes(request.sponsor_type));
       if (!selectedTypes.length && !activeRequests.length) {
         showToast("请选择资助类型");
         return;
@@ -2365,15 +2364,6 @@ const App = {
             failures.push(`${sponsorTypeLabel(sponsorType)}：${error.message || "提交失败"}`);
           }
         }
-        for (const request of requestsToWithdraw) {
-          try {
-            const withdrawn = await api.withdrawInteraction("sponsor", request.id, { reason: `用户主动撤回${sponsorTypeLabel(request.sponsor_type)}资助意向` });
-            markProjectSponsorWithdrawn(project, withdrawn || request);
-            successes.push(`撤回${sponsorTypeLabel(request.sponsor_type)}`);
-          } catch (error) {
-            failures.push(`撤回${sponsorTypeLabel(request.sponsor_type)}：${error.message || "提交失败"}`);
-          }
-        }
         invalidateProjectStatusCard(project.id);
         await refreshProjectStatus(project);
         if (failures.length) {
@@ -2390,24 +2380,35 @@ const App = {
       }
     }
 
-    async function withdrawSponsorRequest(project) {
+    async function withdrawSponsorRequest(project, request = null) {
       if (!ensureLogin()) return;
-      const request = sponsorRequestForProject(project);
-      if (!request?.id || !isActiveParticipationRequest(request)) {
+      const targetRequest = request || sponsorRequestForProject(project);
+      if (!targetRequest?.id || !isActiveParticipationRequest(targetRequest)) {
         showToast("没有可撤回的资助意向");
         return;
       }
+      const typeLabel = sponsorTypeLabel(targetRequest.sponsor_type);
+      const confirmed = await openConfirmDialog({
+        title: "撤回资助",
+        message: `确认撤回${typeLabel}？撤回后可重新提交资助意向。`,
+        confirmText: `撤回${typeLabel}`,
+        tone: "danger"
+      });
+      if (!confirmed) return;
       state.withdrawingSponsorProjectIds = addUniqueId(state.withdrawingSponsorProjectIds, project.id);
       try {
-        const withdrawn = await api.withdrawInteraction("sponsor", request.id, { reason: "用户主动撤回资助意向" });
-        markProjectSponsorWithdrawn(project, withdrawn || request);
+        const withdrawn = await api.withdrawInteraction("sponsor", targetRequest.id, { reason: `用户主动撤回${typeLabel}资助意向` });
+        markProjectSponsorWithdrawn(project, { ...targetRequest, ...(withdrawn || {}) });
         invalidateProjectStatusCard(project.id);
-        showToast("已撤回资助");
+        await refreshProjectStatus(project);
+        state.forms.sponsor.sponsor_types = (state.forms.sponsor.sponsor_types || [])
+          .filter((type) => type !== targetRequest.sponsor_type);
+        showToast(`已撤回${typeLabel}`);
         if (state.user) {
           await loadFavorites({ force: true });
         }
       } catch (error) {
-        showToast(error.message || "撤回资助失败");
+        showToast(error.message || `撤回${typeLabel}失败`);
       } finally {
         state.withdrawingSponsorProjectIds = removeId(state.withdrawingSponsorProjectIds, project.id);
       }
@@ -2459,11 +2460,15 @@ const App = {
       }
       targets.forEach((item) => {
         const roles = new Set(item.viewer_state?.interest_roles || []);
+        const teamRoleKeys = new Set(item.viewer_state?.team_role_keys || []);
+        const teamRoleKey = teamRoleKeyForParticipationRole(role);
         const alreadySubmitted = roles.has(role);
         roles.add(role);
+        if (teamRoleKey) teamRoleKeys.add(teamRoleKey);
         item.viewer_state = {
           ...(item.viewer_state || {}),
           interest_roles: Array.from(roles),
+          team_role_keys: Array.from(teamRoleKeys),
           relationship_labels: [...new Set([...(item.viewer_state?.relationship_labels || []), participationRelationshipLabel(savedRequest)])]
         };
         if (!alreadySubmitted && typeof item.interest_count === "number") {
@@ -2576,10 +2581,13 @@ const App = {
       projectTargets(id, project).forEach((item) => {
         applyProjectClaimAvailability(item, savedClaim);
         const claimTypes = new Set(item.viewer_state?.claim_types || []);
+        const teamRoleKeys = new Set(item.viewer_state?.team_role_keys || []);
         claimTypes.add(savedClaim.claim_type);
+        if (savedClaim.claim_type === "leader") teamRoleKeys.add("leader");
         item.viewer_state = {
           ...(item.viewer_state || {}),
           claim_types: Array.from(claimTypes),
+          team_role_keys: Array.from(teamRoleKeys),
           relationship_labels: [
             ...new Set([
               ...(item.viewer_state?.relationship_labels || []),
@@ -2773,11 +2781,23 @@ const App = {
         ));
       const claimTypes = new Set(project.viewer_state?.claim_types || []);
       const sponsorTypes = new Set(project.viewer_state?.sponsor_types || []);
+      const teamRoleKeys = new Set(project.viewer_state?.team_role_keys || []);
+      if (isActiveParticipationRequest(participationRequest)) {
+        const teamRoleKey = teamRoleKeyForParticipationRole(participationRequest.role);
+        if (teamRoleKey) teamRoleKeys.add(teamRoleKey);
+      } else if (participationRequest) {
+        (project.viewer_state?.interest_roles || []).forEach((role) => {
+          const teamRoleKey = teamRoleKeyForParticipationRole(role);
+          if (teamRoleKey) teamRoleKeys.delete(teamRoleKey);
+        });
+      }
       if (claimRequest?.claim_type === "leader") {
         if (isActiveClaimRequest(claimRequest)) {
           claimTypes.add("leader");
+          teamRoleKeys.add("leader");
         } else {
           claimTypes.delete("leader");
+          teamRoleKeys.delete("leader");
         }
       }
       if (paperClaimRequest?.claim_type === "paper_first_unit") {
@@ -2801,6 +2821,7 @@ const App = {
         relationship_labels: labels,
         interest_roles: isActiveParticipationRequest(participationRequest) ? (project.viewer_state?.interest_roles || []) : [],
         claim_types: Array.from(claimTypes),
+        team_role_keys: Array.from(teamRoleKeys),
         sponsor_types: Array.from(sponsorTypes)
       };
       if (state.unlikedProjectIds.includes(project.id)) {
@@ -2827,9 +2848,15 @@ const App = {
 
     function clearProjectParticipationViewerState(project) {
       if (!project) return;
+      const teamRoleKeys = new Set(project.viewer_state?.team_role_keys || []);
+      (project.viewer_state?.interest_roles || []).forEach((role) => {
+        const teamRoleKey = teamRoleKeyForParticipationRole(role);
+        if (teamRoleKey) teamRoleKeys.delete(teamRoleKey);
+      });
       project.viewer_state = {
         ...(project.viewer_state || {}),
         interest_roles: [],
+        team_role_keys: Array.from(teamRoleKeys),
         relationship_labels: (project.viewer_state?.relationship_labels || [])
           .filter((label) => !isParticipationRelationshipLabel(label))
       };
@@ -2838,10 +2865,13 @@ const App = {
     function clearProjectLeadClaimViewerState(project) {
       if (!project) return;
       const claimTypes = new Set(project.viewer_state?.claim_types || []);
+      const teamRoleKeys = new Set(project.viewer_state?.team_role_keys || []);
       claimTypes.delete("leader");
+      teamRoleKeys.delete("leader");
       project.viewer_state = {
         ...(project.viewer_state || {}),
         claim_types: Array.from(claimTypes),
+        team_role_keys: Array.from(teamRoleKeys),
         relationship_labels: (project.viewer_state?.relationship_labels || [])
           .filter((label) => !isLeadClaimRelationshipLabel(label))
       };
@@ -3252,9 +3282,17 @@ const App = {
         .filter(Boolean);
     }
 
+    function isSponsorTypeActive(project, sponsorType) {
+      return activeSponsorTypesForProject(project).includes(sponsorType);
+    }
+
     function sponsorRequestStatusLabel(project, sponsorType) {
       const request = sponsorRequestByType(project, sponsorType);
       return isActiveParticipationRequest(request) ? request.status_label || "待处理" : "";
+    }
+
+    function sponsorStatusLabel(status) {
+      return RELATION_STATUS_LABELS[status] || status || "";
     }
 
     function sponsorTypeLabel(value) {
@@ -5419,10 +5457,14 @@ const App = {
       sponsorButtonLabel,
       interactionButtonActive,
       canClickSponsor,
+      isWithdrawingSponsor,
       activeSponsorTypesForProject,
       activeSponsorRequestsForProject,
       quickActiveSponsorRequestsForProject,
+      isSponsorTypeActive,
       sponsorRequestStatusLabel,
+      sponsorStatusLabel,
+      sponsorTypeLabel,
       selfRelationLabels,
       primarySelfRelationLabel,
       secondarySelfRelationLabels,
@@ -5559,6 +5601,9 @@ const App = {
       visibleProjectRoleGroups,
       projectRecruitmentText,
       requiredTeamRoles,
+      selfTeamRoleKeys,
+      isSelfTeamRole,
+      teamRoleAriaLabel,
       projectFundingLabel,
       projectFundingReady,
       projectStageTone,
@@ -5827,11 +5872,12 @@ const App = {
                     <strong>组队</strong>
                     <div class="project-role-chip-row">
                       <span
-                        v-for="role in requiredTeamRoles(project.team_status)"
+                        v-for="role in requiredTeamRoles(project.team_status, project)"
                         :key="role.key"
                         class="team-role-chip contact-hover-trigger"
-                        :class="{ ready: role.ready, overfilled: role.overfilled }"
+                        :class="{ ready: role.ready, overfilled: role.overfilled, 'self-role': role.isSelfRole }"
                         tabindex="0"
+                        :aria-label="teamRoleAriaLabel(role)"
                         @mouseenter="showTeamContactCard($event, role, project)"
                         @focus="showTeamContactCard($event, role, project)"
                         @mouseleave="scheduleHideContactHoverCard"
@@ -6001,7 +6047,18 @@ const App = {
                   <h2>课题进展</h2>
                   <p>{{ state.projectProgress.progressText || '暂无公开进度说明。' }}</p>
                   <div class="project-role-chip-row">
-                    <span v-for="role in requiredTeamRoles(state.projectProgress.project.team_status)" :key="role.key" :class="{ ready: role.ready, overfilled: role.overfilled }">
+                    <span
+                      v-for="role in requiredTeamRoles(state.projectProgress.project.team_status, state.projectProgress.project)"
+                      :key="role.key"
+                      class="team-role-chip contact-hover-trigger"
+                      :class="{ ready: role.ready, overfilled: role.overfilled, 'self-role': role.isSelfRole }"
+                      tabindex="0"
+                      :aria-label="teamRoleAriaLabel(role)"
+                      @mouseenter="showTeamContactCard($event, role, state.projectProgress.project)"
+                      @focus="showTeamContactCard($event, role, state.projectProgress.project)"
+                      @mouseleave="scheduleHideContactHoverCard"
+                      @blur="scheduleHideContactHoverCard"
+                    >
                       {{ role.label }} {{ role.count }}/{{ role.required }}
                     </span>
                   </div>
@@ -6440,11 +6497,12 @@ const App = {
                     <strong>组队</strong>
                     <div class="project-role-chip-row">
                       <span
-                        v-for="role in requiredTeamRoles(project.team_status)"
+                        v-for="role in requiredTeamRoles(project.team_status, project)"
                         :key="role.key"
                         class="team-role-chip contact-hover-trigger"
-                        :class="{ ready: role.ready, overfilled: role.overfilled }"
+                        :class="{ ready: role.ready, overfilled: role.overfilled, 'self-role': role.isSelfRole }"
                         tabindex="0"
+                        :aria-label="teamRoleAriaLabel(role)"
                         @mouseenter="showTeamContactCard($event, role, project)"
                         @focus="showTeamContactCard($event, role, project)"
                         @mouseleave="scheduleHideContactHoverCard"
@@ -7502,9 +7560,23 @@ const App = {
             </header>
             <form class="stacked-form sponsor-popover-form" @submit.prevent="submitSponsorModal">
               <p v-if="state.forms.sponsor.previous_review_comment" class="warning-note">上次审核意见：{{ state.forms.sponsor.previous_review_comment }}</p>
+              <section v-if="activeSponsorRequestsForProject(state.sponsorModal.project).length" class="sponsor-current-list" aria-label="当前资助">
+                <strong>当前资助</strong>
+                <div v-for="request in activeSponsorRequestsForProject(state.sponsorModal.project)" :key="'current-sponsor-' + request.id" class="sponsor-current-row">
+                  <span>
+                    <b>{{ sponsorTypeLabel(request.sponsor_type) }}</b>
+                    <small>{{ request.status_label || sponsorStatusLabel(request.status) }}</small>
+                    <small v-if="request.review_comment">审核意见：{{ request.review_comment }}</small>
+                  </span>
+                  <button class="ghost-button danger sponsor-withdraw-button" type="button" :disabled="state.sponsorModal.submitting || isWithdrawingSponsor(state.sponsorModal.project)" @click.prevent="withdrawSponsorRequest(state.sponsorModal.project, request)">
+                    撤回{{ sponsorTypeLabel(request.sponsor_type) }}
+                  </button>
+                </div>
+              </section>
+              <strong class="sponsor-section-title">新增资助类型</strong>
               <div class="sponsor-checkbox-row">
                 <label v-for="item in quickSponsorTypeOptions" :key="item.value" class="checkbox-chip">
-                  <input v-model="state.forms.sponsor.sponsor_types" type="checkbox" :value="item.value" :disabled="!canRecruitProject(state.sponsorModal.project) && !activeSponsorTypesForProject(state.sponsorModal.project).includes(item.value)" />
+                  <input v-model="state.forms.sponsor.sponsor_types" type="checkbox" :value="item.value" :disabled="isSponsorTypeActive(state.sponsorModal.project, item.value) || !canRecruitProject(state.sponsorModal.project)" />
                   <span>{{ item.label }}<small v-if="sponsorRequestStatusLabel(state.sponsorModal.project, item.value)"> · {{ sponsorRequestStatusLabel(state.sponsorModal.project, item.value) }}</small></span>
                 </label>
               </div>
@@ -7513,7 +7585,7 @@ const App = {
               </button>
               <div v-if="state.forms.sponsor.show_more_types" class="sponsor-checkbox-row sponsor-extra-options">
                 <label v-for="item in moreSponsorTypeOptions" :key="item.value" class="checkbox-chip">
-                  <input v-model="state.forms.sponsor.sponsor_types" type="checkbox" :value="item.value" :disabled="!canRecruitProject(state.sponsorModal.project) && !activeSponsorTypesForProject(state.sponsorModal.project).includes(item.value)" />
+                  <input v-model="state.forms.sponsor.sponsor_types" type="checkbox" :value="item.value" :disabled="isSponsorTypeActive(state.sponsorModal.project, item.value) || !canRecruitProject(state.sponsorModal.project)" />
                   <span>{{ item.label }}<small v-if="sponsorRequestStatusLabel(state.sponsorModal.project, item.value)"> · {{ sponsorRequestStatusLabel(state.sponsorModal.project, item.value) }}</small></span>
                 </label>
               </div>
@@ -8269,23 +8341,67 @@ function projectRecruitmentText(project) {
   return DEFAULT_PROJECT_RECRUITMENT_ROLES.map((role) => `${role.label} ${role.required}`).join("，");
 }
 
-function requiredTeamRoles(teamStatus) {
+function requiredTeamRoles(teamStatus, project = null) {
   const backendRequiredRoles = Array.isArray(teamStatus?.required_roles) ? teamStatus.required_roles : [];
   return DEFAULT_PROJECT_RECRUITMENT_ROLES.map((role) => {
     const matched = matchedRequiredTeamRole(teamStatus, role, backendRequiredRoles);
     const count = matched ? Number(matched.count || 0) : projectRoleCount(teamStatus, role, backendRequiredRoles);
     const required = Number(matched?.required || role.required || 1);
     const overfilled = Boolean(matched?.overfilled) || count > required;
+    const isSelfRole = isSelfTeamRole(project, role);
     return {
       ...role,
       label: matched?.label || role.label,
       count,
       required,
       ready: Boolean(matched?.ready) || count >= required,
+      isSelfRole,
       overfilled,
       status: matched?.status || (overfilled ? "overfilled" : count >= required ? "ready" : "missing")
     };
   });
+}
+
+function selfTeamRoleKeys(project) {
+  const keys = new Set((project?.viewer_state?.team_role_keys || []).filter(Boolean));
+  (project?.viewer_state?.interest_roles || []).forEach((role) => {
+    const key = teamRoleKeyForParticipationRole(role);
+    if (key) keys.add(key);
+  });
+  (project?.viewer_state?.claim_types || []).forEach((claimType) => {
+    if (claimType === "leader") keys.add("leader");
+  });
+  return keys;
+}
+
+function isSelfTeamRole(project, role) {
+  const aliases = roleAliases(role);
+  return Array.from(selfTeamRoleKeys(project)).some((key) => aliases.includes(key));
+}
+
+function teamRoleAriaLabel(role) {
+  const status = role.isSelfRole && role.overfilled
+    ? "我的角色，人数已超过要求"
+    : role.isSelfRole
+      ? "我的角色"
+      : role.overfilled
+      ? "人数已超过要求"
+      : role.ready
+        ? "人数已满足"
+        : "人数未满足";
+  return `${role.label}，当前 ${role.count} 人，要求 ${role.required} 人，${status}`;
+}
+
+function teamRoleKeyForParticipationRole(role) {
+  return {
+    "医生": "doctor",
+    "学生": "student",
+    "其他": "student",
+    "大学老师": "mentor",
+    "博士毕业及以上": "mentor",
+    "Leader": "leader",
+    "项目负责人": "leader"
+  }[role] || "";
 }
 
 function projectRoleCount(teamStatus, role, backendRequiredRoles) {
