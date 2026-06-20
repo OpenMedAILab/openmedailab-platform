@@ -53,7 +53,8 @@ test("admin project form exposes progress document upload separately from the ma
 test("planned recruitment theme progress discussion and faq entry features are wired", () => {
   assert.match(mainSource, /overfilled/);
   assert.doesNotMatch(mainSource, /超额/);
-  assert.match(stylesSource, /\.project-role-chip-row > span\.overfilled\s*\{/);
+  assert.doesNotMatch(stylesSource, /\.project-role-chip-row > span\.overfilled\s*\{/);
+  assert.doesNotMatch(stylesSource, /\.project-role-chip-row > span\.self-role\.overfilled\s*\{/);
 
   assert.match(apiSource, /adminReorderThemes/);
   assert.match(apiSource, /\/api\/admin\/themes\/reorder\//);
@@ -183,15 +184,36 @@ test("project interaction buttons use a compact responsive grid without stretchi
   assert.match(mainSource, /项目负责人审批中/);
   assert.match(mainSource, /claim-action-button/);
   assert.match(mainSource, /sponsor-action-button/);
-  assert.match(stylesSource, /\.project-interaction-actions\s*\{[\s\S]*?display:\s*grid;[\s\S]*?grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(104px,\s*142px\)\);[\s\S]*?justify-content:\s*start;/);
+  assert.match(stylesSource, /\.project-interaction-actions\s*\{[\s\S]*?display:\s*grid;[\s\S]*?grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(88px,\s*112px\)\);[\s\S]*?justify-content:\s*start;[\s\S]*?max-width:\s*720px;/);
   assert.match(stylesSource, /\.project-interaction-actions button\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?white-space:\s*normal;/);
-  assert.match(stylesSource, /\.project-interaction-actions \.sponsor-action-button\s*\{[\s\S]*?border-color:\s*rgba\(217,\s*154,\s*24,\s*0\.4\);/);
+  assert.doesNotMatch(stylesSource, /\.project-interaction-actions \.sponsor-action-button\s*\{[\s\S]*?rgba\(217,\s*154,\s*24/);
+  assert.doesNotMatch(stylesSource, /\.sponsor-action-button\.interaction-active\s*\{[\s\S]*?#ffefd0/);
+  assert.match(stylesSource, /\.interaction-button\.interaction-active\s*\{[\s\S]*?background:\s*#e8f7f4;[\s\S]*?color:\s*#08766f;/);
   assert.match(stylesSource, /\.interaction-button > span:last-child\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?overflow-wrap:\s*anywhere;/);
   assert.match(stylesSource, /\.interaction-icon\s*\{[\s\S]*?flex:\s*0 0 auto;/);
-  assert.match(stylesSource, /@media \(max-width:\s*980px\)\s*\{[\s\S]*?\.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\);/);
+  assert.match(stylesSource, /@media \(max-width:\s*980px\)\s*\{[\s\S]*?\.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(88px,\s*112px\)\);[\s\S]*?width:\s*auto;[\s\S]*?max-width:\s*720px;[\s\S]*?min-width:\s*min\(100%,\s*360px\);[\s\S]*?justify-content:\s*start;/);
+  assert.doesNotMatch(stylesSource, /@media \(max-width:\s*980px\)\s*\{[\s\S]*?\.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\);/);
+  assert.doesNotMatch(stylesSource, /@media \(max-width:\s*980px\)\s*\{[\s\S]*?\.project-interaction-actions button\s*\{[\s\S]*?min-height:\s*42px;/);
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card-footer\s*\{[\s\S]*?align-items:\s*stretch;[\s\S]*?flex-direction:\s*column;/);
-  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*none;[\s\S]*?min-width:\s*0;[\s\S]*?justify-content:\s*stretch;/);
+  assert.doesNotMatch(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-interaction-actions button\s*\{[\s\S]*?min-height:\s*40px;/);
   assert.match(stylesSource, /@media \(max-width:\s*380px\)\s*\{[\s\S]*?\.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*1fr;/);
+  assert.doesNotMatch(stylesSource, /@media \(max-width:\s*380px\)\s*\{[\s\S]*?\.project-interaction-actions button\s*\{[\s\S]*?min-height:\s*38px;/);
+  assert.match(stylesSource, /\.project-pdf-actions \.ghost-button,\s*\.project-pdf-actions \.pdf-download-link,\s*\.project-pdf-actions \.pdf-view-link\s*\{[\s\S]*?min-height:\s*44px;/);
+});
+
+test("team role chips expose self-role state accessibly across cards and progress page", () => {
+  assert.match(mainSource, /function selfTeamRoleKeys\(project\)/);
+  assert.match(mainSource, /function isSelfTeamRole\(project,\s*role\)/);
+  assert.match(mainSource, /function teamRoleAriaLabel\(role\)/);
+  assert.match(mainSource, /function requiredTeamRoles\(teamStatus,\s*project/);
+  assert.match(mainSource, /v-for="role in requiredTeamRoles\(project\.team_status,\s*project\)"/);
+  assert.match(mainSource, /v-for="role in requiredTeamRoles\(state\.projectProgress\.project\.team_status,\s*state\.projectProgress\.project\)"/);
+  assert.match(mainSource, /'self-role': role\.isSelfRole/);
+  assert.match(mainSource, /:aria-label="teamRoleAriaLabel\(role\)"/);
+  assert.match(stylesSource, /\.project-role-chip-row > span\.self-role\s*\{[\s\S]*?background:\s*#fff4d2;[\s\S]*?color:\s*#7a4c00;/);
+  assert.doesNotMatch(stylesSource, /\.project-role-chip-row > span\.self-role\.overfilled\s*\{/);
+  assert.match(stylesSource, /\.project-role-chip-row > span:focus-visible,\s*\.team-role-chip:focus-visible\s*\{[\s\S]*?outline:\s*2px solid/);
 });
 
 test("project interaction icons do not leak ligature text when the icon font is unavailable", () => {
@@ -456,7 +478,7 @@ test("project cards keep compact summary UI without hover status styles", () => 
   assert.match(stylesSource, /\.project-card-meta span\.ready\s*\{/);
   assert.match(stylesSource, /\.project-startup-status\.ready > span\s*\{/);
   assert.match(stylesSource, /\.project-role-chip-row > span\.ready\s*\{/);
-  assert.match(stylesSource, /\.project-role-chip-row > span\.overfilled\s*\{/);
+  assert.doesNotMatch(stylesSource, /\.project-role-chip-row > span\.overfilled\s*\{/);
   assert.match(stylesSource, /\.project-stage-chip\.stage-active\s*\{/);
   assert.match(stylesSource, /\.project-funding-chip\.funded\s*\{/);
   assert.match(stylesSource, /\.project-expanded-detail\s*\{/);
@@ -613,12 +635,25 @@ test("project lifecycle actions are gated by project stage and review status", (
   assert.match(mainSource, /aria-controls="sponsor-popover"/);
   assert.match(mainSource, /aria-expanded/);
   assert.match(mainSource, /管理资助/);
+  assert.match(mainSource, /当前资助/);
+  assert.match(mainSource, /activeSponsorRequestsForProject\(state\.sponsorModal\.project\)/);
+  assert.match(mainSource, /sponsor-current-list/);
+  assert.match(mainSource, /sponsor-current-row/);
+  assert.match(mainSource, /撤回\{\{\s*sponsorTypeLabel\(request\.sponsor_type\)\s*\}\}/);
+  assert.match(mainSource, /withdrawSponsorRequest\(state\.sponsorModal\.project,\s*request\)/);
+  assert.match(mainSource, /isWithdrawingSponsor,/);
+  assert.match(mainSource, /isSponsorTypeActive\(state\.sponsorModal\.project,\s*item\.value\)/);
+  assert.match(mainSource, /confirmText:\s*`撤回\$\{typeLabel\}`/);
+  assert.doesNotMatch(mainSource, /requestsToWithdraw/);
+  assert.match(stylesSource, /\.sponsor-current-list\s*\{/);
+  assert.match(stylesSource, /\.sponsor-current-row\s*\{/);
+  assert.match(stylesSource, /\.sponsor-popover \.sponsor-withdraw-button\.ghost-button\s*\{[\s\S]*?min-height:\s*44px;[\s\S]*?height:\s*auto;/);
   assert.doesNotMatch(mainSource, /<select v-model="state\.forms\.sponsor\.sponsor_type"/);
   assert.doesNotMatch(mainSource, /extra_type/);
   assert.doesNotMatch(mainSource, /async function submitParticipationRequest\(project\)[\s\S]*?await loadProjects\(\{ reset: true \}\);[\s\S]*?async function handleParticipationAction/);
   assert.doesNotMatch(mainSource, /async function submitLeadClaim\(project\)[\s\S]*?await loadProjects\(\{ reset: true \}\);[\s\S]*?async function submitSponsor/);
   assert.doesNotMatch(mainSource, /async function submitSponsor\(project\)[\s\S]*?await loadProjects\(\{ reset: true \}\);[\s\S]*?async function withdrawSponsorRequest/);
-  assert.match(mainSource, /api\.withdrawInteraction\("sponsor",\s*request\.id/);
+  assert.match(mainSource, /api\.withdrawInteraction\("sponsor",\s*targetRequest\.id/);
   assert.match(mainSource, /撤回资助/);
   assert.match(mainSource, /function withdrawParticipationRequest\(project\)/);
   assert.match(mainSource, /api\.withdrawInteraction\("interest",\s*request\.id/);
@@ -631,7 +666,7 @@ test("project lifecycle actions are gated by project stage and review status", (
   assert.match(mainSource, /document\.querySelector\("\.sponsor-popover"\)\?\.getBoundingClientRect\?\.\(\)/);
   assert.match(mainSource, /width:\s*popoverRect\.width,[\s\S]*?height:\s*popoverRect\.height/);
   assert.match(mainSource, /sponsorPopoverPositionFromTrigger\(trigger,\s*renderedSize\)/);
-  assert.match(mainSource, /realignSponsorPopoverFromRenderedSize\(state\.sponsorModal\.returnFocus\);[\s\S]*?document\.querySelector\("\.sponsor-popover input:not\(:disabled\)"\)\?\.focus\(\);/);
+  assert.match(mainSource, /realignSponsorPopoverFromRenderedSize\(state\.sponsorModal\.returnFocus\);[\s\S]*?document\.querySelector\("\.sponsor-popover \.sponsor-withdraw-button:not\(:disabled\), \.sponsor-popover input:not\(:disabled\)"\)\?\.focus\(\);/);
   assert.match(mainSource, /function handleSponsorPopoverViewportChange\(\)[\s\S]*?realignSponsorPopoverFromRenderedSize\(\)/);
   assert.match(mainSource, /window\.addEventListener\("resize",\s*handleSponsorPopoverViewportChange\)/);
   assert.match(mainSource, /window\.removeEventListener\("resize",\s*handleSponsorPopoverViewportChange\)/);

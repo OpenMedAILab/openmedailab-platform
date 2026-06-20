@@ -18,7 +18,16 @@ from django.utils import timezone
 
 from accounts.models import PLATFORM_ADMIN_UID, RoleType
 from credits.models import Contribution, ContributionStatus, CreditLedger
-from interactions.models import InteractionStatus, ProjectClaimIntent, ProjectFollow, ProjectInterest, ProjectScore, SponsorIntent
+from interactions.models import (
+    ClaimType,
+    InteractionStatus,
+    ParticipationRole,
+    ProjectClaimIntent,
+    ProjectFollow,
+    ProjectInterest,
+    ProjectScore,
+    SponsorIntent,
+)
 from projects.importing import create_project
 from projects.models import AuditLog, Project, ProjectDiscussion, ProjectDocument, ProjectProgressEntry, ProjectStage, ProjectTask, Tag, Theme, ThemeFile
 
@@ -307,6 +316,8 @@ class ApiTests(TestCase):
         self.assertEqual(viewer["score"]["score"], 10)
         self.assertIn("学生", viewer["interest_roles"])
         self.assertIn("leader", viewer["claim_types"])
+        self.assertIn("student", viewer["team_role_keys"])
+        self.assertIn("leader", viewer["team_role_keys"])
         self.assertIn("compute", viewer["sponsor_types"])
         self.assertEqual(len(viewer["sponsor_requests"]), 1)
         self.assertEqual(viewer["sponsor_requests"][0]["sponsor_type"], "compute")
@@ -319,6 +330,78 @@ class ApiTests(TestCase):
         self.assertEqual(withdrawn_response.status_code, 200)
         withdrawn_viewer = withdrawn_response.json()["data"]["results"][0]["viewer_state"]
         self.assertNotIn("leader", withdrawn_viewer["claim_types"])
+        self.assertNotIn("leader", withdrawn_viewer["team_role_keys"])
+        self.assertIn("student", withdrawn_viewer["team_role_keys"])
+
+    def test_viewer_state_team_role_keys_cover_roles_and_public_endpoints(self):
+        def make_user(username, role_type=RoleType.OTHER):
+            user = User.objects.create_user(
+                username=username,
+                email=f"{username}@example.com",
+                password="StrongPass12345",
+            )
+            user.profile.role_type = role_type
+            user.profile.save(update_fields=["role_type", "updated_at"])
+            return user
+
+        doctor = make_user("viewerdoctor", RoleType.DOCTOR)
+        student = make_user("viewerstudent", RoleType.MASTER_STUDENT)
+        mentor = make_user("viewermentor", RoleType.PHD_OR_ABOVE)
+        leader_interest = make_user("viewerleaderinterest", RoleType.ENGINEER)
+        leader_claim = make_user("viewerleaderclaim", RoleType.OTHER)
+        paper_only = make_user("viewerpaperonly", RoleType.PHD_OR_ABOVE)
+        sponsor_only = make_user("viewersponsoronly", RoleType.PHD_OR_ABOVE)
+        withdrawn = make_user("viewerwithdrawn", RoleType.DOCTOR)
+        rejected = make_user("viewerrejected", RoleType.DOCTOR)
+
+        ProjectInterest.objects.create(user=doctor, project=self.project, role=ParticipationRole.DOCTOR, status=InteractionStatus.APPROVED)
+        ProjectInterest.objects.create(user=student, project=self.project, role=ParticipationRole.OTHER, status=InteractionStatus.APPROVED)
+        ProjectInterest.objects.create(user=mentor, project=self.project, role=ParticipationRole.TEACHER, status=InteractionStatus.PENDING)
+        ProjectInterest.objects.create(user=leader_interest, project=self.project, role=ParticipationRole.LEADER, status=InteractionStatus.APPROVED)
+        ProjectClaimIntent.objects.create(user=leader_claim, project=self.project, claim_type=ClaimType.LEADER, status=InteractionStatus.PENDING)
+        ProjectClaimIntent.objects.create(
+            user=paper_only,
+            project=self.project,
+            claim_type=ClaimType.PAPER_FIRST_UNIT,
+            claimed_unit_name="北京协和医院",
+            status=InteractionStatus.PENDING,
+        )
+        SponsorIntent.objects.create(user=sponsor_only, project=self.project, sponsor_type="compute", status=InteractionStatus.APPROVED)
+        ProjectInterest.objects.create(user=withdrawn, project=self.project, role=ParticipationRole.DOCTOR, status=InteractionStatus.WITHDRAWN)
+        ProjectClaimIntent.objects.create(user=rejected, project=self.project, claim_type=ClaimType.LEADER, status=InteractionStatus.REJECTED)
+
+        cases = [
+            (doctor, {"doctor"}),
+            (student, {"student"}),
+            (mentor, {"mentor"}),
+            (leader_interest, {"leader"}),
+            (leader_claim, {"leader"}),
+            (paper_only, set()),
+            (sponsor_only, set()),
+            (withdrawn, set()),
+            (rejected, set()),
+        ]
+
+        for user, expected_keys in cases:
+            self.client.force_login(user)
+            list_response = self.client.get("/api/projects/?page_size=10")
+            detail_response = self.client.get(f"/api/projects/{self.project.pk}/")
+            progress_response = self.client.get(f"/api/projects/{self.project.pk}/progress/")
+            status_response = self.client.get(f"/api/projects/{self.project.pk}/status-card/")
+
+            self.assertEqual(list_response.status_code, 200)
+            self.assertEqual(detail_response.status_code, 200)
+            self.assertEqual(progress_response.status_code, 200)
+            self.assertEqual(status_response.status_code, 200)
+
+            endpoint_viewers = [
+                list_response.json()["data"]["results"][0]["viewer_state"],
+                detail_response.json()["data"]["viewer_state"],
+                progress_response.json()["data"]["project"]["viewer_state"],
+                status_response.json()["data"]["viewer_state"],
+            ]
+            for viewer in endpoint_viewers:
+                self.assertEqual(set(viewer["team_role_keys"]), expected_keys)
 
     def test_project_progress_viewer_state_includes_active_sponsor_request_details(self):
         user = User.objects.create_user(username="progresssponsor", email="progresssponsor@example.com", password="StrongPass12345")
@@ -2807,6 +2890,78 @@ class ApiTests(TestCase):
                 target_type="SponsorIntent",
                 target_id=str(intent.pk),
             ).exists()
+        )
+
+    def test_user_can_withdraw_pending_and_approved_sponsor_intents(self):
+        sponsor_user = User.objects.create_user(username="sponsorwithdrawactive", email="sponsor-withdraw-active@example.com", password="StrongPass12345")
+        pending = SponsorIntent.objects.create(user=sponsor_user, project=self.project, sponsor_type="compute", status=InteractionStatus.PENDING)
+        approved = SponsorIntent.objects.create(user=sponsor_user, project=self.project, sponsor_type="labor_fee", status=InteractionStatus.APPROVED)
+        self.client.force_login(sponsor_user)
+
+        pending_response = self.patch_json(
+            f"/api/me/interactions/sponsor/{pending.pk}/withdraw/",
+            {"reason": "用户主动撤回资助算力"},
+        )
+        approved_response = self.patch_json(
+            f"/api/me/interactions/sponsor/{approved.pk}/withdraw/",
+            {"reason": "用户主动撤回资助劳务费"},
+        )
+
+        self.assertEqual(pending_response.status_code, 200)
+        self.assertEqual(approved_response.status_code, 200)
+        pending.refresh_from_db()
+        approved.refresh_from_db()
+        self.assertEqual(pending.status, InteractionStatus.WITHDRAWN)
+        self.assertEqual(approved.status, InteractionStatus.WITHDRAWN)
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=sponsor_user,
+                action="interaction.withdraw",
+                target_type="SponsorIntent",
+                target_id=str(pending.pk),
+            ).exists()
+        )
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=sponsor_user,
+                action="interaction.withdraw",
+                target_type="SponsorIntent",
+                target_id=str(approved.pk),
+            ).exists()
+        )
+
+    def test_user_cannot_withdraw_inactive_sponsor_intents(self):
+        sponsor_user = User.objects.create_user(username="sponsorwithdrawinactive", email="sponsor-withdraw-inactive@example.com", password="StrongPass12345")
+        rejected = SponsorIntent.objects.create(user=sponsor_user, project=self.project, sponsor_type="token", status=InteractionStatus.REJECTED)
+        withdrawn = SponsorIntent.objects.create(user=sponsor_user, project=self.project, sponsor_type="compute", status=InteractionStatus.WITHDRAWN)
+        self.client.force_login(sponsor_user)
+
+        rejected_response = self.patch_json(
+            f"/api/me/interactions/sponsor/{rejected.pk}/withdraw/",
+            {"reason": "重复撤回被拒绝资助"},
+        )
+        withdrawn_response = self.patch_json(
+            f"/api/me/interactions/sponsor/{withdrawn.pk}/withdraw/",
+            {"reason": "重复撤回已撤回资助"},
+        )
+
+        self.assertEqual(rejected_response.status_code, 422)
+        self.assertEqual(withdrawn_response.status_code, 422)
+        self.assertEqual(rejected_response.json()["error"]["code"], "interaction_not_withdrawable")
+        self.assertEqual(withdrawn_response.json()["error"]["code"], "interaction_not_withdrawable")
+        rejected.refresh_from_db()
+        withdrawn.refresh_from_db()
+        self.assertEqual(rejected.status, InteractionStatus.REJECTED)
+        self.assertEqual(withdrawn.status, InteractionStatus.WITHDRAWN)
+        self.assertEqual(
+            AuditLog.objects.filter(
+                actor=sponsor_user,
+                action="interaction.withdraw",
+                target_type="SponsorIntent",
+                status="failed",
+                error_code="interaction_not_withdrawable",
+            ).count(),
+            2,
         )
 
     def test_database_lock_retry_retries_locked_operations_until_success(self):

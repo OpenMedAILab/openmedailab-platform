@@ -1489,6 +1489,18 @@ def me_interaction_withdraw(request, type: str, interaction_id: int, payload: In
                     error_message="当前认领状态不可撤回。",
                 )
                 return fail("当前认领状态不可撤回。", status=422, code="interaction_not_withdrawable")
+        if type == "sponsor" and item.status not in ACTIVE_VIEWER_INTERACTION_STATUSES:
+            audit(
+                request.user,
+                "interaction.withdraw",
+                item.__class__.__name__,
+                item.pk,
+                before=before,
+                status="failed",
+                error_code="interaction_not_withdrawable",
+                error_message="当前资助状态不可撤回。",
+            )
+            return fail("当前资助状态不可撤回。", status=422, code="interaction_not_withdrawable")
         item.status = InteractionStatus.WITHDRAWN
         item.save(update_fields=["status", "updated_at"])
         after = interaction_payload(type, item)
@@ -4360,6 +4372,7 @@ def viewer_state(user, project):
         "score": score_payload(score) if score else None,
         "interest_roles": [interest.role for interest in active_interests],
         "claim_types": [claim.claim_type for claim in active_claims],
+        "team_role_keys": viewer_team_role_keys(active_interests, active_claims),
         "sponsor_types": [sponsor.sponsor_type for sponsor in active_sponsors],
         "sponsor_requests": [sponsor_payload(sponsor) for sponsor in active_sponsors],
         "activity_labels": activity_labels,
@@ -4488,6 +4501,8 @@ def collaboration_contact_payload(user, include_name=True, include_wechat=False)
 
 
 def interest_team_role_key(interest):
+    if interest.role == ParticipationRole.LEADER:
+        return "leader"
     profile = getattr(interest.user, "profile", None)
     role_type = normalize_public_role(getattr(profile, "role_type", ""))
     if not role_type:
@@ -4507,6 +4522,19 @@ def interest_team_role_key(interest):
     if role_type == RoleType.PHD_OR_ABOVE:
         return "mentor"
     return ""
+
+
+def viewer_team_role_keys(active_interests, active_claims):
+    order = {"doctor": 0, "student": 1, "mentor": 2, "leader": 3}
+    keys = set()
+    for interest in active_interests:
+        key = interest_team_role_key(interest)
+        if key:
+            keys.add(key)
+    for claim in active_claims:
+        if claim.claim_type == ClaimType.LEADER:
+            keys.add("leader")
+    return sorted(keys, key=lambda item: order.get(item, len(order)))
 
 
 def project_team_contact_groups(project, include_wechat=False):
