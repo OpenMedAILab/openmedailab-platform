@@ -6,6 +6,7 @@ from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 
+from accounts.models import is_platform_admin_user
 from interactions.forms import ProjectClaimIntentForm, ProjectInterestForm, ProjectScoreForm, SponsorIntentForm
 from interactions.models import ProjectClaimIntent, ProjectFollow, ProjectInterest, ProjectScore, SponsorIntent
 from interactions.services import project_stat_annotations, recalculate_project_community_score
@@ -158,6 +159,9 @@ def score_project(request, pk):
 @login_required
 def interest_project(request, pk):
     project = get_object_or_404(Project, pk=pk, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
+    if is_platform_admin_user(request.user):
+        messages.error(request, "系统管理员不能参与、认领或资助课题。")
+        return _project_redirect(project)
     if project.stage not in RECRUITING_PROJECT_STAGES:
         messages.error(request, "当前课题不在招募阶段。")
         return _project_redirect(project)
@@ -183,6 +187,9 @@ def interest_project(request, pk):
 @login_required
 def claim_project(request, pk):
     project = get_object_or_404(Project, pk=pk, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
+    if is_platform_admin_user(request.user):
+        messages.error(request, "系统管理员不能参与、认领或资助课题。")
+        return _project_redirect(project)
     if project.stage not in RECRUITING_PROJECT_STAGES:
         messages.error(request, "当前课题不在招募阶段。")
         return _project_redirect(project)
@@ -203,6 +210,9 @@ def claim_project(request, pk):
 @login_required
 def sponsor_project(request, pk):
     project = get_object_or_404(Project, pk=pk, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
+    if is_platform_admin_user(request.user):
+        messages.error(request, "系统管理员不能参与、认领或资助课题。")
+        return _project_redirect(project)
     if project.stage not in RECRUITING_PROJECT_STAGES:
         messages.error(request, "当前课题不在招募阶段。")
         return _project_redirect(project)

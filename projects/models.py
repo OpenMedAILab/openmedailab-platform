@@ -98,13 +98,16 @@ class Project(models.Model):
 
     @property
     def team_status(self):
-        from accounts.models import PUBLIC_ROLE_CHOICES, RoleType, normalize_public_role
+        from accounts.models import PLATFORM_ADMIN_UID, PUBLIC_ROLE_CHOICES, RoleType, normalize_public_role
 
         role_counts = {role: 0 for role in ["医生", "学生", "Leader", "大学老师", "AI工程师", "工程师", "医学统计"]}
-        for item in self.interests.filter(status="approved").values("role").annotate(count=models.Count("id")):
+        active_interests = self.interests.filter(status="approved").exclude(user__profile__uid=PLATFORM_ADMIN_UID)
+        active_claims = self.claim_intents.filter(status="approved").exclude(user__profile__uid=PLATFORM_ADMIN_UID)
+        active_sponsors = self.sponsor_intents.filter(status="approved").exclude(user__profile__uid=PLATFORM_ADMIN_UID)
+        for item in active_interests.values("role").annotate(count=models.Count("id")):
             role_counts[item["role"]] = item["count"]
         profile_group_counts = {value: 0 for value, _ in PUBLIC_ROLE_CHOICES}
-        approved_interests = self.interests.filter(status="approved").select_related("user__profile")
+        approved_interests = active_interests.select_related("user__profile")
         for interest in approved_interests:
             profile = getattr(interest.user, "profile", None)
             role_type = normalize_public_role(getattr(profile, "role_type", ""))
@@ -124,8 +127,8 @@ class Project(models.Model):
             {"role_type": value, "label": label, "count": profile_group_counts[value]}
             for value, label in PUBLIC_ROLE_CHOICES
         ]
-        sponsor_count = self.sponsor_intents.filter(status="approved").count()
-        leader_count = self.claim_intents.filter(status="approved", claim_type="leader").count() + role_counts.get("Leader", 0)
+        sponsor_count = active_sponsors.count()
+        leader_count = active_claims.filter(claim_type="leader").count() + role_counts.get("Leader", 0)
         student_profile_count = (
             profile_group_counts.get(RoleType.UNDERGRAD_OR_BELOW, 0)
             + profile_group_counts.get(RoleType.MASTER_STUDENT, 0)

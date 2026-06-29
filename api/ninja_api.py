@@ -15,7 +15,7 @@ from django.contrib.auth.forms import SetPasswordForm
 from django.contrib.auth.models import User
 from django.core.paginator import Paginator
 from django.db import IntegrityError, OperationalError, close_old_connections, transaction
-from django.db.models import Case, Exists, F, IntegerField, OuterRef, Q, Value, When
+from django.db.models import BooleanField, Case, Exists, F, IntegerField, OuterRef, Q, Value, When
 from django.http import Http404, HttpResponse
 from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404
@@ -28,7 +28,7 @@ from ninja.security import SessionAuth
 
 from config.release import APP_VERSION, release_payload
 from accounts.forms import RegisterForm, UserProfileForm
-from accounts.models import PLATFORM_ADMIN_UID, PUBLIC_ROLE_CHOICES, RoleType, UserProfile, normalize_public_role
+from accounts.models import PLATFORM_ADMIN_UID, PUBLIC_ROLE_CHOICES, RoleType, UserProfile, is_platform_admin_user, normalize_public_role
 from accounts.services import (
     DefaultPasswordConfigError,
     create_registered_user,
@@ -715,6 +715,13 @@ def profile_put(request, payload: ProfilePatchRequest):
 def with_self_relation_rank(projects, user):
     if not getattr(user, "is_authenticated", False):
         return projects
+    if is_platform_admin_user(user):
+        return projects.annotate(
+            self_has_claim=Value(False, output_field=BooleanField()),
+            self_has_interest=Value(False, output_field=BooleanField()),
+            self_has_sponsor=Value(False, output_field=BooleanField()),
+            self_relation_rank=Value(3, output_field=IntegerField()),
+        )
     active_statuses = ACTIVE_VIEWER_INTERACTION_STATUSES
     claim_exists = ProjectClaimIntent.objects.filter(
         project=OuterRef("pk"),
@@ -3005,6 +3012,8 @@ def interest_project(request, project_id: int, payload: InterestRequest):
     if auth_error:
         return auth_error
     project = get_object_or_404(Project, pk=project_id, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
+    if is_platform_admin_user(request.user):
+        return platform_admin_cannot_collaborate_response(request, "interaction.submit_interest", project)
     form = ProjectInterestForm(payload.model_dump())
     if not form.is_valid():
         return audit_failed_response(
@@ -3071,6 +3080,8 @@ def claim_project(request, project_id: int, payload: ClaimRequest):
     if auth_error:
         return auth_error
     project = get_object_or_404(Project, pk=project_id, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
+    if is_platform_admin_user(request.user):
+        return platform_admin_cannot_collaborate_response(request, "interaction.submit_claim", project)
     form = ProjectClaimIntentForm(payload.model_dump())
     if not form.is_valid():
         return audit_failed_response(
@@ -3202,6 +3213,8 @@ def sponsor_project(request, project_id: int, payload: SponsorRequest):
     if auth_error:
         return auth_error
     project = get_object_or_404(Project, pk=project_id, is_public=True, stage__in=PUBLIC_PROJECT_STAGES)
+    if is_platform_admin_user(request.user):
+        return platform_admin_cannot_collaborate_response(request, "interaction.submit_sponsor", project)
     form = SponsorIntentForm(payload.model_dump())
     if not form.is_valid():
         return audit_failed_response(
@@ -3215,7 +3228,17 @@ def sponsor_project(request, project_id: int, payload: SponsorRequest):
         def submit_sponsor():
             with transaction.atomic():
                 locked_project = Project.objects.select_for_update().get(pk=project.pk)
-                if locked_project.stage not in RECRUITING_PROJECT_STAGES:
+                sponsor = (
+                    SponsorIntent.objects.select_for_update()
+                    .filter(
+                        user=request.user,
+                        project=locked_project,
+                        sponsor_type=form.cleaned_data["sponsor_type"],
+                    )
+                    .first()
+                )
+                can_update_existing_active = sponsor and sponsor.status in ACTIVE_VIEWER_INTERACTION_STATUSES
+                if locked_project.stage not in RECRUITING_PROJECT_STAGES and not can_update_existing_active:
                     return audit_failed_response(
                         request.user,
                         "interaction.submit_sponsor",
@@ -3223,13 +3246,15 @@ def sponsor_project(request, project_id: int, payload: SponsorRequest):
                         locked_project.id,
                         fail("Project is not recruiting.", status=422, code="project_not_recruiting"),
                     )
-                sponsor, created = SponsorIntent.objects.select_for_update().get_or_create(
-                    user=request.user,
-                    project=locked_project,
-                    sponsor_type=form.cleaned_data["sponsor_type"],
-                    defaults={"note": form.cleaned_data.get("note", ""), "status": InteractionStatus.PENDING},
-                )
+                created = sponsor is None
                 if created:
+                    sponsor = SponsorIntent.objects.create(
+                        user=request.user,
+                        project=locked_project,
+                        sponsor_type=form.cleaned_data["sponsor_type"],
+                        note=form.cleaned_data.get("note", ""),
+                        status=InteractionStatus.PENDING,
+                    )
                     action = "interaction.submit_sponsor"
                     status_code = 201
                 else:
@@ -3320,6 +3345,16 @@ def audit_failed_response(actor, action, target_type, target_id, response_tuple,
         if not is_database_lock_error(exc):
             raise
     return response_tuple
+
+
+def platform_admin_cannot_collaborate_response(request, action, project):
+    return audit_failed_response(
+        request.user,
+        action,
+        "Project",
+        project.id,
+        fail("系统管理员不能参与、认领或资助课题。", status=403, code="platform_admin_cannot_collaborate"),
+    )
 
 
 def password_reset_form_errors(form):
@@ -3834,6 +3869,8 @@ def contribution_submission_context(request, project_id, title, result_type=None
         is_public=True,
         stage__in=PUBLIC_PROJECT_STAGES,
     )
+    if is_platform_admin_user(request.user):
+        return None, platform_admin_cannot_collaborate_response(request, "contribution.submit", project)
     if project.stage != ProjectStage.ACTIVE:
         return None, fail("Project is not active.", status=422, code="project_not_active")
     if not user_has_approved_project_relation(request.user, project):
@@ -3951,10 +3988,20 @@ def paginated_list(rows, page, page_size, max_page_size=100):
 def participant_uids_for_project(project):
     active_statuses = [InteractionStatus.APPROVED]
     user_ids = set(
-        ProjectInterest.objects.filter(project=project, status__in=active_statuses).values_list("user_id", flat=True)
+        ProjectInterest.objects.filter(project=project, status__in=active_statuses)
+        .exclude(user__profile__uid=PLATFORM_ADMIN_UID)
+        .values_list("user_id", flat=True)
     )
-    user_ids.update(ProjectClaimIntent.objects.filter(project=project, status__in=active_statuses).values_list("user_id", flat=True))
-    user_ids.update(SponsorIntent.objects.filter(project=project, status__in=active_statuses).values_list("user_id", flat=True))
+    user_ids.update(
+        ProjectClaimIntent.objects.filter(project=project, status__in=active_statuses)
+        .exclude(user__profile__uid=PLATFORM_ADMIN_UID)
+        .values_list("user_id", flat=True)
+    )
+    user_ids.update(
+        SponsorIntent.objects.filter(project=project, status__in=active_statuses)
+        .exclude(user__profile__uid=PLATFORM_ADMIN_UID)
+        .values_list("user_id", flat=True)
+    )
     return list(UserProfile.objects.filter(user_id__in=user_ids).order_by("uid").values_list("uid", flat=True))
 
 
@@ -4002,7 +4049,7 @@ def status_uid_groups_for_project(project, authenticated):
         except UserProfile.DoesNotExist:
             return None
 
-    def add_uid(group_type, key, label, uid, sort_key, status="", status_label="", subtype="", subtype_label=""):
+    def add_uid(group_type, key, label, uid, sort_key, status="", status_label="", subtype="", subtype_label="", member=None):
         if not uid:
             return
         group = grouped.setdefault(
@@ -4016,16 +4063,24 @@ def status_uid_groups_for_project(project, authenticated):
                 "subtype": subtype,
                 "subtype_label": subtype_label,
                 "uids": set(),
+                "members": {},
                 "sort_key": sort_key,
             },
         )
         group["uids"].add(uid)
+        if member:
+            group["members"][uid] = member
 
     follow_rows = ProjectFollow.objects.filter(project=project).select_related("user__profile")
     for follow in follow_rows:
         add_uid("follow", "follow", "收藏", profile_uid_for(follow.user), (0, 0, "收藏"))
 
-    interest_rows = ProjectInterest.objects.filter(project=project).select_related("user__profile").order_by("status", "role")
+    interest_rows = (
+        ProjectInterest.objects.filter(project=project)
+        .exclude(user__profile__uid=PLATFORM_ADMIN_UID)
+        .select_related("user__profile")
+        .order_by("status", "role")
+    )
     for interest in interest_rows:
         key = f"interest-{interest.role}-{interest.status}"
         label = f"参与：{interest.get_role_display()}（{interest.get_status_display()}）"
@@ -4041,7 +4096,12 @@ def status_uid_groups_for_project(project, authenticated):
             subtype_label=interest.get_role_display(),
         )
 
-    claim_rows = ProjectClaimIntent.objects.filter(project=project).select_related("user__profile").order_by("status", "claim_type")
+    claim_rows = (
+        ProjectClaimIntent.objects.filter(project=project)
+        .exclude(user__profile__uid=PLATFORM_ADMIN_UID)
+        .select_related("user__profile")
+        .order_by("status", "claim_type")
+    )
     for claim in claim_rows:
         key = f"claim-{claim.claim_type}-{claim.status}"
         label = f"{claim.get_claim_type_display()}（{claim.get_status_display()}）"
@@ -4059,7 +4119,12 @@ def status_uid_groups_for_project(project, authenticated):
             subtype_label=claim.get_claim_type_display(),
         )
 
-    sponsor_rows = SponsorIntent.objects.filter(project=project).select_related("user__profile").order_by("status", "sponsor_type")
+    sponsor_rows = (
+        SponsorIntent.objects.filter(project=project)
+        .exclude(user__profile__uid=PLATFORM_ADMIN_UID)
+        .select_related("user__profile")
+        .order_by("status", "sponsor_type")
+    )
     for sponsor in sponsor_rows:
         key = f"sponsor-{sponsor.sponsor_type}-{sponsor.status}"
         label = f"资助：{sponsor.get_sponsor_type_display()}（{sponsor.get_status_display()}）"
@@ -4073,24 +4138,28 @@ def status_uid_groups_for_project(project, authenticated):
             status_label=sponsor.get_status_display(),
             subtype=sponsor.sponsor_type,
             subtype_label=sponsor.get_sponsor_type_display(),
+            member=collaboration_contact_payload(sponsor.user, include_name=False, include_wechat=True)
+            if sponsor.status == InteractionStatus.APPROVED
+            else None,
         )
 
     groups = []
     for group in sorted(grouped.values(), key=lambda item: item["sort_key"]):
         uids = sorted(group["uids"])
-        groups.append(
-            {
-                "key": group["key"],
-                "type": group["type"],
-                "label": group["label"],
-                "status": group["status"],
-                "status_label": group["status_label"],
-                "subtype": group["subtype"],
-                "subtype_label": group["subtype_label"],
-                "count": len(uids),
-                "uids": uids,
-            }
-        )
+        payload = {
+            "key": group["key"],
+            "type": group["type"],
+            "label": group["label"],
+            "status": group["status"],
+            "status_label": group["status_label"],
+            "subtype": group["subtype"],
+            "subtype_label": group["subtype_label"],
+            "count": len(uids),
+            "uids": uids,
+        }
+        if group["members"]:
+            payload["members"] = [group["members"][uid] for uid in uids if uid in group["members"]]
+        groups.append(payload)
     return {"uids_visible": True, "groups": groups}
 
 
@@ -4125,6 +4194,8 @@ def maybe_advance_project_stage_after_interaction(project, actor):
 
 
 def user_has_approved_project_relation(user, project):
+    if is_platform_admin_user(user):
+        return False
     filters = {"user": user, "project": project, "status": InteractionStatus.APPROVED}
     return (
         ProjectInterest.objects.filter(**filters).exists()
@@ -4351,9 +4422,14 @@ def update_task_after_contribution_review(task, status):
 def viewer_state(user, project):
     score = ProjectScore.objects.filter(user=user, project=project).first()
     is_following = ProjectFollow.objects.filter(user=user, project=project).exists()
-    interests = list(ProjectInterest.objects.filter(user=user, project=project).order_by("-updated_at"))
-    claims = list(ProjectClaimIntent.objects.filter(user=user, project=project).order_by("-updated_at"))
-    sponsors = list(SponsorIntent.objects.filter(user=user, project=project).order_by("-updated_at"))
+    if is_platform_admin_user(user):
+        interests = []
+        claims = []
+        sponsors = []
+    else:
+        interests = list(ProjectInterest.objects.filter(user=user, project=project).order_by("-updated_at"))
+        claims = list(ProjectClaimIntent.objects.filter(user=user, project=project).order_by("-updated_at"))
+        sponsors = list(SponsorIntent.objects.filter(user=user, project=project).order_by("-updated_at"))
     active_interests = [item for item in interests if item.status in ACTIVE_VIEWER_INTERACTION_STATUSES]
     active_claims = [item for item in claims if item.status in ACTIVE_VIEWER_INTERACTION_STATUSES]
     active_sponsors = [item for item in sponsors if item.status in ACTIVE_VIEWER_INTERACTION_STATUSES]
@@ -4396,13 +4472,20 @@ def active_claim_slot_queryset(project, claim_type):
         project=project,
         claim_type=claim_type,
         status__in=ACTIVE_CLAIM_SLOT_STATUSES,
-    )
+    ).exclude(user__profile__uid=PLATFORM_ADMIN_UID)
 
 
 def claim_availability_for_type(user, project, claim_type):
     label = claim_type_label(claim_type)
     relation_label = claim_relation_label(claim_type)
     authenticated = bool(getattr(user, "is_authenticated", False))
+    if authenticated and is_platform_admin_user(user):
+        return {
+            "available": False,
+            "action": "unavailable",
+            "reason_code": "platform_admin_cannot_collaborate",
+            "reason": "系统管理员不能参与、认领或资助课题。",
+        }
     own_active = None
     if authenticated:
         own_active = active_claim_slot_queryset(project, claim_type).filter(user=user).first()
@@ -4549,7 +4632,11 @@ def project_team_contact_groups(project, include_wechat=False):
             groups[key].append(payload)
             seen[key].add(user.id)
 
-    interests = ProjectInterest.objects.filter(project=project, status=InteractionStatus.APPROVED).select_related("user", "user__profile")
+    interests = (
+        ProjectInterest.objects.filter(project=project, status=InteractionStatus.APPROVED)
+        .exclude(user__profile__uid=PLATFORM_ADMIN_UID)
+        .select_related("user", "user__profile")
+    )
     for interest in interests:
         add_member(interest_team_role_key(interest), interest.user)
         if interest.role == ParticipationRole.LEADER:
@@ -4559,7 +4646,7 @@ def project_team_contact_groups(project, include_wechat=False):
         project=project,
         status=InteractionStatus.APPROVED,
         claim_type=ClaimType.LEADER,
-    ).select_related("user", "user__profile")
+    ).exclude(user__profile__uid=PLATFORM_ADMIN_UID).select_related("user", "user__profile")
     for claim in claims:
         add_member("leader", claim.user)
 
@@ -4642,6 +4729,8 @@ def grant_profile_completion_bonus_once(user, actor):
 
 
 def reserved_participation_project_ids(user, exclude_project=None):
+    if is_platform_admin_user(user):
+        return set()
     project_ids = set(
         ProjectInterest.objects.filter(user=user, status__in=ACTIVE_VIEWER_INTERACTION_STATUSES)
         .exclude(project__stage=ProjectStage.ARCHIVED)
@@ -4681,10 +4770,12 @@ def has_required_participation_credits(user, project=None, profile=None):
 def charge_project_participation_credits_once(project, actor):
     user_ids = set(
         ProjectInterest.objects.filter(project=project, status=InteractionStatus.APPROVED)
+        .exclude(user__profile__uid=PLATFORM_ADMIN_UID)
         .values_list("user_id", flat=True)
     )
     user_ids.update(
         ProjectClaimIntent.objects.filter(project=project, status=InteractionStatus.APPROVED)
+        .exclude(user__profile__uid=PLATFORM_ADMIN_UID)
         .values_list("user_id", flat=True)
     )
     charged = []
@@ -4715,10 +4806,12 @@ def charge_project_participation_credits_once(project, actor):
 def grant_project_completion_credits_once(project, actor):
     user_ids = set(
         ProjectInterest.objects.filter(project=project, status=InteractionStatus.APPROVED)
+        .exclude(user__profile__uid=PLATFORM_ADMIN_UID)
         .values_list("user_id", flat=True)
     )
     user_ids.update(
         ProjectClaimIntent.objects.filter(project=project, status=InteractionStatus.APPROVED)
+        .exclude(user__profile__uid=PLATFORM_ADMIN_UID)
         .values_list("user_id", flat=True)
     )
     returned = []

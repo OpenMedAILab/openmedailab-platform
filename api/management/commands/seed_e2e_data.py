@@ -6,6 +6,7 @@ from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from accounts.models import RoleType
@@ -26,6 +27,7 @@ from projects.models import Project, ProjectStage, Tag, Theme
 PASSWORD = "StrongPass12345"
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE_PATH = ROOT / "frontend" / "e2e" / ".state" / "fixture.json"
+E2E_TOPIC_IDS = [9901, 9902, 9903, 9904, 9905, 9906]
 
 
 class Command(BaseCommand):
@@ -214,6 +216,18 @@ class Command(BaseCommand):
             SponsorIntent.objects.update_or_create(
                 user=sponsor,
                 project=rejected_application,
+                sponsor_type=SponsorType.COMPUTE,
+                defaults={
+                    "status": InteractionStatus.REJECTED,
+                    "note": "E2E rejected compute note",
+                    "review_comment": "请补充算力额度和周期",
+                    "reviewed_by": admin,
+                    "reviewed_at": timezone.now(),
+                },
+            )
+            SponsorIntent.objects.update_or_create(
+                user=sponsor,
+                project=rejected_application,
                 sponsor_type=SponsorType.TOKEN,
                 defaults={
                     "status": InteractionStatus.REJECTED,
@@ -260,7 +274,15 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(f"E2E fixture written to {FIXTURE_PATH}"))
 
     def reset_namespaced_records(self):
-        Project.objects.filter(topic_id__gte=9900, title__startswith="E2E_").delete()
+        Project.objects.filter(topic_id__in=E2E_TOPIC_IDS).filter(
+            Q(title__startswith="E2E_")
+            | Q(theme__slug__startswith="e2e-")
+            | Q(created_by__username__startswith="e2e_")
+            | Q(source_payload__seed_namespace="e2e")
+        ).delete()
+        occupied_topic_ids = list(Project.objects.filter(topic_id__in=E2E_TOPIC_IDS).order_by("topic_id").values_list("topic_id", flat=True))
+        if occupied_topic_ids:
+            raise CommandError(f"E2E topic ids are occupied by non-E2E projects: {occupied_topic_ids}")
         Theme.objects.filter(slug__startswith="e2e-").delete()
         Tag.objects.filter(slug__startswith="e2e-").delete()
         User.objects.filter(username__startswith="e2e_").delete()
@@ -297,6 +319,7 @@ class Command(BaseCommand):
                 "created_by": owner,
                 "stage": stage,
                 "is_public": True,
+                "source_payload": {"seed_namespace": "e2e"},
             },
         )
         return project
