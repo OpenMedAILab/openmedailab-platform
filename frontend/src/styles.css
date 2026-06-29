@@ -3201,22 +3201,6 @@ html:not(.material-symbols-ready) .project-interaction-actions button {
   line-height: 1.2;
 }
 
-.sponsor-checkbox-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.sponsor-more-toggle {
-  align-self: flex-start;
-  min-height: 44px;
-  padding-inline: 0;
-}
-
-.sponsor-extra-options {
-  margin-top: -4px;
-}
-
 .review-modal-backdrop {
   position: fixed;
   inset: 0;
