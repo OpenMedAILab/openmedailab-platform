@@ -80,7 +80,7 @@ test("relationship badge geometry and hover strip match product requirement", as
   if (Math.abs(rel.y - topic.y) <= 1) {
     expect(rel.x + rel.width).toBeLessThanOrEqual(topic.x - 8);
   }
-  expect(titleBox.x - cardBox.x).toBeGreaterThanOrEqual(isMobile ? 14 : 18);
+  expect(titleBox.x - cardBox.x).toBeGreaterThanOrEqual(isMobile ? 14 : 16);
   expect(titleBox.x - cardBox.x).toBeLessThanOrEqual(isMobile ? 28 : 34);
   expect(firstChipOffset - (titleBox.x - cardBox.x)).toBeGreaterThanOrEqual(isMobile ? 40 : 44);
   expect(Math.abs(mainBox.x - titleBox.x)).toBeLessThanOrEqual(1);
@@ -113,7 +113,7 @@ test("participation adds the corner ribbon immediately without shifting card con
   const footer = card.locator(".project-card-footer");
   const beforeTitleBox = await title.boundingBox();
   const beforeCardBox = await card.boundingBox();
-  expect(beforeTitleBox.x - beforeCardBox.x).toBeGreaterThanOrEqual(isMobile ? 14 : 18);
+  expect(beforeTitleBox.x - beforeCardBox.x).toBeGreaterThanOrEqual(isMobile ? 14 : 16);
   expect(beforeTitleBox.x - beforeCardBox.x).toBeLessThanOrEqual(isMobile ? 28 : 34);
 
   await card.getByRole("button", { name: /^参与$/ }).click();
@@ -134,7 +134,7 @@ test("participation adds the corner ribbon immediately without shifting card con
   const afterBottomBox = await bottom.boundingBox();
   const afterFooterBox = await footer.boundingBox();
   const afterFirstChip = await card.locator("[data-testid='project-meta-row'] > span").first().boundingBox();
-  expect(afterTitleBox.x - afterCardBox.x).toBeGreaterThanOrEqual(isMobile ? 14 : 18);
+  expect(afterTitleBox.x - afterCardBox.x).toBeGreaterThanOrEqual(isMobile ? 14 : 16);
   expect(afterTitleBox.x - afterCardBox.x).toBeLessThanOrEqual(isMobile ? 28 : 34);
   expect(afterFirstChip.x - afterCardBox.x).toBeGreaterThanOrEqual(isMobile ? 64 : 68);
   expect(afterFirstChip.x - afterCardBox.x).toBeLessThanOrEqual(isMobile ? 82 : 84);
@@ -166,15 +166,18 @@ test("project detail runs a real collaboration CTA flow", async ({ page }) => {
   await expect(page.getByRole("button", { name: /取消参与|已参与/ })).toBeVisible();
 
   const detailActions = page.locator(".project-progress-actions");
-  await detailActions.getByRole("button", { name: /^资助$/ }).click();
+  await detailActions.getByRole("button", { name: /^资助算力$/ }).click();
   const popover = page.getByTestId("sponsor-popover");
-  await expect(popover.getByLabel("资助劳务费")).toBeVisible();
-  await expect(popover.getByLabel("资助算力")).toBeVisible();
-  await popover.getByLabel("资助劳务费").check();
-  await popover.getByLabel("资助算力").check();
+  await expect(popover.getByText("资助算力").first()).toBeVisible();
+  await popover.getByLabel("资助金额/算力情况").fill("E2E 提供 2 张 GPU 一周");
   await expectWithinViewport(page, popover);
   await popover.getByRole("button", { name: /提交资助意向/ }).click();
-  await expect(detailActions.getByRole("button", { name: /管理资助|资助审批中|撤回资助|已资助/ })).toBeVisible();
+  await expect(detailActions.getByRole("button", { name: /管理资助算力/ })).toBeVisible();
+  await detailActions.getByRole("button", { name: /^资助劳务$/ }).click();
+  await expect(popover.getByText("资助劳务").first()).toBeVisible();
+  await popover.getByLabel("资助金额/算力情况").fill("E2E 提供劳务费 1000 元");
+  await popover.getByRole("button", { name: /提交资助意向/ }).click();
+  await expect(detailActions.getByRole("button", { name: /管理资助劳务/ })).toBeVisible();
 });
 
 test("claim reason tooltip, sponsor popover and contact card stay within viewport", async ({ page, isMobile }) => {
@@ -217,8 +220,8 @@ test("claim reason tooltip, sponsor popover and contact card stay within viewpor
     Math.abs(triggerBox.y - (popoverBox.y + popoverBox.height)),
   );
   expect(verticalDistance).toBeLessThanOrEqual(24);
-  const checkboxHeights = await popover.getByRole("checkbox").evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().height));
-  expect(Math.min(...checkboxHeights)).toBeGreaterThanOrEqual(44);
+  const inputHeight = await popover.getByLabel("资助金额/算力情况").evaluate((node) => node.getBoundingClientRect().height);
+  expect(inputHeight).toBeGreaterThanOrEqual(72);
   await page.keyboard.press("Escape");
   await expect(popover).toBeHidden();
   await sponsorButton.click();
@@ -239,61 +242,55 @@ test("pending approval labels do not overflow", async ({ page }) => {
   }
 });
 
-test("approval workflow review modal handles secondary token sponsor flow", async ({ page }, testInfo) => {
+test("approval workflow review modal handles compute sponsor flow", async ({ page }, testInfo) => {
   const data = fixture();
   await loginAs(page, data.users.sponsor, data.users.password);
   await page.goto(`/#/project/${data.projects.public_id}`);
   const detailActions = page.locator(".project-progress-actions");
-  await detailActions.getByRole("button", { name: /^资助$/ }).click();
+  await detailActions.getByRole("button", { name: /^资助算力$/ }).click();
   const popover = page.getByTestId("sponsor-popover");
   await expect(popover).toBeVisible();
-  await popover.getByRole("button", { name: /^更多资助类型$/ }).click();
-  await popover.getByLabel("资助 token").check();
+  await popover.getByLabel("资助金额/算力情况").fill("E2E pending compute");
   await popover.getByRole("button", { name: /提交资助意向/ }).click();
-  await expect(detailActions.getByRole("button", { name: /管理资助|资助审批中|撤回资助|已资助/ })).toBeVisible();
+  await expect(detailActions.getByRole("button", { name: /管理资助算力/ })).toBeVisible();
 
   await page.goto("/#/dashboard");
   await page.getByRole("button", { name: "我的申请", exact: true }).click();
-  await expect(page.getByText(/资助 token|token/).first()).toBeVisible();
-  await captureApprovalScreenshot(page, testInfo, "my-applications-token-pending.png");
+  await expect(page.getByText(/资助算力/).first()).toBeVisible();
+  await captureApprovalScreenshot(page, testInfo, "my-applications-compute-pending.png");
 
   await loginAs(page, data.users.admin, data.users.password);
   await page.goto("/#/admin");
   await page.getByRole("button", { name: "申请审批", exact: true }).click();
-  const sponsorGroup = page.getByTestId("admin-sponsor-group").filter({ hasText: /token|资助 token/ }).first();
+  const sponsorGroup = page.getByTestId("admin-sponsor-group").filter({ hasText: /算力|资助算力/ }).first();
   await expect(sponsorGroup).toBeVisible();
-  await captureApprovalScreenshot(page, testInfo, "admin-approval-token-group.png");
+  await captureApprovalScreenshot(page, testInfo, "admin-approval-compute-group.png");
   await sponsorGroup.getByRole("button", { name: /通过/ }).click();
   const reviewModal = page.getByTestId("admin-review-modal");
   await expect(reviewModal).toBeVisible();
-  await reviewModal.getByLabel("审核意见").fill("token 额度确认");
-  await captureApprovalScreenshot(page, testInfo, "admin-review-modal-token-approve.png");
+  await reviewModal.getByLabel("审核意见").fill("算力额度确认");
+  await captureApprovalScreenshot(page, testInfo, "admin-review-modal-compute-approve.png");
   await reviewModal.getByRole("button", { name: /确认通过/ }).click();
   await expect(page.getByRole("status")).toContainText(/已通过|审批/);
 
   await loginAs(page, data.users.sponsor, data.users.password);
   await page.goto("/#/dashboard");
   await page.getByRole("button", { name: "我的申请", exact: true }).click();
-  await expect(page.getByText(/token 额度确认|已通过|资助 token/).first()).toBeVisible();
-  await captureApprovalScreenshot(page, testInfo, "my-applications-token-approved.png");
+  await expect(page.getByText(/算力额度确认|已通过|资助算力/).first()).toBeVisible();
+  await captureApprovalScreenshot(page, testInfo, "my-applications-compute-approved.png");
 
   await page.goto(`/#/project/${data.projects.public_id}`);
   const updatedDetailActions = page.locator(".project-progress-actions");
-  await updatedDetailActions.getByRole("button", { name: /管理资助|资助/ }).click();
+  await updatedDetailActions.getByRole("button", { name: /管理资助算力/ }).click();
   const updatedPopover = page.getByTestId("sponsor-popover");
   await expect(updatedPopover).toBeVisible();
-  const tokenCheckbox = updatedPopover.getByLabel("资助 token");
-  if (!(await tokenCheckbox.count())) {
-    await updatedPopover.getByRole("button", { name: /^更多资助类型$/ }).click();
-  }
-  await expect(tokenCheckbox).toBeChecked();
-  await tokenCheckbox.uncheck();
-  await updatedPopover.getByRole("button", { name: /提交资助意向/ }).click();
-  await expect(page.getByRole("status")).toContainText(/资助意向已记录|撤回资助 token|已撤回资助/);
+  await updatedPopover.getByRole("button", { name: /撤回资助算力/ }).click();
+  await page.getByRole("dialog", { name: "确认操作" }).getByRole("button", { name: /撤回资助算力/ }).click();
+  await expect(page.getByRole("status")).toContainText(/已撤回资助算力|已撤回资助/);
 
   await page.goto("/#/dashboard");
   await page.getByRole("button", { name: "我的申请", exact: true }).click();
-  await expect(page.getByText(/资助 token|token/).first()).toBeVisible();
+  await expect(page.getByText(/资助算力/).first()).toBeVisible();
   await expect(page.getByText(/已撤回/).first()).toBeVisible();
 });
 
@@ -332,17 +329,21 @@ test("my applications rejected requests open prefilled controls and resubmit to 
   await loginAs(page, data.users.sponsor, data.users.password);
   await page.goto("/#/dashboard");
   await page.getByRole("button", { name: "我的申请", exact: true }).click();
-  const rejectedSponsorCard = page.getByTestId("my-application-card").filter({ hasText: data.projects.rejected_application_title }).filter({ hasText: /资助 token/ }).first();
-  await expect(rejectedSponsorCard).toContainText("请补充 token 额度和周期");
+  const rejectedSponsorCard = page.getByTestId("my-application-card").filter({ hasText: data.projects.rejected_application_title }).filter({ hasText: /资助算力/ }).first();
+  await expect(rejectedSponsorCard).toContainText("请补充算力额度和周期");
   await rejectedSponsorCard.getByRole("button", { name: /重新提交资助/ }).click();
   const popover = page.getByTestId("sponsor-popover");
   await expect(popover).toBeVisible();
-  await expect(popover.getByText("上次审核意见：请补充 token 额度和周期")).toBeVisible();
-  await expect(popover.getByLabel("资助 token")).toBeChecked();
-  await expect(popover.getByLabel("说明")).toHaveValue("E2E rejected token note");
+  await expect(popover.getByText("上次审核意见：请补充算力额度和周期")).toBeVisible();
+  await expect(popover.getByLabel("资助金额/算力情况")).toHaveValue("E2E rejected compute note");
   await popover.getByRole("button", { name: "提交资助意向" }).click();
   await expect(popover).toBeHidden();
   await expect(rejectedSponsorCard).toContainText(/待处理|审批中/);
-  await expect(rejectedSponsorCard).not.toContainText("请补充 token 额度和周期");
+  await expect(rejectedSponsorCard).not.toContainText("请补充算力额度和周期");
   await expect(rejectedSponsorCard.getByRole("button", { name: "撤回资助意向" })).toBeVisible();
+
+  const rejectedTokenCard = page.getByTestId("my-application-card").filter({ hasText: data.projects.rejected_application_title }).filter({ hasText: /资助 token/ }).first();
+  await expect(rejectedTokenCard).toContainText("请补充 token 额度和周期");
+  await expect(rejectedTokenCard.getByRole("button", { name: "查看课题" })).toBeVisible();
+  await expect(rejectedTokenCard.getByRole("button", { name: /重新提交资助/ })).toHaveCount(0);
 });

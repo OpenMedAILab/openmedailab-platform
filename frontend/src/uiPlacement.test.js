@@ -8,6 +8,20 @@ const apiSource = readFileSync(new URL("./api.js", import.meta.url), "utf8");
 const indexSource = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
+function cssRuleBlock(selector, source = stylesSource) {
+  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return source.match(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`))?.[1] || "";
+}
+
+function mediaRange(startQuery, endQuery) {
+  const start = stylesSource.indexOf(startQuery);
+  const end = stylesSource.indexOf(endQuery, start + startQuery.length);
+  if (start === -1) {
+    return "";
+  }
+  return stylesSource.slice(start, end === -1 ? undefined : end);
+}
+
 test("legacy project detail modal state and styles are removed", () => {
   assert.match(mainSource, /<div v-if="state\.toast" class="toast" role="status" aria-live="polite" aria-atomic="true">/);
   assert.doesNotMatch(mainSource, /state\.preview/);
@@ -28,6 +42,7 @@ test("project title opens progress page while pdf actions still open documents",
   assert.match(mainSource, /function projectDetailHref\(project\)/);
   assert.match(mainSource, /activeView === 'project'/);
   assert.match(mainSource, /parts\[0\] === "project"/);
+  assert.match(mainSource, /parts\[2\] === "progress"/);
   assert.match(mainSource, /api\.projectProgress/);
   assert.match(mainSource, /function projectPdfHref\(project\)/);
   assert.match(mainSource, /function projectCardTitle\(project\)/);
@@ -39,6 +54,40 @@ test("project title opens progress page while pdf actions still open documents",
   assert.match(mainSource, /documentHref\(primaryProjectDocument\(project\)\)"\s+download/);
   assert.doesNotMatch(mainSource, /function selectSpace\(slug\)/);
   assert.doesNotMatch(mainSource, /navigate\("space"/);
+});
+
+test("project discussion is a standalone route instead of embedded inside progress", () => {
+  assert.match(mainSource, /parts\[2\] === "discussion"/);
+  assert.match(mainSource, /name: "projectDiscussion"/);
+  assert.match(mainSource, /function projectDiscussionHref\(project\)/);
+  assert.match(mainSource, /activeView === 'projectDiscussion'/);
+  assert.match(mainSource, /class="project-discussion-page"/);
+  assert.match(mainSource, /discussion-page-shell/);
+  assert.match(mainSource, /discussion-bottom-bar/);
+  assert.match(mainSource, /进入讨论区/);
+  assert.match(mainSource, /查看项目进度/);
+  assert.doesNotMatch(mainSource, /class="content-panel project-discussion-section"/);
+});
+
+test("project cards keep communication and progress buttons beside tags while pdf actions stay bottom-right", () => {
+  assert.match(mainSource, /class="project-card-tags-actions"[\s\S]*?>\s*交流区\s*<[\s\S]*?>\s*项目进度\s*</);
+  assert.match(mainSource, /<div v-if="hasPrimaryProjectPdf\(project\)" class="project-pdf-actions">/);
+  const pdfActions = mainSource.match(/<div v-if="hasPrimaryProjectPdf\(project\)" class="project-pdf-actions">[\s\S]*?<\/div>/)?.[0] || "";
+  assert.doesNotMatch(pdfActions, /projectDiscussionHref\(project\)/);
+  assert.doesNotMatch(pdfActions, />\s*交流区\s*</);
+  assert.doesNotMatch(pdfActions, />\s*项目进度\s*</);
+  assert.match(stylesSource, /\.project-card-footer \.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(7,\s*minmax\(72px,\s*1fr\)\);/);
+  assert.match(cssRuleBlock(".project-card-tags-actions"), /flex-wrap:\s*nowrap;/);
+  assert.match(cssRuleBlock(".project-card-inline-actions"), /flex-wrap:\s*nowrap;/);
+  const media980 = mediaRange("@media (max-width: 980px)", "@media (max-width: 640px)");
+  assert.match(cssRuleBlock(".project-card-footer .project-interaction-actions", media980), /grid-template-columns:\s*repeat\(7,\s*minmax\(64px,\s*1fr\)\);/);
+  const media640 = mediaRange("@media (max-width: 640px)", "@media (max-width: 380px)");
+  assert.match(cssRuleBlock(".project-card-tags-actions", media640), /flex-direction:\s*column;/);
+});
+
+test("profile form uses public display name wording", () => {
+  assert.match(mainSource, />对外显示姓名</);
+  assert.doesNotMatch(mainSource, />真实姓名</);
 });
 
 test("admin project form exposes progress document upload separately from the main pdf", () => {
@@ -53,7 +102,8 @@ test("admin project form exposes progress document upload separately from the ma
 test("planned recruitment theme progress discussion and faq entry features are wired", () => {
   assert.match(mainSource, /overfilled/);
   assert.doesNotMatch(mainSource, /超额/);
-  assert.match(stylesSource, /\.project-role-chip-row > span\.overfilled\s*\{/);
+  assert.doesNotMatch(stylesSource, /\.project-role-chip-row > span\.overfilled\s*\{/);
+  assert.doesNotMatch(stylesSource, /\.project-role-chip-row > span\.self-role\.overfilled\s*\{/);
 
   assert.match(apiSource, /adminReorderThemes/);
   assert.match(apiSource, /\/api\/admin\/themes\/reorder\//);
@@ -69,8 +119,8 @@ test("planned recruitment theme progress discussion and faq entry features are w
   assert.match(apiSource, /moderateProjectDiscussion/);
   assert.match(mainSource, /projectProgressDocuments/);
   assert.match(mainSource, /projectProgressTimelineItems/);
-  assert.match(mainSource, /project-discussion-section/);
-  assert.match(mainSource, /登录后参与讨论/);
+  assert.match(mainSource, /project-discussion-page/);
+  assert.match(mainSource, /登录后参与课题讨论/);
   assert.match(stylesSource, /\.project-progress-page\s*\{/);
   assert.match(stylesSource, /\.project-discussion-item\s*\{/);
 
@@ -104,6 +154,11 @@ test("planned recruitment theme progress discussion and faq entry features are w
   assert.match(stylesSource, /\.sidebar-qr-admin-grid\s*\{/);
   assert.doesNotMatch(stylesSource, /\.sidebar-qr-modal-backdrop/);
   assert.match(stylesSource, /\.confirm-modal-backdrop\s*\{[\s\S]*?z-index:\s*900;/);
+});
+
+test("participation hard cap has stable user-facing handling", () => {
+  assert.match(mainSource, /participation_limit_reached/);
+  assert.match(mainSource, /当前身份可同时参与的课题数已达上限/);
 });
 
 test("route changes close workspace and admin modal overlays", () => {
@@ -183,15 +238,36 @@ test("project interaction buttons use a compact responsive grid without stretchi
   assert.match(mainSource, /项目负责人审批中/);
   assert.match(mainSource, /claim-action-button/);
   assert.match(mainSource, /sponsor-action-button/);
-  assert.match(stylesSource, /\.project-interaction-actions\s*\{[\s\S]*?display:\s*grid;[\s\S]*?grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(104px,\s*142px\)\);[\s\S]*?justify-content:\s*start;/);
+  assert.match(stylesSource, /\.project-interaction-actions\s*\{[\s\S]*?display:\s*grid;[\s\S]*?grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(88px,\s*112px\)\);[\s\S]*?justify-content:\s*start;[\s\S]*?max-width:\s*720px;/);
   assert.match(stylesSource, /\.project-interaction-actions button\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?white-space:\s*normal;/);
-  assert.match(stylesSource, /\.project-interaction-actions \.sponsor-action-button\s*\{[\s\S]*?border-color:\s*rgba\(217,\s*154,\s*24,\s*0\.4\);/);
+  assert.doesNotMatch(stylesSource, /\.project-interaction-actions \.sponsor-action-button\s*\{[\s\S]*?rgba\(217,\s*154,\s*24/);
+  assert.doesNotMatch(stylesSource, /\.sponsor-action-button\.interaction-active\s*\{[\s\S]*?#ffefd0/);
+  assert.match(stylesSource, /\.interaction-button\.interaction-active\s*\{[\s\S]*?background:\s*#e8f7f4;[\s\S]*?color:\s*#08766f;/);
   assert.match(stylesSource, /\.interaction-button > span:last-child\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?overflow-wrap:\s*anywhere;/);
   assert.match(stylesSource, /\.interaction-icon\s*\{[\s\S]*?flex:\s*0 0 auto;/);
-  assert.match(stylesSource, /@media \(max-width:\s*980px\)\s*\{[\s\S]*?\.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\);/);
+  assert.match(stylesSource, /@media \(max-width:\s*980px\)\s*\{[\s\S]*?\.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(88px,\s*112px\)\);[\s\S]*?width:\s*auto;[\s\S]*?max-width:\s*720px;[\s\S]*?min-width:\s*min\(100%,\s*360px\);[\s\S]*?justify-content:\s*start;/);
+  assert.doesNotMatch(stylesSource, /@media \(max-width:\s*980px\)\s*\{[\s\S]*?\.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\);/);
+  assert.doesNotMatch(stylesSource, /@media \(max-width:\s*980px\)\s*\{[\s\S]*?\.project-interaction-actions button\s*\{[\s\S]*?min-height:\s*42px;/);
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-card-footer\s*\{[\s\S]*?align-items:\s*stretch;[\s\S]*?flex-direction:\s*column;/);
-  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/);
+  assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*none;[\s\S]*?min-width:\s*0;[\s\S]*?justify-content:\s*stretch;/);
+  assert.doesNotMatch(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.project-interaction-actions button\s*\{[\s\S]*?min-height:\s*40px;/);
   assert.match(stylesSource, /@media \(max-width:\s*380px\)\s*\{[\s\S]*?\.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*1fr;/);
+  assert.doesNotMatch(stylesSource, /@media \(max-width:\s*380px\)\s*\{[\s\S]*?\.project-interaction-actions button\s*\{[\s\S]*?min-height:\s*38px;/);
+  assert.match(stylesSource, /\.project-pdf-actions \.ghost-button,\s*\.project-pdf-actions \.pdf-download-link,\s*\.project-pdf-actions \.pdf-view-link\s*\{[\s\S]*?min-height:\s*44px;/);
+});
+
+test("team role chips expose self-role state accessibly across cards and progress page", () => {
+  assert.match(mainSource, /function selfTeamRoleKeys\(project\)/);
+  assert.match(mainSource, /function isSelfTeamRole\(project,\s*role\)/);
+  assert.match(mainSource, /function teamRoleAriaLabel\(role\)/);
+  assert.match(mainSource, /function requiredTeamRoles\(teamStatus,\s*project/);
+  assert.match(mainSource, /v-for="role in requiredTeamRoles\(project\.team_status,\s*project\)"/);
+  assert.match(mainSource, /v-for="role in requiredTeamRoles\(state\.projectProgress\.project\.team_status,\s*state\.projectProgress\.project\)"/);
+  assert.match(mainSource, /'self-role': role\.isSelfRole/);
+  assert.match(mainSource, /:aria-label="teamRoleAriaLabel\(role\)"/);
+  assert.match(stylesSource, /\.project-role-chip-row > span\.self-role\s*\{[\s\S]*?background:\s*#fff4d2;[\s\S]*?color:\s*#7a4c00;/);
+  assert.doesNotMatch(stylesSource, /\.project-role-chip-row > span\.self-role\.overfilled\s*\{/);
+  assert.match(stylesSource, /\.project-role-chip-row > span:focus-visible,\s*\.team-role-chip:focus-visible\s*\{[\s\S]*?outline:\s*2px solid/);
 });
 
 test("project interaction icons do not leak ligature text when the icon font is unavailable", () => {
@@ -413,21 +489,25 @@ test("project cards keep compact summary UI without hover status styles", () => 
   assert.match(mainSource, /interactionButtonActive\('participation', project\)/);
   assert.match(mainSource, /interactionButtonActive\('lead', project\)/);
   assert.match(mainSource, /interactionButtonActive\('paper', project\)/);
-  assert.match(mainSource, /interactionButtonActive\('sponsor', project\)/);
+  assert.match(mainSource, /interactionButtonActive\('sponsor', project,\s*'compute'\)/);
+  assert.match(mainSource, /interactionButtonActive\('sponsor', project,\s*'labor_fee'\)/);
+  assert.match(mainSource, /function isPlatformAdminUser\(\)/);
+  assert.doesNotMatch(mainSource, /v-if="canUseCollaborationCta\(\)"/);
   assert.match(mainSource, />thumb_up<\/span>/);
   assert.match(mainSource, />star<\/span>/);
   assert.match(mainSource, />groups<\/span>/);
   assert.match(mainSource, />supervisor_account<\/span>/);
   assert.match(mainSource, />workspace_premium<\/span>/);
   assert.match(mainSource, />volunteer_activism<\/span>/);
-  assert.match(mainSource, /@click\.stop="submitLike\(project\)"[\s\S]*?@click\.stop="toggleFollow\(project\)"[\s\S]*?@click\.stop="handleParticipationAction\(project\)"[\s\S]*?@click\.stop="submitLeadClaim\(project,\s*\$event\)"[\s\S]*?@click\.stop="submitPaperClaim\(project,\s*\$event\)"[\s\S]*?@click\.stop="submitSponsor\(project,\s*\$event\)"/);
+  assert.match(mainSource, /@click\.stop="submitLike\(project\)"[\s\S]*?@click\.stop="toggleFollow\(project\)"[\s\S]*?@click\.stop="handleParticipationAction\(project\)"[\s\S]*?@click\.stop="submitLeadClaim\(project,\s*\$event\)"[\s\S]*?@click\.stop="submitPaperClaim\(project,\s*\$event\)"[\s\S]*?@click\.stop="openSponsorModal\(project,\s*'compute',\s*\$event\)"[\s\S]*?@click\.stop="openSponsorModal\(project,\s*'labor_fee',\s*\$event\)"/);
   assert.match(mainSource, /followButtonLabel\(project\)/);
   assert.match(mainSource, /leadClaimButtonLabel\(project\)/);
   assert.match(mainSource, /认领项目负责人/);
   assert.match(mainSource, /项目负责人审批中/);
   assert.match(mainSource, /认领第一单位/);
   assert.doesNotMatch(mainSource, />Lead</);
-  assert.match(mainSource, /sponsorButtonLabel\(project\)/);
+  assert.match(mainSource, /sponsorButtonLabel\(project,\s*'compute'\)/);
+  assert.match(mainSource, /sponsorButtonLabel\(project,\s*'labor_fee'\)/);
   assert.match(mainSource, />招募<\/strong>/);
   assert.match(mainSource, />启动<\/strong>/);
   assert.match(mainSource, /projectRecruitmentText\(project\)/);
@@ -456,7 +536,7 @@ test("project cards keep compact summary UI without hover status styles", () => 
   assert.match(stylesSource, /\.project-card-meta span\.ready\s*\{/);
   assert.match(stylesSource, /\.project-startup-status\.ready > span\s*\{/);
   assert.match(stylesSource, /\.project-role-chip-row > span\.ready\s*\{/);
-  assert.match(stylesSource, /\.project-role-chip-row > span\.overfilled\s*\{/);
+  assert.doesNotMatch(stylesSource, /\.project-role-chip-row > span\.overfilled\s*\{/);
   assert.match(stylesSource, /\.project-stage-chip\.stage-active\s*\{/);
   assert.match(stylesSource, /\.project-funding-chip\.funded\s*\{/);
   assert.match(stylesSource, /\.project-expanded-detail\s*\{/);
@@ -606,19 +686,28 @@ test("project lifecycle actions are gated by project stage and review status", (
   assert.match(mainSource, /撤回论文第一单位认领/);
   assert.doesNotMatch(mainSource, /撤回第一单位/);
   assert.match(mainSource, /function markProjectLeadClaimWithdrawn\(project/);
-  assert.match(mainSource, /async function submitSponsor\(project,\s*event = null,\s*options = \{\}\)/);
-  assert.match(mainSource, /QUICK_SPONSOR_TYPES = \["labor_fee", "compute"\]/);
-  assert.match(mainSource, /v-model="state\.forms\.sponsor\.sponsor_types"/);
+  assert.match(mainSource, /async function openSponsorModal\(project,\s*sponsorType,\s*event = null,\s*options = \{\}\)/);
+  assert.match(mainSource, /QUICK_SPONSOR_TYPES = \["compute", "labor_fee"\]/);
+  assert.doesNotMatch(mainSource, /v-model="state\.forms\.sponsor\.sponsor_types"/);
   assert.match(mainSource, /class="sponsor-popover"/);
   assert.match(mainSource, /aria-controls="sponsor-popover"/);
   assert.match(mainSource, /aria-expanded/);
-  assert.match(mainSource, /管理资助/);
+  assert.match(mainSource, /管理资助算力/);
+  assert.match(mainSource, /管理资助劳务/);
+  assert.match(mainSource, /资助金额\/算力情况/);
+  assert.match(mainSource, /sponsorRequestByType\(state\.sponsorModal\.project,\s*state\.forms\.sponsor\.sponsor_type\)/);
+  assert.match(mainSource, /withdrawSponsorRequest\(state\.sponsorModal\.project,\s*sponsorRequestByType\(state\.sponsorModal\.project,\s*state\.forms\.sponsor\.sponsor_type\)\)/);
+  assert.match(mainSource, /isWithdrawingSponsor,/);
+  assert.match(mainSource, /isSponsorTypeActive\(state\.sponsorModal\.project,\s*state\.forms\.sponsor\.sponsor_type\)/);
+  assert.match(mainSource, /confirmText:\s*`撤回\$\{sponsorTypeButtonLabel\(targetRequest\.sponsor_type\)\}`/);
+  assert.doesNotMatch(mainSource, /requestsToWithdraw/);
+  assert.match(stylesSource, /\.sponsor-popover \.sponsor-withdraw-button\.ghost-button\s*\{[\s\S]*?min-height:\s*44px;[\s\S]*?height:\s*auto;/);
   assert.doesNotMatch(mainSource, /<select v-model="state\.forms\.sponsor\.sponsor_type"/);
   assert.doesNotMatch(mainSource, /extra_type/);
   assert.doesNotMatch(mainSource, /async function submitParticipationRequest\(project\)[\s\S]*?await loadProjects\(\{ reset: true \}\);[\s\S]*?async function handleParticipationAction/);
   assert.doesNotMatch(mainSource, /async function submitLeadClaim\(project\)[\s\S]*?await loadProjects\(\{ reset: true \}\);[\s\S]*?async function submitSponsor/);
-  assert.doesNotMatch(mainSource, /async function submitSponsor\(project\)[\s\S]*?await loadProjects\(\{ reset: true \}\);[\s\S]*?async function withdrawSponsorRequest/);
-  assert.match(mainSource, /api\.withdrawInteraction\("sponsor",\s*request\.id/);
+  assert.doesNotMatch(mainSource, /async function openSponsorModal\(project[\s\S]*?await loadProjects\(\{ reset: true \}\);[\s\S]*?async function withdrawSponsorRequest/);
+  assert.match(mainSource, /api\.withdrawInteraction\("sponsor",\s*targetRequest\.id/);
   assert.match(mainSource, /撤回资助/);
   assert.match(mainSource, /function withdrawParticipationRequest\(project\)/);
   assert.match(mainSource, /api\.withdrawInteraction\("interest",\s*request\.id/);
@@ -631,7 +720,7 @@ test("project lifecycle actions are gated by project stage and review status", (
   assert.match(mainSource, /document\.querySelector\("\.sponsor-popover"\)\?\.getBoundingClientRect\?\.\(\)/);
   assert.match(mainSource, /width:\s*popoverRect\.width,[\s\S]*?height:\s*popoverRect\.height/);
   assert.match(mainSource, /sponsorPopoverPositionFromTrigger\(trigger,\s*renderedSize\)/);
-  assert.match(mainSource, /realignSponsorPopoverFromRenderedSize\(state\.sponsorModal\.returnFocus\);[\s\S]*?document\.querySelector\("\.sponsor-popover input:not\(:disabled\)"\)\?\.focus\(\);/);
+  assert.match(mainSource, /realignSponsorPopoverFromRenderedSize\(state\.sponsorModal\.returnFocus\);[\s\S]*?document\.querySelector\("\.sponsor-popover textarea:not\(:disabled\), \.sponsor-popover \.sponsor-withdraw-button:not\(:disabled\)"\)\?\.focus\(\);/);
   assert.match(mainSource, /function handleSponsorPopoverViewportChange\(\)[\s\S]*?realignSponsorPopoverFromRenderedSize\(\)/);
   assert.match(mainSource, /window\.addEventListener\("resize",\s*handleSponsorPopoverViewportChange\)/);
   assert.match(mainSource, /window\.removeEventListener\("resize",\s*handleSponsorPopoverViewportChange\)/);
@@ -644,7 +733,7 @@ test("project lifecycle actions are gated by project stage and review status", (
   assert.match(mainSource, /重新提交申请/);
   assert.match(mainSource, /重新提交资助/);
   assert.match(mainSource, /handleApplicationAction\(row,\s*event = null\)/);
-  assert.match(mainSource, /preselectedTypes:\s*\[row\.sponsor_type\]/);
+  assert.match(mainSource, /openSponsorModal\(row\.project,\s*row\.sponsor_type,\s*event,/);
   assert.match(mainSource, /previousReviewComment:\s*row\.review_comment/);
   assert.doesNotMatch(mainSource, /重新点赞/);
   assert.match(mainSource, /v-if="canReviewInteraction\(item\)"/);
@@ -689,10 +778,24 @@ test("project cards no longer keep hover status-card state after lifecycle write
   assert.match(mainSource, /\["interest",\s*"claim",\s*"sponsor"\]\.includes\(group\.type\)/);
   assert.match(mainSource, /group\.status === "approved"/);
   assert.match(mainSource, /已获批资助/);
-  assert.match(mainSource, /function invalidateProjectStatusCard\(\)\s*\{\s*return null;/);
-  assert.doesNotMatch(mainSource, /invalidateProjectStatusCard\(projectId\)/);
+  assert.match(mainSource, /function invalidateProjectStatusCard\(projectId = null\)/);
+  assert.match(mainSource, /delete state\.projectStatusCardCache\[projectId\]/);
+  assert.match(mainSource, /state\.projectStatusCardCache = \{\}/);
   assert.match(mainSource, /invalidateProjectStatusCard\(item\.project\?\.id\)/);
   assert.match(mainSource, /invalidateProjectStatusCard\(project\.id\)/);
+});
+
+test("platform admin sees sponsor buttons disabled with sponsor-specific hover reason", () => {
+  assert.match(mainSource, /function platformAdminSponsorReason\(\)/);
+  assert.match(mainSource, /系统管理员不能资助项目/);
+  assert.match(mainSource, /function sponsorButtonAriaDisabled\(project,\s*sponsorType\)/);
+  assert.match(mainSource, /function sponsorButtonDisabledReason\(project,\s*sponsorType\)/);
+  assert.match(mainSource, /isPlatformAdminUser\(\)[\s\S]*?platformAdminSponsorReason\(\)/);
+  assert.match(mainSource, /'is-disabled':\s*!canClickSponsor\(project,\s*'compute'\)/);
+  assert.match(mainSource, /:aria-disabled="sponsorButtonAriaDisabled\(project,\s*'compute'\)"/);
+  assert.match(mainSource, /@mouseenter="showSponsorContactCard\(\$event,\s*project,\s*'compute'\)"/);
+  assert.match(mainSource, /@click\.stop="openSponsorModal\(project,\s*'compute',\s*\$event\)"/);
+  assert.match(mainSource, /showContactHoverCard\(event,\s*sponsorTypeButtonLabel\(sponsorType\),\s*\[[\s\S]*?platformAdminSponsorReason\(\)/);
 });
 
 test("project contact hover cards are fixed viewport-safe overlays", () => {
@@ -700,6 +803,12 @@ test("project contact hover cards are fixed viewport-safe overlays", () => {
   assert.match(mainSource, /class="contact-hover-card floating-contact-card"/);
   assert.match(mainSource, /data-testid="floating-contact-card"/);
   assert.match(mainSource, /function showTeamContactCard\(event,\s*role,\s*project\)/);
+  assert.match(mainSource, /async function showSponsorContactCard\(event,\s*project,\s*sponsorType\)/);
+  assert.match(mainSource, /contactDetailText\(member\)/);
+  assert.match(mainSource, /sponsorContactMembers\(groups,\s*sponsorType\)/);
+  assert.match(mainSource, /flatMap\(\(group\)\s*=>\s*group\.members/);
+  assert.match(mainSource, /detail:\s*contactWechatText\(member\)/);
+  assert.match(mainSource, /name:\s*member\.uid/);
   assert.match(mainSource, /Math\.min\(maxY,\s*Math\.max\(12,\s*rect\.bottom \+ 8\)\)/);
   assert.doesNotMatch(mainSource, /class="contact-hover-card team-contact-card"/);
   assert.doesNotMatch(mainSource, /class="contact-hover-card creator-contact-card"/);
@@ -715,7 +824,8 @@ test("project progress page exposes the same core interaction actions as project
   assert.match(mainSource, /handleParticipationAction\(state\.projectProgress\.project\)/);
   assert.match(mainSource, /submitLeadClaim\(state\.projectProgress\.project,\s*\$event\)/);
   assert.match(mainSource, /submitPaperClaim\(state\.projectProgress\.project,\s*\$event\)/);
-  assert.match(mainSource, /submitSponsor\(state\.projectProgress\.project,\s*\$event\)/);
+  assert.match(mainSource, /openSponsorModal\(state\.projectProgress\.project,\s*'compute',\s*\$event\)/);
+  assert.match(mainSource, /openSponsorModal\(state\.projectProgress\.project,\s*'labor_fee',\s*\$event\)/);
 });
 
 test("claim reason controls remain focusable when unavailable", () => {
@@ -924,13 +1034,15 @@ test("small-screen controls keep touch targets and avoid duplicate theme control
   assert.match(stylesSource, /@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.topic-theme-strip\.single-row\s*\{[\s\S]*?margin-top:\s*8px;/);
 });
 
-test("sponsor popover keeps two quick choices and exposes token progressively", () => {
-  assert.match(mainSource, /const QUICK_SPONSOR_TYPES = \["labor_fee",\s*"compute"\]/);
-  assert.match(mainSource, /moreSponsorTypeOptions = computed\(\(\) => sponsorOptionsByValue\(state\.meta\.sponsor_types \|\| \[\],\s*\["token"\]\)\)/);
-  assert.match(mainSource, /更多资助类型/);
-  assert.match(mainSource, /state\.forms\.sponsor\.show_more_types/);
-  assert.match(mainSource, /sponsorPopoverTypes = \[\.\.\.QUICK_SPONSOR_TYPES,\s*"token"\]/);
-  assert.match(stylesSource, /\.sponsor-more-toggle\s*\{[\s\S]*?min-height:\s*44px;/);
+test("sponsor modal uses two independent main-flow types without token checkbox flow", () => {
+  assert.match(mainSource, /const QUICK_SPONSOR_TYPES = \["compute",\s*"labor_fee"\]/);
+  assert.doesNotMatch(mainSource, /moreSponsorTypeOptions/);
+  assert.doesNotMatch(mainSource, /更多资助类型/);
+  assert.doesNotMatch(mainSource, /state\.forms\.sponsor\.show_more_types/);
+  assert.doesNotMatch(mainSource, /sponsorPopoverTypes = \[\.\.\.QUICK_SPONSOR_TYPES,\s*"token"\]/);
+  assert.doesNotMatch(stylesSource, /\.sponsor-more-toggle\s*\{/);
+  assert.match(mainSource, /openSponsorModal\(row\.project,\s*row\.sponsor_type,\s*event,/);
+  assert.match(mainSource, /if \(!QUICK_SPONSOR_TYPES\.includes\(row\.sponsor_type\)\)\s*\{[\s\S]*?navigate\("project",\s*\{ id: row\.project\?\.id \}\);[\s\S]*?return;[\s\S]*?\}/);
 });
 
 test("legacy approved-project handoff helpers are not returned as product entry points", () => {

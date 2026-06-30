@@ -14,7 +14,7 @@ const TASK_MANAGEMENT_STAGE_VALUES = ["team_building", "active", "paused"];
 const RELATION_STATUS_PRIORITY = { approved: 4, pending: 3, rejected: 2, withdrawn: 1 };
 const WITHDRAWABLE_PARTICIPATION_STATUSES = new Set(["pending", "approved"]);
 const WITHDRAWABLE_CLAIM_STATUSES = new Set(["approved"]);
-const QUICK_SPONSOR_TYPES = ["labor_fee", "compute"];
+const QUICK_SPONSOR_TYPES = ["compute", "labor_fee"];
 const SPONSOR_POPOVER_WIDTH = 320;
 const SPONSOR_POPOVER_HEIGHT = 420;
 const SPONSOR_POPOVER_GAP = 10;
@@ -139,7 +139,7 @@ const FAQ_ENTRIES = [
   },
   {
     question: "如何资助一个课题？",
-    answer: "在课题卡片点击“资助”提交算力、token 或劳务费资助意向。资助意向需要管理员审批，审批通过后会在个人空间和管理端记录状态。"
+    answer: "在课题卡片点击“资助算力”或“资助劳务”提交对应资助意向，并填写资助金额或算力情况。资助意向需要管理员审批，审批通过后会在个人空间和管理端记录状态。"
   },
   {
     question: "主题的数据集说明在哪里看？",
@@ -211,6 +211,7 @@ const state = reactive({
   withdrawingPaperClaimProjectIds: [],
   submittingSponsorProjectIds: [],
   withdrawingSponsorProjectIds: [],
+  projectStatusCardCache: {},
   favoritesLoaded: false,
   profileMenuOpen: false,
   releaseModalOpen: false,
@@ -339,7 +340,7 @@ const state = reactive({
     participation: { authorship_intention: "contribution", message: "" },
     leadClaim: { message: "", error: "", previous_review_comment: "" },
     paperClaim: { claimed_unit_name: "", message: "", error: "", previous_review_comment: "" },
-    sponsor: { sponsor_type: "compute", sponsor_types: [], note: "", show_more_types: false, previous_review_comment: "" },
+    sponsor: { sponsor_type: "compute", note: "", previous_review_comment: "" },
     creditTransfer: { target_uid: "", amount: 50, reason: "" },
     profile: emptyProfileForm(),
     contribution: emptyContributionForm()
@@ -436,9 +437,6 @@ const App = {
     const platformStats = computed(() => state.meta.platform_stats || { registered_user_count: 0, online_user_count: 0, online_window_seconds: 300 });
     const sidebarQrEntries = computed(() => mergeSidebarQrEntries(state.meta.sidebar_qr_entries || []));
     const faqQrEntries = computed(() => sidebarQrEntries.value.filter((entry) => entry.has_image && sidebarQrImageSrc(entry)));
-    const sponsorTypeOptions = computed(() => preferredSponsorTypes(state.meta.sponsor_types || []));
-    const quickSponsorTypeOptions = computed(() => sponsorOptionsByValue(state.meta.sponsor_types || [], QUICK_SPONSOR_TYPES));
-    const moreSponsorTypeOptions = computed(() => sponsorOptionsByValue(state.meta.sponsor_types || [], ["token"]));
     const authorshipIntentOptions = computed(() => state.meta.authorship_intents?.length ? state.meta.authorship_intents : [
       { value: "no_interest", label: "对署名没有兴趣" },
       { value: "contribution", label: "普通参与，按贡献" },
@@ -598,6 +596,9 @@ const App = {
       if (state.route.name === "project") {
         await loadProjectProgress();
       }
+      if (state.route.name === "projectDiscussion") {
+        await loadProjectDiscussionPage();
+      }
       if (state.route.name === "favorites") {
         await loadFavorites({ force: true });
       }
@@ -680,7 +681,38 @@ const App = {
       await loadProjects();
     }
 
+    function syncProjectProgressPayload(progress) {
+      state.projectProgress.project = progress.project;
+      applyProjectViewerState(state.projectProgress.project);
+      state.projectProgress.progressText = progress.progress_text || "";
+      state.projectProgress.documents = progress.documents || [];
+      state.projectProgress.timeline = progress.timeline || [];
+    }
+
     async function loadProjectProgress() {
+      const projectId = Number(state.route.params.id);
+      if (!projectId) {
+        navigate("home");
+        return;
+      }
+      state.projectProgress.loading = true;
+      state.loading = true;
+      try {
+        const progress = await api.projectProgress(projectId);
+        syncProjectProgressPayload(progress);
+      } catch (error) {
+        showToast(error.message || "课题进度读取失败");
+        state.projectProgress.project = null;
+        state.projectProgress.documents = [];
+        state.projectProgress.timeline = [];
+        state.projectProgress.discussions = [];
+      } finally {
+        state.projectProgress.loading = false;
+        state.loading = false;
+      }
+    }
+
+    async function loadProjectDiscussionPage() {
       const projectId = Number(state.route.params.id);
       if (!projectId) {
         navigate("home");
@@ -693,19 +725,13 @@ const App = {
           api.projectProgress(projectId),
           api.projectDiscussions(projectId, { page_size: 50 })
         ]);
-        state.projectProgress.project = progress.project;
-        applyProjectViewerState(state.projectProgress.project);
-        state.projectProgress.progressText = progress.progress_text || "";
-        state.projectProgress.documents = progress.documents || [];
-        state.projectProgress.timeline = progress.timeline || [];
+        syncProjectProgressPayload(progress);
         state.projectProgress.discussions = discussions.results || [];
         state.projectProgress.discussionPagination = discussions.pagination || {};
         state.projectProgress.replyDrafts = {};
       } catch (error) {
-        showToast(error.message || "课题进度读取失败");
+        showToast(error.message || "课题讨论读取失败");
         state.projectProgress.project = null;
-        state.projectProgress.documents = [];
-        state.projectProgress.timeline = [];
         state.projectProgress.discussions = [];
       } finally {
         state.projectProgress.loading = false;
@@ -1054,7 +1080,10 @@ const App = {
 
     function applicationActionLabel(row) {
       if (canWithdrawApplication(row)) return row.type === "sponsor" ? "撤回资助意向" : "取消参与";
-      if (row?.status === "rejected") return row.type === "sponsor" ? "重新提交资助" : "重新提交申请";
+      if (row?.status === "rejected" && row.type === "sponsor") {
+        return QUICK_SPONSOR_TYPES.includes(row.sponsor_type) ? "重新提交资助" : "查看课题";
+      }
+      if (row?.status === "rejected") return "重新提交申请";
       return "查看课题";
     }
 
@@ -1074,8 +1103,11 @@ const App = {
           return;
         }
         if (row.type === "sponsor") {
-          await submitSponsor(row.project, event, {
-            preselectedTypes: [row.sponsor_type].filter(Boolean),
+          if (!QUICK_SPONSOR_TYPES.includes(row.sponsor_type)) {
+            navigate("project", { id: row.project?.id });
+            return;
+          }
+          await openSponsorModal(row.project, row.sponsor_type, event, {
             note: row.note || "",
             previousReviewComment: row.review_comment || ""
           });
@@ -1775,7 +1807,12 @@ const App = {
       }
     }
 
-    function invalidateProjectStatusCard() {
+    function invalidateProjectStatusCard(projectId = null) {
+      if (projectId) {
+        delete state.projectStatusCardCache[projectId];
+      } else {
+        state.projectStatusCardCache = {};
+      }
       return null;
     }
 
@@ -2284,27 +2321,33 @@ const App = {
       realignSponsorPopoverFromRenderedSize();
     }
 
-    async function submitSponsor(project, event = null, options = {}) {
+    async function openSponsorModal(project, sponsorType, event = null, options = {}) {
       if (!ensureLogin()) return;
+      if (isPlatformAdminUser()) {
+        showSponsorContactCard(event, project, sponsorType);
+        showToast(platformAdminSponsorReason());
+        return;
+      }
       if (!project?.id) {
         showToast("请选择要资助的课题");
         return;
       }
+      if (!QUICK_SPONSOR_TYPES.includes(sponsorType)) {
+        showToast("该资助类型暂不在课题主入口开放");
+        return;
+      }
       if (isSubmittingSponsor(project)) return;
-      if (!canRecruitProject(project) && !sponsorRequestCanWithdraw(project)) {
+      const currentRequest = sponsorRequestByType(project, sponsorType);
+      const hasActiveRequest = isActiveParticipationRequest(currentRequest);
+      if (!canRecruitProject(project) && !hasActiveRequest) {
         showToast("当前阶段暂不接受新的资助意向");
         return;
       }
-      const activeTypes = activeSponsorTypesForProject(project);
-      const preselectedTypes = (options.preselectedTypes || []).filter((type) => [...QUICK_SPONSOR_TYPES, "token"].includes(type));
-      const selectedTypes = [...new Set([...activeTypes, ...preselectedTypes])];
       closeMutuallyExclusiveModals("sponsor");
       state.forms.sponsor = {
-        sponsor_type: selectedTypes[0] || "compute",
-        sponsor_types: selectedTypes,
-        note: options.note || "",
-        show_more_types: selectedTypes.includes("token"),
-        previous_review_comment: options.previousReviewComment || ""
+        sponsor_type: sponsorType,
+        note: options.note ?? currentRequest?.note ?? "",
+        previous_review_comment: options.previousReviewComment || (currentRequest?.status === "rejected" ? currentRequest.review_comment || "" : "")
       };
       const popoverPosition = sponsorPopoverPositionFromTrigger(event?.currentTarget);
       state.sponsorModal.open = true;
@@ -2316,7 +2359,7 @@ const App = {
       state.sponsorModal.maxHeight = popoverPosition.maxHeight;
       nextTick(() => {
         realignSponsorPopoverFromRenderedSize(state.sponsorModal.returnFocus);
-        document.querySelector(".sponsor-popover input:not(:disabled)")?.focus();
+        document.querySelector(".sponsor-popover textarea:not(:disabled), .sponsor-popover .sponsor-withdraw-button:not(:disabled)")?.focus();
       });
     }
 
@@ -2336,52 +2379,31 @@ const App = {
       const project = state.sponsorModal.project;
       if (!project?.id) return;
       if (!ensureLogin()) return;
-      const sponsorPopoverTypes = [...QUICK_SPONSOR_TYPES, "token"];
-      const selectedTypes = (state.forms.sponsor.sponsor_types || []).filter((type) => sponsorPopoverTypes.includes(type));
-      const activeRequests = activeSponsorRequestsForProject(project).filter((request) => sponsorPopoverTypes.includes(request.sponsor_type));
-      const activeTypes = activeRequests.map((request) => request.sponsor_type).filter(Boolean);
-      const typesToAdd = selectedTypes.filter((type) => !activeTypes.includes(type));
-      const requestsToWithdraw = activeRequests.filter((request) => !selectedTypes.includes(request.sponsor_type));
-      if (!selectedTypes.length && !activeRequests.length) {
+      if (isPlatformAdminUser()) {
+        showToast(platformAdminSponsorReason());
+        closeSponsorModal(true);
+        return;
+      }
+      const sponsorType = state.forms.sponsor.sponsor_type;
+      if (!QUICK_SPONSOR_TYPES.includes(sponsorType)) {
         showToast("请选择资助类型");
         return;
       }
-      if (!canRecruitProject(project) && typesToAdd.length) {
+      const currentRequest = sponsorRequestByType(project, sponsorType);
+      if (!canRecruitProject(project) && !isActiveParticipationRequest(currentRequest)) {
         showToast("当前阶段暂不接受新的资助意向");
         closeSponsorModal(true);
         return;
       }
       state.submittingSponsorProjectIds = addUniqueId(state.submittingSponsorProjectIds, project.id);
       state.sponsorModal.submitting = true;
-      const successes = [];
-      const failures = [];
       try {
-        for (const sponsorType of typesToAdd) {
-          try {
-            const request = await api.sponsor(project.id, { sponsor_type: sponsorType, note: state.forms.sponsor.note || "" });
-            markProjectSponsorSubmitted(project, request);
-            successes.push(sponsorTypeLabel(sponsorType));
-          } catch (error) {
-            failures.push(`${sponsorTypeLabel(sponsorType)}：${error.message || "提交失败"}`);
-          }
-        }
-        for (const request of requestsToWithdraw) {
-          try {
-            const withdrawn = await api.withdrawInteraction("sponsor", request.id, { reason: `用户主动撤回${sponsorTypeLabel(request.sponsor_type)}资助意向` });
-            markProjectSponsorWithdrawn(project, withdrawn || request);
-            successes.push(`撤回${sponsorTypeLabel(request.sponsor_type)}`);
-          } catch (error) {
-            failures.push(`撤回${sponsorTypeLabel(request.sponsor_type)}：${error.message || "提交失败"}`);
-          }
-        }
+        const request = await api.sponsor(project.id, { sponsor_type: sponsorType, note: state.forms.sponsor.note || "" });
+        markProjectSponsorSubmitted(project, request);
         invalidateProjectStatusCard(project.id);
         await refreshProjectStatus(project);
-        if (failures.length) {
-          showToast(`${successes.join("，") || "资助"}已处理，${failures.join("，")}提交失败`);
-        } else {
-          showToast(successes.length ? "资助意向已记录" : "资助意向未变化");
-          closeSponsorModal(true);
-        }
+        showToast(isActiveParticipationRequest(currentRequest) ? "资助说明已更新" : "资助意向已记录");
+        closeSponsorModal(true);
       } catch (error) {
         showToast(error.message || "资助意向提交失败");
       } finally {
@@ -2390,24 +2412,34 @@ const App = {
       }
     }
 
-    async function withdrawSponsorRequest(project) {
+    async function withdrawSponsorRequest(project, request = null) {
       if (!ensureLogin()) return;
-      const request = sponsorRequestForProject(project);
-      if (!request?.id || !isActiveParticipationRequest(request)) {
+      const targetRequest = request || sponsorRequestForProject(project);
+      if (!targetRequest?.id || !isActiveParticipationRequest(targetRequest)) {
         showToast("没有可撤回的资助意向");
         return;
       }
+      const typeLabel = sponsorTypeLabel(targetRequest.sponsor_type);
+      const buttonLabel = sponsorTypeButtonLabel(targetRequest.sponsor_type);
+      const confirmed = await openConfirmDialog({
+        title: "撤回资助",
+        message: `确认撤回${buttonLabel}？撤回后可重新提交资助意向。`,
+        confirmText: `撤回${sponsorTypeButtonLabel(targetRequest.sponsor_type)}`,
+        tone: "danger"
+      });
+      if (!confirmed) return;
       state.withdrawingSponsorProjectIds = addUniqueId(state.withdrawingSponsorProjectIds, project.id);
       try {
-        const withdrawn = await api.withdrawInteraction("sponsor", request.id, { reason: "用户主动撤回资助意向" });
-        markProjectSponsorWithdrawn(project, withdrawn || request);
+        const withdrawn = await api.withdrawInteraction("sponsor", targetRequest.id, { reason: `用户主动撤回${buttonLabel}` });
+        markProjectSponsorWithdrawn(project, { ...targetRequest, ...(withdrawn || {}) });
         invalidateProjectStatusCard(project.id);
-        showToast("已撤回资助");
+        await refreshProjectStatus(project);
+        showToast(`已撤回${buttonLabel}`);
         if (state.user) {
           await loadFavorites({ force: true });
         }
       } catch (error) {
-        showToast(error.message || "撤回资助失败");
+        showToast(error.message || `撤回${typeLabel}失败`);
       } finally {
         state.withdrawingSponsorProjectIds = removeId(state.withdrawingSponsorProjectIds, project.id);
       }
@@ -2459,11 +2491,15 @@ const App = {
       }
       targets.forEach((item) => {
         const roles = new Set(item.viewer_state?.interest_roles || []);
+        const teamRoleKeys = new Set(item.viewer_state?.team_role_keys || []);
+        const teamRoleKey = teamRoleKeyForParticipationRole(role);
         const alreadySubmitted = roles.has(role);
         roles.add(role);
+        if (teamRoleKey) teamRoleKeys.add(teamRoleKey);
         item.viewer_state = {
           ...(item.viewer_state || {}),
           interest_roles: Array.from(roles),
+          team_role_keys: Array.from(teamRoleKeys),
           relationship_labels: [...new Set([...(item.viewer_state?.relationship_labels || []), participationRelationshipLabel(savedRequest)])]
         };
         if (!alreadySubmitted && typeof item.interest_count === "number") {
@@ -2576,10 +2612,13 @@ const App = {
       projectTargets(id, project).forEach((item) => {
         applyProjectClaimAvailability(item, savedClaim);
         const claimTypes = new Set(item.viewer_state?.claim_types || []);
+        const teamRoleKeys = new Set(item.viewer_state?.team_role_keys || []);
         claimTypes.add(savedClaim.claim_type);
+        if (savedClaim.claim_type === "leader") teamRoleKeys.add("leader");
         item.viewer_state = {
           ...(item.viewer_state || {}),
           claim_types: Array.from(claimTypes),
+          team_role_keys: Array.from(teamRoleKeys),
           relationship_labels: [
             ...new Set([
               ...(item.viewer_state?.relationship_labels || []),
@@ -2620,7 +2659,7 @@ const App = {
     function markProjectSponsorSubmitted(project, request = null) {
       const id = project?.id;
       if (!id) return;
-      const sponsorType = request?.sponsor_type || state.forms.sponsor.sponsor_type || state.forms.sponsor.sponsor_types?.[0] || "compute";
+      const sponsorType = request?.sponsor_type || state.forms.sponsor.sponsor_type || "compute";
       const savedRequest = {
         ...(request || {}),
         id: request?.id || `local-sponsor-${id}-${sponsorType}`,
@@ -2773,11 +2812,23 @@ const App = {
         ));
       const claimTypes = new Set(project.viewer_state?.claim_types || []);
       const sponsorTypes = new Set(project.viewer_state?.sponsor_types || []);
+      const teamRoleKeys = new Set(project.viewer_state?.team_role_keys || []);
+      if (isActiveParticipationRequest(participationRequest)) {
+        const teamRoleKey = teamRoleKeyForParticipationRole(participationRequest.role);
+        if (teamRoleKey) teamRoleKeys.add(teamRoleKey);
+      } else if (participationRequest) {
+        (project.viewer_state?.interest_roles || []).forEach((role) => {
+          const teamRoleKey = teamRoleKeyForParticipationRole(role);
+          if (teamRoleKey) teamRoleKeys.delete(teamRoleKey);
+        });
+      }
       if (claimRequest?.claim_type === "leader") {
         if (isActiveClaimRequest(claimRequest)) {
           claimTypes.add("leader");
+          teamRoleKeys.add("leader");
         } else {
           claimTypes.delete("leader");
+          teamRoleKeys.delete("leader");
         }
       }
       if (paperClaimRequest?.claim_type === "paper_first_unit") {
@@ -2801,6 +2852,7 @@ const App = {
         relationship_labels: labels,
         interest_roles: isActiveParticipationRequest(participationRequest) ? (project.viewer_state?.interest_roles || []) : [],
         claim_types: Array.from(claimTypes),
+        team_role_keys: Array.from(teamRoleKeys),
         sponsor_types: Array.from(sponsorTypes)
       };
       if (state.unlikedProjectIds.includes(project.id)) {
@@ -2827,9 +2879,15 @@ const App = {
 
     function clearProjectParticipationViewerState(project) {
       if (!project) return;
+      const teamRoleKeys = new Set(project.viewer_state?.team_role_keys || []);
+      (project.viewer_state?.interest_roles || []).forEach((role) => {
+        const teamRoleKey = teamRoleKeyForParticipationRole(role);
+        if (teamRoleKey) teamRoleKeys.delete(teamRoleKey);
+      });
       project.viewer_state = {
         ...(project.viewer_state || {}),
         interest_roles: [],
+        team_role_keys: Array.from(teamRoleKeys),
         relationship_labels: (project.viewer_state?.relationship_labels || [])
           .filter((label) => !isParticipationRelationshipLabel(label))
       };
@@ -2838,10 +2896,13 @@ const App = {
     function clearProjectLeadClaimViewerState(project) {
       if (!project) return;
       const claimTypes = new Set(project.viewer_state?.claim_types || []);
+      const teamRoleKeys = new Set(project.viewer_state?.team_role_keys || []);
       claimTypes.delete("leader");
+      teamRoleKeys.delete("leader");
       project.viewer_state = {
         ...(project.viewer_state || {}),
         claim_types: Array.from(claimTypes),
+        team_role_keys: Array.from(teamRoleKeys),
         relationship_labels: (project.viewer_state?.relationship_labels || [])
           .filter((label) => !isLeadClaimRelationshipLabel(label))
       };
@@ -2902,6 +2963,7 @@ const App = {
     }
 
     function canClickParticipation(project) {
+      if (isPlatformAdminUser()) return false;
       if (isSubmittingParticipation(project) || isWithdrawingParticipation(project)) return false;
       if (participationRequestCanWithdraw(project)) return true;
       return canRecruitProject(project);
@@ -2934,6 +2996,14 @@ const App = {
     }
 
     function claimAvailability(project, claimType) {
+      if (isPlatformAdminUser()) {
+        return {
+          available: false,
+          action: "unavailable",
+          reason_code: "platform_admin_cannot_collaborate",
+          reason: "系统管理员不能认领项目。"
+        };
+      }
       const authoritativeAvailability = project?.claim_availability?.[claimType];
       if (authoritativeAvailability) return authoritativeAvailability;
       const request = claimType === "paper_first_unit" ? paperClaimRequestForProject(project) : claimRequestForProject(project);
@@ -2978,7 +3048,9 @@ const App = {
         stage_not_recruiting: `当前阶段暂不接受${label}。`,
         slot_occupied: `该课题已有${label}申请或已通过${label}。`,
         insufficient_credits: `当前积分不足，暂不能提交${label}。`,
-        data_conflict: `该课题的${label}数据存在冲突，请联系管理员处理。`
+        participation_limit_reached: "当前身份可同时参与的课题数已达上限。",
+        data_conflict: `该课题的${label}数据存在冲突，请联系管理员处理。`,
+        platform_admin_cannot_collaborate: "系统管理员不能认领项目。"
       };
       return reasonByCode[availability.reason_code] || availability.reason || `暂不能提交${label}。`;
     }
@@ -3252,9 +3324,17 @@ const App = {
         .filter(Boolean);
     }
 
+    function isSponsorTypeActive(project, sponsorType) {
+      return activeSponsorTypesForProject(project).includes(sponsorType);
+    }
+
     function sponsorRequestStatusLabel(project, sponsorType) {
       const request = sponsorRequestByType(project, sponsorType);
       return isActiveParticipationRequest(request) ? request.status_label || "待处理" : "";
+    }
+
+    function sponsorStatusLabel(status) {
+      return RELATION_STATUS_LABELS[status] || status || "";
     }
 
     function sponsorTypeLabel(value) {
@@ -3273,28 +3353,102 @@ const App = {
       return Boolean(project?.id && state.withdrawingSponsorProjectIds.includes(project.id));
     }
 
-    function sponsorButtonLabel(project) {
-      if (isWithdrawingSponsor(project)) return "撤回中...";
-      if (isSubmittingSponsor(project)) return "提交中...";
-      if (sponsorRequestCanWithdraw(project)) return "管理资助";
-      if (!canRecruitProject(project)) return "暂不资助";
-      return "资助";
+    function sponsorTypeButtonLabel(sponsorType) {
+      if (sponsorType === "compute") return "资助算力";
+      if (sponsorType === "labor_fee") return "资助劳务";
+      return sponsorTypeLabel(sponsorType);
     }
 
-    function interactionButtonActive(type, project) {
+    function sponsorTypePlaceholder(sponsorType) {
+      if (sponsorType === "compute") return "请填写算力资源、额度、周期或可提供方式";
+      if (sponsorType === "labor_fee") return "请填写拟资助金额、周期或支付说明";
+      return "请填写资助金额、资源额度、周期或可提供方式";
+    }
+
+    function sponsorButtonLabel(project, sponsorType) {
+      if (isWithdrawingSponsor(project)) return "撤回中...";
+      if (isSubmittingSponsor(project)) return "提交中...";
+      if (isSponsorTypeActive(project, sponsorType)) {
+        return sponsorType === "compute" ? "管理资助算力" : "管理资助劳务";
+      }
+      if (!canRecruitProject(project)) {
+        return sponsorType === "compute" ? "暂不资助算力" : "暂不资助劳务";
+      }
+      return sponsorTypeButtonLabel(sponsorType);
+    }
+
+    function interactionButtonActive(type, project, sponsorType = "") {
       if (type === "like") return isProjectLiked(project);
       if (type === "follow") return isProjectFollowing(project);
       if (type === "participation") return participationRequestCanWithdraw(project);
       if (type === "lead") return isLeadClaimed(project);
       if (type === "paper") return isPaperClaimed(project);
-      if (type === "sponsor") return sponsorRequestCanWithdraw(project);
+      if (type === "sponsor") return sponsorType ? isSponsorTypeActive(project, sponsorType) : sponsorRequestCanWithdraw(project);
       return false;
     }
 
-    function canClickSponsor(project) {
+    function canClickSponsor(project, sponsorType) {
+      if (isPlatformAdminUser()) return false;
       if (isSubmittingSponsor(project) || isWithdrawingSponsor(project)) return false;
-      if (sponsorRequestCanWithdraw(project)) return true;
+      if (isSponsorTypeActive(project, sponsorType)) return true;
       return canRecruitProject(project);
+    }
+
+    function platformAdminSponsorReason() {
+      return "系统管理员不能资助项目";
+    }
+
+    function sponsorButtonDisabledReason(project, sponsorType) {
+      if (isPlatformAdminUser()) return platformAdminSponsorReason();
+      if (canClickSponsor(project, sponsorType)) return "";
+      return "当前阶段暂不接受新的资助意向";
+    }
+
+    function sponsorButtonAriaDisabled(project, sponsorType) {
+      return canClickSponsor(project, sponsorType) ? "false" : "true";
+    }
+
+    function sponsorContactMembers(groups, sponsorType) {
+      const byUid = new Map();
+      groups
+        .filter((group) => group.type === "sponsor" && group.status === "approved" && group.subtype === sponsorType)
+        .flatMap((group) => group.members?.length ? group.members : (group.uids || []).map((uid) => ({ uid })))
+        .filter((member) => member?.uid)
+        .forEach((member) => {
+          byUid.set(member.uid, {
+            ...member,
+            name: member.uid,
+            detail: contactWechatText(member)
+          });
+        });
+      return [...byUid.values()].sort((left, right) => String(left.uid).localeCompare(String(right.uid)));
+    }
+
+    async function showSponsorContactCard(event, project, sponsorType) {
+      if (!state.user || !project?.id || !sponsorType) return;
+      if (isPlatformAdminUser()) {
+        showContactHoverCard(event, sponsorTypeButtonLabel(sponsorType), [
+          {
+            uid: "platform-admin-sponsor-disabled",
+            name: platformAdminSponsorReason(),
+            detail: "管理员可以审核其他用户的资助申请，但不能作为资助者参与项目。",
+            wechat_visible: false
+          }
+        ]);
+        return;
+      }
+      try {
+        const card = state.projectStatusCardCache[project.id] || await api.projectStatusCard(project.id);
+        state.projectStatusCardCache = {
+          ...state.projectStatusCardCache,
+          [project.id]: card
+        };
+        const groups = card?.uid_groups?.groups || [];
+        const members = sponsorContactMembers(groups, sponsorType);
+        showContactHoverCard(event, `${sponsorTypeButtonLabel(sponsorType)}者`, members);
+      } catch (error) {
+        showContactHoverCard(event, `${sponsorTypeButtonLabel(sponsorType)}者`, []);
+      }
     }
 
     async function saveTheme() {
@@ -5009,6 +5163,10 @@ const App = {
       return Boolean(capabilities.value?.[capability]);
     }
 
+    function isPlatformAdminUser() {
+      return roleInfo.value?.role === "admin";
+    }
+
     function ensureLogin() {
       if (state.user) return true;
       showToast("请先登录后再操作");
@@ -5306,9 +5464,6 @@ const App = {
       platformStats,
       sidebarQrEntries,
       faqQrEntries,
-      sponsorTypeOptions,
-      quickSponsorTypeOptions,
-      moreSponsorTypeOptions,
       authorshipIntentOptions,
       sidebarQrImageSrc,
       sidebarQrAlt,
@@ -5347,6 +5502,7 @@ const App = {
       topicThemeCardStyle,
       loadMoreProjects,
       loadProjectProgress,
+      loadProjectDiscussionPage,
       loadProjectDiscussions,
       submitProjectDiscussion,
       updateProjectDiscussion,
@@ -5368,9 +5524,11 @@ const App = {
       projectCreatorContact,
       contactName,
       contactWechatText,
+      contactDetailText,
       teamContactMembers,
       showProjectCreatorContactCard,
       showTeamContactCard,
+      showSponsorContactCard,
       scheduleHideContactHoverCard,
       cancelContactHoverCardHide,
       hideContactHoverCard,
@@ -5412,17 +5570,27 @@ const App = {
       submitPaperClaimModal,
       paperClaimButtonLabel,
       canClickPaperClaim,
-      submitSponsor,
+      openSponsorModal,
       closeSponsorModal,
       submitSponsorModal,
       withdrawSponsorRequest,
       sponsorButtonLabel,
+      sponsorTypeButtonLabel,
+      sponsorTypePlaceholder,
       interactionButtonActive,
       canClickSponsor,
+      isPlatformAdminUser,
+      sponsorButtonAriaDisabled,
+      sponsorButtonDisabledReason,
+      isWithdrawingSponsor,
       activeSponsorTypesForProject,
       activeSponsorRequestsForProject,
       quickActiveSponsorRequestsForProject,
+      sponsorRequestByType,
+      isSponsorTypeActive,
       sponsorRequestStatusLabel,
+      sponsorStatusLabel,
+      sponsorTypeLabel,
       selfRelationLabels,
       primarySelfRelationLabel,
       secondarySelfRelationLabels,
@@ -5559,6 +5727,9 @@ const App = {
       visibleProjectRoleGroups,
       projectRecruitmentText,
       requiredTeamRoles,
+      selfTeamRoleKeys,
+      isSelfTeamRole,
+      teamRoleAriaLabel,
       projectFundingLabel,
       projectFundingReady,
       projectStageTone,
@@ -5570,6 +5741,7 @@ const App = {
       projectPdfHref,
       projectProgressDocumentsFor,
       projectDetailHref,
+      projectDiscussionHref,
       hasPrimaryProjectPdf,
       projectCreatorLabel,
       documentDisplayTitle,
@@ -5672,7 +5844,7 @@ const App = {
           <template v-if="state.contactHoverCard.members.length">
             <span v-for="member in state.contactHoverCard.members" :key="member.uid || member.name" class="contact-member-row">
               <b>{{ contactName(member) }}</b>
-              <small>{{ contactWechatText(member) }}</small>
+              <small>{{ contactDetailText(member) }}</small>
             </span>
           </template>
           <small v-else>暂无可展示联系人</small>
@@ -5814,8 +5986,27 @@ const App = {
                       <div v-if="project.clinical_endpoint"><dt>临床终点</dt><dd>{{ project.clinical_endpoint }}</dd></div>
                       <div v-if="project.existing_foundation"><dt>已有基础</dt><dd>{{ project.existing_foundation }}</dd></div>
                     </div>
-                    <div v-if="project.tags.length" class="tag-row">
-                      <span v-for="tag in project.tags.slice(0, 5)" :key="tag.id">{{ tag.name }}</span>
+                    <div class="project-card-tags-actions">
+                      <div v-if="project.tags.length" class="tag-row project-tag-row">
+                        <span v-for="tag in project.tags.slice(0, 5)" :key="tag.id">{{ tag.name }}</span>
+                      </div>
+                      <div v-else class="tag-row project-tag-row empty-tags" aria-hidden="true"></div>
+                      <div class="project-card-inline-actions">
+                        <a
+                          class="ghost-button project-discussion-link"
+                          :href="projectDiscussionHref(project)"
+                          @click.stop.prevent="navigate('projectDiscussion', { id: project.id })"
+                        >
+                          交流区
+                        </a>
+                        <a
+                          class="ghost-button project-progress-link"
+                          :href="projectDetailHref(project)"
+                          @click.stop.prevent="navigate('project', { id: project.id })"
+                        >
+                          项目进度
+                        </a>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -5827,11 +6018,12 @@ const App = {
                     <strong>组队</strong>
                     <div class="project-role-chip-row">
                       <span
-                        v-for="role in requiredTeamRoles(project.team_status)"
+                        v-for="role in requiredTeamRoles(project.team_status, project)"
                         :key="role.key"
                         class="team-role-chip contact-hover-trigger"
-                        :class="{ ready: role.ready, overfilled: role.overfilled }"
+                        :class="{ ready: role.ready, overfilled: role.overfilled, 'self-role': role.isSelfRole }"
                         tabindex="0"
+                        :aria-label="teamRoleAriaLabel(role)"
                         @mouseenter="showTeamContactCard($event, role, project)"
                         @focus="showTeamContactCard($event, role, project)"
                         @mouseleave="scheduleHideContactHoverCard"
@@ -5867,9 +6059,13 @@ const App = {
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">workspace_premium</span>
                       <span>{{ paperClaimButtonLabel(project) }}</span>
                     </button>
-                    <button class="ghost-button interaction-button sponsor-action-button" :class="{ 'interaction-active': interactionButtonActive('sponsor', project) }" type="button" :disabled="!canClickSponsor(project)" aria-controls="sponsor-popover" :aria-expanded="state.sponsorModal.open && state.sponsorModal.project?.id === project.id ? 'true' : 'false'" @click.stop="submitSponsor(project, $event)">
+                    <button class="ghost-button interaction-button sponsor-action-button" :class="{ 'interaction-active': interactionButtonActive('sponsor', project, 'compute'), 'is-disabled': !canClickSponsor(project, 'compute') }" type="button" :aria-disabled="sponsorButtonAriaDisabled(project, 'compute')" :title="sponsorButtonDisabledReason(project, 'compute')" aria-controls="sponsor-popover" :aria-expanded="state.sponsorModal.open && state.sponsorModal.project?.id === project.id && state.forms.sponsor.sponsor_type === 'compute' ? 'true' : 'false'" @mouseenter="showSponsorContactCard($event, project, 'compute')" @focus="showSponsorContactCard($event, project, 'compute')" @mouseleave="scheduleHideContactHoverCard" @blur="scheduleHideContactHoverCard" @click.stop="openSponsorModal(project, 'compute', $event)">
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">volunteer_activism</span>
-                      <span>{{ sponsorButtonLabel(project) }}</span>
+                      <span>{{ sponsorButtonLabel(project, 'compute') }}</span>
+                    </button>
+                    <button class="ghost-button interaction-button sponsor-action-button" :class="{ 'interaction-active': interactionButtonActive('sponsor', project, 'labor_fee'), 'is-disabled': !canClickSponsor(project, 'labor_fee') }" type="button" :aria-disabled="sponsorButtonAriaDisabled(project, 'labor_fee')" :title="sponsorButtonDisabledReason(project, 'labor_fee')" aria-controls="sponsor-popover" :aria-expanded="state.sponsorModal.open && state.sponsorModal.project?.id === project.id && state.forms.sponsor.sponsor_type === 'labor_fee' ? 'true' : 'false'" @mouseenter="showSponsorContactCard($event, project, 'labor_fee')" @focus="showSponsorContactCard($event, project, 'labor_fee')" @mouseleave="scheduleHideContactHoverCard" @blur="scheduleHideContactHoverCard" @click.stop="openSponsorModal(project, 'labor_fee', $event)">
+                      <span class="material-symbols-rounded interaction-icon" aria-hidden="true">volunteer_activism</span>
+                      <span>{{ sponsorButtonLabel(project, 'labor_fee') }}</span>
                     </button>
                   </div>
                   <div v-if="hasPrimaryProjectPdf(project)" class="project-pdf-actions">
@@ -5959,6 +6155,7 @@ const App = {
                 </div>
                 <div class="section-head-actions">
                   <button class="ghost-button" type="button" @click="navigate('home')">返回课题库</button>
+                  <a class="ghost-button" :href="projectDiscussionHref(state.projectProgress.project)" @click.prevent="navigate('projectDiscussion', { id: state.projectProgress.project.id })">进入讨论区</a>
                   <a v-if="hasPrimaryProjectPdf(state.projectProgress.project)" class="ghost-button" :href="projectPdfHref(state.projectProgress.project)" target="_blank" rel="noopener">查看PDF</a>
                   <a v-if="hasPrimaryProjectPdf(state.projectProgress.project)" class="ghost-button" :href="projectPdfHref(state.projectProgress.project)" download>下载PDF</a>
                 </div>
@@ -5985,9 +6182,13 @@ const App = {
                   <span class="material-symbols-rounded interaction-icon" aria-hidden="true">workspace_premium</span>
                   <span>{{ paperClaimButtonLabel(state.projectProgress.project) }}</span>
                 </button>
-                <button class="ghost-button interaction-button sponsor-action-button" :class="{ 'interaction-active': interactionButtonActive('sponsor', state.projectProgress.project) }" type="button" :disabled="!canClickSponsor(state.projectProgress.project)" aria-controls="sponsor-popover" :aria-expanded="state.sponsorModal.open && state.sponsorModal.project?.id === state.projectProgress.project.id ? 'true' : 'false'" @click="submitSponsor(state.projectProgress.project, $event)">
+                <button class="ghost-button interaction-button sponsor-action-button" :class="{ 'interaction-active': interactionButtonActive('sponsor', state.projectProgress.project, 'compute'), 'is-disabled': !canClickSponsor(state.projectProgress.project, 'compute') }" type="button" :aria-disabled="sponsorButtonAriaDisabled(state.projectProgress.project, 'compute')" :title="sponsorButtonDisabledReason(state.projectProgress.project, 'compute')" aria-controls="sponsor-popover" :aria-expanded="state.sponsorModal.open && state.sponsorModal.project?.id === state.projectProgress.project.id && state.forms.sponsor.sponsor_type === 'compute' ? 'true' : 'false'" @mouseenter="showSponsorContactCard($event, state.projectProgress.project, 'compute')" @focus="showSponsorContactCard($event, state.projectProgress.project, 'compute')" @mouseleave="scheduleHideContactHoverCard" @blur="scheduleHideContactHoverCard" @click="openSponsorModal(state.projectProgress.project, 'compute', $event)">
                   <span class="material-symbols-rounded interaction-icon" aria-hidden="true">volunteer_activism</span>
-                  <span>{{ sponsorButtonLabel(state.projectProgress.project) }}</span>
+                  <span>{{ sponsorButtonLabel(state.projectProgress.project, 'compute') }}</span>
+                </button>
+                <button class="ghost-button interaction-button sponsor-action-button" :class="{ 'interaction-active': interactionButtonActive('sponsor', state.projectProgress.project, 'labor_fee'), 'is-disabled': !canClickSponsor(state.projectProgress.project, 'labor_fee') }" type="button" :aria-disabled="sponsorButtonAriaDisabled(state.projectProgress.project, 'labor_fee')" :title="sponsorButtonDisabledReason(state.projectProgress.project, 'labor_fee')" aria-controls="sponsor-popover" :aria-expanded="state.sponsorModal.open && state.sponsorModal.project?.id === state.projectProgress.project.id && state.forms.sponsor.sponsor_type === 'labor_fee' ? 'true' : 'false'" @mouseenter="showSponsorContactCard($event, state.projectProgress.project, 'labor_fee')" @focus="showSponsorContactCard($event, state.projectProgress.project, 'labor_fee')" @mouseleave="scheduleHideContactHoverCard" @blur="scheduleHideContactHoverCard" @click="openSponsorModal(state.projectProgress.project, 'labor_fee', $event)">
+                  <span class="material-symbols-rounded interaction-icon" aria-hidden="true">volunteer_activism</span>
+                  <span>{{ sponsorButtonLabel(state.projectProgress.project, 'labor_fee') }}</span>
                 </button>
               </div>
 
@@ -6001,7 +6202,18 @@ const App = {
                   <h2>课题进展</h2>
                   <p>{{ state.projectProgress.progressText || '暂无公开进度说明。' }}</p>
                   <div class="project-role-chip-row">
-                    <span v-for="role in requiredTeamRoles(state.projectProgress.project.team_status)" :key="role.key" :class="{ ready: role.ready, overfilled: role.overfilled }">
+                    <span
+                      v-for="role in requiredTeamRoles(state.projectProgress.project.team_status, state.projectProgress.project)"
+                      :key="role.key"
+                      class="team-role-chip contact-hover-trigger"
+                      :class="{ ready: role.ready, overfilled: role.overfilled, 'self-role': role.isSelfRole }"
+                      tabindex="0"
+                      :aria-label="teamRoleAriaLabel(role)"
+                      @mouseenter="showTeamContactCard($event, role, state.projectProgress.project)"
+                      @focus="showTeamContactCard($event, role, state.projectProgress.project)"
+                      @mouseleave="scheduleHideContactHoverCard"
+                      @blur="scheduleHideContactHoverCard"
+                    >
                       {{ role.label }} {{ role.count }}/{{ role.required }}
                     </span>
                   </div>
@@ -6050,54 +6262,109 @@ const App = {
                 <p v-else class="muted-inline">暂无公开进度时间线。</p>
               </article>
 
-              <article class="content-panel project-discussion-section">
-                <div class="panel-title-row compact-title-row">
-                  <div>
-                    <h2>讨论区</h2>
-                    <p>所有登录用户都可以基于本课题讨论任何事情；公开展示只显示 UID。</p>
-                  </div>
-                </div>
-                <form v-if="state.user" class="discussion-form" @submit.prevent="submitProjectDiscussion()">
-                  <textarea v-model="state.projectProgress.discussionForm.content" maxlength="2000" placeholder="写下你的问题、建议或协作信息"></textarea>
-                  <button class="primary-button" type="submit" :disabled="state.projectProgress.submittingDiscussion">
-                    {{ state.projectProgress.submittingDiscussion ? '发布中...' : '发布讨论' }}
-                  </button>
-                </form>
-                <p v-else class="muted-inline">登录后参与讨论</p>
-
-                <div class="project-discussion-list">
-                  <article v-for="discussion in state.projectProgress.discussions" :key="discussion.id" class="project-discussion-item">
-                    <header>
-                      <strong>{{ discussion.author?.uid || '已注销用户' }}</strong>
-                      <time>{{ formatAuditTime(discussion.created_at) }}</time>
-                    </header>
-                    <p>{{ discussion.content }}</p>
-                    <div class="button-row">
-                      <button v-if="canManageDiscussion(discussion)" class="ghost-button" type="button" @click="updateProjectDiscussion(discussion)">编辑</button>
-                      <button v-if="canManageDiscussion(discussion)" class="ghost-button danger" type="button" @click="deleteProjectDiscussion(discussion)">删除</button>
-                      <button v-if="can('manage_projects')" class="ghost-button danger" type="button" @click="moderateProjectDiscussion(discussion, 'hidden')">隐藏</button>
-                    </div>
-                    <div v-if="discussion.replies?.length" class="project-discussion-replies">
-                      <article v-for="reply in discussion.replies" :key="reply.id" class="project-discussion-reply">
-                        <header><strong>{{ reply.author?.uid || '已注销用户' }}</strong><time>{{ formatAuditTime(reply.created_at) }}</time></header>
-                        <p>{{ reply.content }}</p>
-                        <div class="button-row">
-                          <button v-if="canManageDiscussion(reply)" class="ghost-button" type="button" @click="updateProjectDiscussion(reply)">编辑</button>
-                          <button v-if="canManageDiscussion(reply)" class="ghost-button danger" type="button" @click="deleteProjectDiscussion(reply)">删除</button>
-                        </div>
-                      </article>
-                    </div>
-                    <form v-if="state.user" class="discussion-reply-form" @submit.prevent="submitProjectDiscussion(discussion)">
-                      <input v-model="state.projectProgress.replyDrafts[discussion.id]" type="text" maxlength="2000" placeholder="回复这条讨论" />
-                      <button class="ghost-button" type="submit" :disabled="state.projectProgress.submittingDiscussion">回复</button>
-                    </form>
-                  </article>
-                  <p v-if="!state.projectProgress.discussions.length" class="muted-inline">暂无讨论。</p>
-                </div>
-              </article>
             </template>
             <section v-else class="empty-state">
               <h2>课题不可访问</h2>
+              <p>课题可能未公开或已归档。</p>
+              <button class="primary-button" type="button" @click="navigate('home')">返回课题库</button>
+            </section>
+          </section>
+
+          <section v-else-if="activeView === 'projectDiscussion'" class="project-discussion-page">
+            <div v-if="state.projectProgress.loading" class="empty-state">
+              <div class="loader"></div>
+              <h2>正在读取讨论区</h2>
+            </div>
+            <template v-else-if="state.projectProgress.project">
+              <div class="section-head project-discussion-head">
+                <div>
+                  <span class="eyebrow">{{ topicCode(state.projectProgress.project) }} · {{ state.projectProgress.project.theme?.name || '未分类' }}</span>
+                  <h1>{{ state.projectProgress.project.title }}</h1>
+                  <p>{{ projectSummaryText(state.projectProgress.project) }}</p>
+                </div>
+                <div class="section-head-actions">
+                  <button class="ghost-button" type="button" @click="navigate('home')">返回课题库</button>
+                  <a class="ghost-button" :href="projectDetailHref(state.projectProgress.project)" @click.prevent="navigate('project', { id: state.projectProgress.project.id })">查看项目进度</a>
+                </div>
+              </div>
+
+              <div class="discussion-page-shell">
+                <aside class="content-panel discussion-project-card">
+                  <div class="project-card-meta">
+                    <span>{{ state.projectProgress.project.stage_label }}</span>
+                    <span>{{ projectFundingLabel(state.projectProgress.project) }}</span>
+                    <span>{{ projectStartupLabel(state.projectProgress.project) }}</span>
+                  </div>
+                  <h2>课题协作讨论</h2>
+                  <p>围绕需求、数据、分工、联系方式和推进事项持续沟通。</p>
+                  <div class="project-role-chip-row">
+                    <span
+                      v-for="role in requiredTeamRoles(state.projectProgress.project.team_status, state.projectProgress.project)"
+                      :key="role.key"
+                      class="team-role-chip contact-hover-trigger"
+                      :class="{ ready: role.ready, overfilled: role.overfilled, 'self-role': role.isSelfRole }"
+                      tabindex="0"
+                      :aria-label="teamRoleAriaLabel(role)"
+                      @mouseenter="showTeamContactCard($event, role, state.projectProgress.project)"
+                      @focus="showTeamContactCard($event, role, state.projectProgress.project)"
+                      @mouseleave="scheduleHideContactHoverCard"
+                      @blur="scheduleHideContactHoverCard"
+                    >
+                      {{ role.label }} {{ role.count }}/{{ role.required }}
+                    </span>
+                  </div>
+                  <a v-if="hasPrimaryProjectPdf(state.projectProgress.project)" class="ghost-button" :href="projectPdfHref(state.projectProgress.project)" target="_blank" rel="noopener">查看PDF</a>
+                </aside>
+
+                <article class="content-panel discussion-stream-panel">
+                  <div class="panel-title-row compact-title-row">
+                    <div>
+                      <h2>讨论流</h2>
+                      <p>公开展示只显示 UID；登录后可发起讨论和回复。</p>
+                    </div>
+                  </div>
+                  <form v-if="state.user" class="discussion-form discussion-bottom-bar" @submit.prevent="submitProjectDiscussion()">
+                    <textarea v-model="state.projectProgress.discussionForm.content" maxlength="2000" placeholder="写下你的问题、建议或协作信息"></textarea>
+                    <button class="primary-button" type="submit" :disabled="state.projectProgress.submittingDiscussion">
+                      {{ state.projectProgress.submittingDiscussion ? '发布中...' : '发布讨论' }}
+                    </button>
+                  </form>
+                  <p v-else class="muted-inline">登录后参与课题讨论</p>
+
+                  <div class="project-discussion-list">
+                    <article v-for="discussion in state.projectProgress.discussions" :key="discussion.id" class="project-discussion-item">
+                      <header>
+                        <strong>{{ discussion.author?.uid || '已注销用户' }}</strong>
+                        <time>{{ formatAuditTime(discussion.created_at) }}</time>
+                      </header>
+                      <p>{{ discussion.content }}</p>
+                      <div class="button-row">
+                        <button v-if="canManageDiscussion(discussion)" class="ghost-button" type="button" @click="updateProjectDiscussion(discussion)">编辑</button>
+                        <button v-if="canManageDiscussion(discussion)" class="ghost-button danger" type="button" @click="deleteProjectDiscussion(discussion)">删除</button>
+                        <button v-if="can('manage_projects')" class="ghost-button danger" type="button" @click="moderateProjectDiscussion(discussion, 'hidden')">隐藏</button>
+                      </div>
+                      <div v-if="discussion.replies?.length" class="project-discussion-replies">
+                        <article v-for="reply in discussion.replies" :key="reply.id" class="project-discussion-reply">
+                          <header><strong>{{ reply.author?.uid || '已注销用户' }}</strong><time>{{ formatAuditTime(reply.created_at) }}</time></header>
+                          <p>{{ reply.content }}</p>
+                          <div class="button-row">
+                            <button v-if="canManageDiscussion(reply)" class="ghost-button" type="button" @click="updateProjectDiscussion(reply)">编辑</button>
+                            <button v-if="canManageDiscussion(reply)" class="ghost-button danger" type="button" @click="deleteProjectDiscussion(reply)">删除</button>
+                          </div>
+                        </article>
+                      </div>
+                      <form v-if="state.user" class="discussion-reply-form" @submit.prevent="submitProjectDiscussion(discussion)">
+                        <input v-model="state.projectProgress.replyDrafts[discussion.id]" type="text" maxlength="2000" placeholder="回复这条讨论" />
+                        <button class="ghost-button" type="submit" :disabled="state.projectProgress.submittingDiscussion">回复</button>
+                      </form>
+                    </article>
+                    <p v-if="!state.projectProgress.discussions.length" class="muted-inline">暂无讨论。</p>
+                  </div>
+                </article>
+              </div>
+            </template>
+            <section v-else class="empty-state">
+              <h2>讨论区不可访问</h2>
               <p>课题可能未公开或已归档。</p>
               <button class="primary-button" type="button" @click="navigate('home')">返回课题库</button>
             </section>
@@ -6348,7 +6615,7 @@ const App = {
                   <form class="stack-form" @submit.prevent="saveProfile">
                     <div class="form-grid">
                       <label><span>昵称</span><input v-model="state.forms.profile.display_name" type="text" /></label>
-                      <label><span>真实姓名</span><input v-model="state.forms.profile.real_name" type="text" /></label>
+                      <label><span>对外显示姓名</span><input v-model="state.forms.profile.real_name" type="text" /></label>
                       <label><span>身份</span>
                         <select v-model="state.forms.profile.role_type">
                           <option v-for="role in state.meta.profile_roles" :key="role.value" :value="role.value">{{ role.label }}</option>
@@ -6440,11 +6707,12 @@ const App = {
                     <strong>组队</strong>
                     <div class="project-role-chip-row">
                       <span
-                        v-for="role in requiredTeamRoles(project.team_status)"
+                        v-for="role in requiredTeamRoles(project.team_status, project)"
                         :key="role.key"
                         class="team-role-chip contact-hover-trigger"
-                        :class="{ ready: role.ready, overfilled: role.overfilled }"
+                        :class="{ ready: role.ready, overfilled: role.overfilled, 'self-role': role.isSelfRole }"
                         tabindex="0"
+                        :aria-label="teamRoleAriaLabel(role)"
                         @mouseenter="showTeamContactCard($event, role, project)"
                         @focus="showTeamContactCard($event, role, project)"
                         @mouseleave="scheduleHideContactHoverCard"
@@ -6480,9 +6748,13 @@ const App = {
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">workspace_premium</span>
                       <span>{{ paperClaimButtonLabel(project) }}</span>
                     </button>
-                    <button class="ghost-button interaction-button sponsor-action-button" :class="{ 'interaction-active': interactionButtonActive('sponsor', project) }" type="button" :disabled="!canClickSponsor(project)" aria-controls="sponsor-popover" :aria-expanded="state.sponsorModal.open && state.sponsorModal.project?.id === project.id ? 'true' : 'false'" @click.stop="submitSponsor(project, $event)">
+                    <button class="ghost-button interaction-button sponsor-action-button" :class="{ 'interaction-active': interactionButtonActive('sponsor', project, 'compute'), 'is-disabled': !canClickSponsor(project, 'compute') }" type="button" :aria-disabled="sponsorButtonAriaDisabled(project, 'compute')" :title="sponsorButtonDisabledReason(project, 'compute')" aria-controls="sponsor-popover" :aria-expanded="state.sponsorModal.open && state.sponsorModal.project?.id === project.id && state.forms.sponsor.sponsor_type === 'compute' ? 'true' : 'false'" @mouseenter="showSponsorContactCard($event, project, 'compute')" @focus="showSponsorContactCard($event, project, 'compute')" @mouseleave="scheduleHideContactHoverCard" @blur="scheduleHideContactHoverCard" @click.stop="openSponsorModal(project, 'compute', $event)">
                       <span class="material-symbols-rounded interaction-icon" aria-hidden="true">volunteer_activism</span>
-                      <span>{{ sponsorButtonLabel(project) }}</span>
+                      <span>{{ sponsorButtonLabel(project, 'compute') }}</span>
+                    </button>
+                    <button class="ghost-button interaction-button sponsor-action-button" :class="{ 'interaction-active': interactionButtonActive('sponsor', project, 'labor_fee'), 'is-disabled': !canClickSponsor(project, 'labor_fee') }" type="button" :aria-disabled="sponsorButtonAriaDisabled(project, 'labor_fee')" :title="sponsorButtonDisabledReason(project, 'labor_fee')" aria-controls="sponsor-popover" :aria-expanded="state.sponsorModal.open && state.sponsorModal.project?.id === project.id && state.forms.sponsor.sponsor_type === 'labor_fee' ? 'true' : 'false'" @mouseenter="showSponsorContactCard($event, project, 'labor_fee')" @focus="showSponsorContactCard($event, project, 'labor_fee')" @mouseleave="scheduleHideContactHoverCard" @blur="scheduleHideContactHoverCard" @click.stop="openSponsorModal(project, 'labor_fee', $event)">
+                      <span class="material-symbols-rounded interaction-icon" aria-hidden="true">volunteer_activism</span>
+                      <span>{{ sponsorButtonLabel(project, 'labor_fee') }}</span>
                     </button>
                   </div>
                   <div v-if="hasPrimaryProjectPdf(project)" class="project-pdf-actions">
@@ -7492,39 +7764,38 @@ const App = {
         </div>
 
         <div v-if="state.sponsorModal.open" class="form-modal-backdrop sponsor-popover-backdrop" @click.self="closeSponsorModal">
-          <section id="sponsor-popover" ref="sponsorModalRef" class="sponsor-popover" data-testid="sponsor-popover" :style="{ left: state.sponsorModal.x + 'px', top: state.sponsorModal.y + 'px', maxHeight: state.sponsorModal.maxHeight + 'px' }" role="dialog" aria-modal="true" aria-label="选择资助类型" tabindex="-1" @keydown="trapModalFocus($event, sponsorModalRef)">
+          <section id="sponsor-popover" ref="sponsorModalRef" class="sponsor-popover" data-testid="sponsor-popover" :style="{ left: state.sponsorModal.x + 'px', top: state.sponsorModal.y + 'px', maxHeight: state.sponsorModal.maxHeight + 'px' }" role="dialog" aria-modal="true" aria-label="课题资助" tabindex="-1" @keydown="trapModalFocus($event, sponsorModalRef)">
             <header class="modal-header">
               <div>
-                <span class="eyebrow">选择资助类型</span>
+                <span class="eyebrow">{{ sponsorTypeButtonLabel(state.forms.sponsor.sponsor_type) }}</span>
                 <h2>{{ state.sponsorModal.project?.title || '课题资助' }}</h2>
               </div>
               <button class="ghost-button" type="button" @click="closeSponsorModal">关闭</button>
             </header>
             <form class="stacked-form sponsor-popover-form" @submit.prevent="submitSponsorModal">
               <p v-if="state.forms.sponsor.previous_review_comment" class="warning-note">上次审核意见：{{ state.forms.sponsor.previous_review_comment }}</p>
-              <div class="sponsor-checkbox-row">
-                <label v-for="item in quickSponsorTypeOptions" :key="item.value" class="checkbox-chip">
-                  <input v-model="state.forms.sponsor.sponsor_types" type="checkbox" :value="item.value" :disabled="!canRecruitProject(state.sponsorModal.project) && !activeSponsorTypesForProject(state.sponsorModal.project).includes(item.value)" />
-                  <span>{{ item.label }}<small v-if="sponsorRequestStatusLabel(state.sponsorModal.project, item.value)"> · {{ sponsorRequestStatusLabel(state.sponsorModal.project, item.value) }}</small></span>
-                </label>
-              </div>
-              <button class="text-button sponsor-more-toggle" type="button" @click="state.forms.sponsor.show_more_types = !state.forms.sponsor.show_more_types">
-                {{ state.forms.sponsor.show_more_types ? '收起更多资助类型' : '更多资助类型' }}
-              </button>
-              <div v-if="state.forms.sponsor.show_more_types" class="sponsor-checkbox-row sponsor-extra-options">
-                <label v-for="item in moreSponsorTypeOptions" :key="item.value" class="checkbox-chip">
-                  <input v-model="state.forms.sponsor.sponsor_types" type="checkbox" :value="item.value" :disabled="!canRecruitProject(state.sponsorModal.project) && !activeSponsorTypesForProject(state.sponsorModal.project).includes(item.value)" />
-                  <span>{{ item.label }}<small v-if="sponsorRequestStatusLabel(state.sponsorModal.project, item.value)"> · {{ sponsorRequestStatusLabel(state.sponsorModal.project, item.value) }}</small></span>
-                </label>
-              </div>
+              <section v-if="sponsorRequestByType(state.sponsorModal.project, state.forms.sponsor.sponsor_type)" class="sponsor-current-list" aria-label="当前资助">
+                <strong>当前{{ sponsorTypeButtonLabel(state.forms.sponsor.sponsor_type) }}</strong>
+                <div class="sponsor-current-row">
+                  <span>
+                    <b>{{ sponsorTypeLabel(state.forms.sponsor.sponsor_type) }}</b>
+                    <small>{{ sponsorRequestByType(state.sponsorModal.project, state.forms.sponsor.sponsor_type)?.status_label || sponsorStatusLabel(sponsorRequestByType(state.sponsorModal.project, state.forms.sponsor.sponsor_type)?.status) }}</small>
+                    <small v-if="sponsorRequestByType(state.sponsorModal.project, state.forms.sponsor.sponsor_type)?.review_comment">审核意见：{{ sponsorRequestByType(state.sponsorModal.project, state.forms.sponsor.sponsor_type)?.review_comment }}</small>
+                  </span>
+                  <button v-if="isSponsorTypeActive(state.sponsorModal.project, state.forms.sponsor.sponsor_type)" class="ghost-button danger sponsor-withdraw-button" type="button" :disabled="state.sponsorModal.submitting || isWithdrawingSponsor(state.sponsorModal.project)" @click.prevent="withdrawSponsorRequest(state.sponsorModal.project, sponsorRequestByType(state.sponsorModal.project, state.forms.sponsor.sponsor_type))">
+                    撤回{{ sponsorTypeButtonLabel(state.forms.sponsor.sponsor_type) }}
+                  </button>
+                </div>
+              </section>
               <label>
-                <span>说明</span>
-                <textarea v-model="state.forms.sponsor.note" rows="2" placeholder="可补充资源、额度或联系方式"></textarea>
+                <span>资助金额/算力情况</span>
+                <textarea v-model="state.forms.sponsor.note" rows="3" :placeholder="sponsorTypePlaceholder(state.forms.sponsor.sponsor_type)"></textarea>
               </label>
+              <p class="form-note">提交后由管理员审批。已提交或已通过的资助可在这里追加说明，状态不会因为追加说明而重置。</p>
               <div class="modal-actions">
                 <button class="ghost-button" type="button" @click="closeSponsorModal">取消</button>
-                <button class="primary-button" type="submit" :disabled="state.sponsorModal.submitting || (!state.forms.sponsor.sponsor_types.length && !activeSponsorRequestsForProject(state.sponsorModal.project).length)">
-                  {{ state.sponsorModal.submitting ? '正在提交' : '提交资助意向' }}
+                <button class="primary-button" type="submit" :disabled="state.sponsorModal.submitting">
+                  {{ state.sponsorModal.submitting ? '正在提交' : (isSponsorTypeActive(state.sponsorModal.project, state.forms.sponsor.sponsor_type) ? '追加资助说明' : '提交资助意向') }}
                 </button>
               </div>
             </form>
@@ -8094,6 +8365,12 @@ function parseRoute() {
   const parts = hash.split("/").filter(Boolean);
   if (!parts.length) return { name: "home", params: {}, fullPath: location.hash || "#/" };
   if (parts[0] === "project" && parts[1]) {
+    if (parts[2] === "discussion") {
+      return { name: "projectDiscussion", params: { id: parts[1] }, fullPath: location.hash };
+    }
+    if (parts[2] === "progress") {
+      return { name: "project", params: { id: parts[1] }, fullPath: location.hash };
+    }
     return { name: "project", params: { id: parts[1] }, fullPath: location.hash };
   }
   const known = new Set(["home", "projects", "faq", "dashboard", "favorites", "admin", "login", "register", "password-reset", "password-change"]);
@@ -8103,6 +8380,7 @@ function parseRoute() {
 function buildHash(name, params = {}) {
   if (name === "home") return "#/";
   if (name === "project") return params.id ? `#/project/${params.id}` : "#/";
+  if (name === "projectDiscussion") return params.id ? `#/project/${params.id}/discussion` : "#/";
   return `#/${name}`;
 }
 
@@ -8269,23 +8547,67 @@ function projectRecruitmentText(project) {
   return DEFAULT_PROJECT_RECRUITMENT_ROLES.map((role) => `${role.label} ${role.required}`).join("，");
 }
 
-function requiredTeamRoles(teamStatus) {
+function requiredTeamRoles(teamStatus, project = null) {
   const backendRequiredRoles = Array.isArray(teamStatus?.required_roles) ? teamStatus.required_roles : [];
   return DEFAULT_PROJECT_RECRUITMENT_ROLES.map((role) => {
     const matched = matchedRequiredTeamRole(teamStatus, role, backendRequiredRoles);
     const count = matched ? Number(matched.count || 0) : projectRoleCount(teamStatus, role, backendRequiredRoles);
     const required = Number(matched?.required || role.required || 1);
     const overfilled = Boolean(matched?.overfilled) || count > required;
+    const isSelfRole = isSelfTeamRole(project, role);
     return {
       ...role,
       label: matched?.label || role.label,
       count,
       required,
       ready: Boolean(matched?.ready) || count >= required,
+      isSelfRole,
       overfilled,
       status: matched?.status || (overfilled ? "overfilled" : count >= required ? "ready" : "missing")
     };
   });
+}
+
+function selfTeamRoleKeys(project) {
+  const keys = new Set((project?.viewer_state?.team_role_keys || []).filter(Boolean));
+  (project?.viewer_state?.interest_roles || []).forEach((role) => {
+    const key = teamRoleKeyForParticipationRole(role);
+    if (key) keys.add(key);
+  });
+  (project?.viewer_state?.claim_types || []).forEach((claimType) => {
+    if (claimType === "leader") keys.add("leader");
+  });
+  return keys;
+}
+
+function isSelfTeamRole(project, role) {
+  const aliases = roleAliases(role);
+  return Array.from(selfTeamRoleKeys(project)).some((key) => aliases.includes(key));
+}
+
+function teamRoleAriaLabel(role) {
+  const status = role.isSelfRole && role.overfilled
+    ? "我的角色，人数已超过要求"
+    : role.isSelfRole
+      ? "我的角色"
+      : role.overfilled
+      ? "人数已超过要求"
+      : role.ready
+        ? "人数已满足"
+        : "人数未满足";
+  return `${role.label}，当前 ${role.count} 人，要求 ${role.required} 人，${status}`;
+}
+
+function teamRoleKeyForParticipationRole(role) {
+  return {
+    "医生": "doctor",
+    "学生": "student",
+    "其他": "student",
+    "大学老师": "mentor",
+    "博士毕业及以上": "mentor",
+    "Leader": "leader",
+    "项目负责人": "leader"
+  }[role] || "";
 }
 
 function projectRoleCount(teamStatus, role, backendRequiredRoles) {
@@ -8410,6 +8732,10 @@ function projectDetailHref(project) {
   return project?.id ? `#/project/${project.id}` : "#/";
 }
 
+function projectDiscussionHref(project) {
+  return project?.id ? `#/project/${project.id}/discussion` : "#/";
+}
+
 function projectCreatorLabel(project) {
   const contact = projectCreatorContact(project);
   const label = contact?.name || contact?.uid;
@@ -8484,6 +8810,10 @@ function contactName(contact) {
 function contactWechatText(contact) {
   if (contact?.wechat_visible && contact?.wechat) return `微信：${contact.wechat}`;
   return state.user ? "未填写微信" : "登录后可查看微信";
+}
+
+function contactDetailText(member) {
+  return member?.detail || contactWechatText(member);
 }
 
 function teamContactGroup(project, role) {

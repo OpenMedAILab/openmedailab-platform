@@ -84,6 +84,24 @@ def normalize_public_role(role_type):
     return LEGACY_ROLE_ALIASES.get(value, "")
 
 
+def initial_credits_for_role(role_type):
+    normalized_role = normalize_public_role(role_type) or RoleType.OTHER
+    if normalized_role == RoleType.DOCTOR:
+        return 250
+    if normalized_role in {RoleType.PHD_STUDENT, RoleType.PHD_OR_ABOVE}:
+        return 200
+    return 100
+
+
+def participation_project_limit_for_role(role_type):
+    normalized_role = normalize_public_role(role_type) or RoleType.OTHER
+    if normalized_role == RoleType.DOCTOR:
+        return 5
+    if normalized_role in {RoleType.PHD_STUDENT, RoleType.PHD_OR_ABOVE}:
+        return 4
+    return 2
+
+
 class UserProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile")
     uid = models.CharField(max_length=16, unique=True, null=True, blank=True, db_index=True)
@@ -129,5 +147,5 @@ def create_user_profile(sender, instance, created, **kwargs):
             role_type=role_type,
             contact_email=instance.email,
             email_normalized=email_normalized or None,
-            credit_balance=getattr(settings, "OPENMEDAILAB_INITIAL_CREDITS", 100),
+            credit_balance=initial_credits_for_role(role_type),
         )

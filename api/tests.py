@@ -1,6 +1,7 @@
 import json
 import importlib.util
 import io
+import os
 import threading
 import tempfile
 import zipfile
@@ -10,6 +11,7 @@ from unittest.mock import Mock, patch
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.conf import settings
 from django.db import OperationalError, close_old_connections
@@ -18,7 +20,16 @@ from django.utils import timezone
 
 from accounts.models import PLATFORM_ADMIN_UID, RoleType
 from credits.models import Contribution, ContributionStatus, CreditLedger
-from interactions.models import InteractionStatus, ProjectClaimIntent, ProjectFollow, ProjectInterest, ProjectScore, SponsorIntent
+from interactions.models import (
+    ClaimType,
+    InteractionStatus,
+    ParticipationRole,
+    ProjectClaimIntent,
+    ProjectFollow,
+    ProjectInterest,
+    ProjectScore,
+    SponsorIntent,
+)
 from projects.importing import create_project
 from projects.models import AuditLog, Project, ProjectDiscussion, ProjectDocument, ProjectProgressEntry, ProjectStage, ProjectTask, Tag, Theme, ThemeFile
 
@@ -307,6 +318,8 @@ class ApiTests(TestCase):
         self.assertEqual(viewer["score"]["score"], 10)
         self.assertIn("学生", viewer["interest_roles"])
         self.assertIn("leader", viewer["claim_types"])
+        self.assertIn("student", viewer["team_role_keys"])
+        self.assertIn("leader", viewer["team_role_keys"])
         self.assertIn("compute", viewer["sponsor_types"])
         self.assertEqual(len(viewer["sponsor_requests"]), 1)
         self.assertEqual(viewer["sponsor_requests"][0]["sponsor_type"], "compute")
@@ -319,6 +332,78 @@ class ApiTests(TestCase):
         self.assertEqual(withdrawn_response.status_code, 200)
         withdrawn_viewer = withdrawn_response.json()["data"]["results"][0]["viewer_state"]
         self.assertNotIn("leader", withdrawn_viewer["claim_types"])
+        self.assertNotIn("leader", withdrawn_viewer["team_role_keys"])
+        self.assertIn("student", withdrawn_viewer["team_role_keys"])
+
+    def test_viewer_state_team_role_keys_cover_roles_and_public_endpoints(self):
+        def make_user(username, role_type=RoleType.OTHER):
+            user = User.objects.create_user(
+                username=username,
+                email=f"{username}@example.com",
+                password="StrongPass12345",
+            )
+            user.profile.role_type = role_type
+            user.profile.save(update_fields=["role_type", "updated_at"])
+            return user
+
+        doctor = make_user("viewerdoctor", RoleType.DOCTOR)
+        student = make_user("viewerstudent", RoleType.MASTER_STUDENT)
+        mentor = make_user("viewermentor", RoleType.PHD_OR_ABOVE)
+        leader_interest = make_user("viewerleaderinterest", RoleType.ENGINEER)
+        leader_claim = make_user("viewerleaderclaim", RoleType.OTHER)
+        paper_only = make_user("viewerpaperonly", RoleType.PHD_OR_ABOVE)
+        sponsor_only = make_user("viewersponsoronly", RoleType.PHD_OR_ABOVE)
+        withdrawn = make_user("viewerwithdrawn", RoleType.DOCTOR)
+        rejected = make_user("viewerrejected", RoleType.DOCTOR)
+
+        ProjectInterest.objects.create(user=doctor, project=self.project, role=ParticipationRole.DOCTOR, status=InteractionStatus.APPROVED)
+        ProjectInterest.objects.create(user=student, project=self.project, role=ParticipationRole.OTHER, status=InteractionStatus.APPROVED)
+        ProjectInterest.objects.create(user=mentor, project=self.project, role=ParticipationRole.TEACHER, status=InteractionStatus.PENDING)
+        ProjectInterest.objects.create(user=leader_interest, project=self.project, role=ParticipationRole.LEADER, status=InteractionStatus.APPROVED)
+        ProjectClaimIntent.objects.create(user=leader_claim, project=self.project, claim_type=ClaimType.LEADER, status=InteractionStatus.PENDING)
+        ProjectClaimIntent.objects.create(
+            user=paper_only,
+            project=self.project,
+            claim_type=ClaimType.PAPER_FIRST_UNIT,
+            claimed_unit_name="北京协和医院",
+            status=InteractionStatus.PENDING,
+        )
+        SponsorIntent.objects.create(user=sponsor_only, project=self.project, sponsor_type="compute", status=InteractionStatus.APPROVED)
+        ProjectInterest.objects.create(user=withdrawn, project=self.project, role=ParticipationRole.DOCTOR, status=InteractionStatus.WITHDRAWN)
+        ProjectClaimIntent.objects.create(user=rejected, project=self.project, claim_type=ClaimType.LEADER, status=InteractionStatus.REJECTED)
+
+        cases = [
+            (doctor, {"doctor"}),
+            (student, {"student"}),
+            (mentor, {"mentor"}),
+            (leader_interest, {"leader"}),
+            (leader_claim, {"leader"}),
+            (paper_only, set()),
+            (sponsor_only, set()),
+            (withdrawn, set()),
+            (rejected, set()),
+        ]
+
+        for user, expected_keys in cases:
+            self.client.force_login(user)
+            list_response = self.client.get("/api/projects/?page_size=10")
+            detail_response = self.client.get(f"/api/projects/{self.project.pk}/")
+            progress_response = self.client.get(f"/api/projects/{self.project.pk}/progress/")
+            status_response = self.client.get(f"/api/projects/{self.project.pk}/status-card/")
+
+            self.assertEqual(list_response.status_code, 200)
+            self.assertEqual(detail_response.status_code, 200)
+            self.assertEqual(progress_response.status_code, 200)
+            self.assertEqual(status_response.status_code, 200)
+
+            endpoint_viewers = [
+                list_response.json()["data"]["results"][0]["viewer_state"],
+                detail_response.json()["data"]["viewer_state"],
+                progress_response.json()["data"]["project"]["viewer_state"],
+                status_response.json()["data"]["viewer_state"],
+            ]
+            for viewer in endpoint_viewers:
+                self.assertEqual(set(viewer["team_role_keys"]), expected_keys)
 
     def test_project_progress_viewer_state_includes_active_sponsor_request_details(self):
         user = User.objects.create_user(username="progresssponsor", email="progresssponsor@example.com", password="StrongPass12345")
@@ -507,6 +592,225 @@ class ApiTests(TestCase):
         ]:
             response = self.post_json(path, payload)
             self.assertEqual(response.status_code, 201)
+
+    def test_platform_admin_cannot_submit_project_collaboration_or_task_result(self):
+        admin = self.login_platform_admin()
+
+        interest_response = self.post_json(
+            f"/api/projects/{self.project.pk}/interest/",
+            {
+                "role": "学生",
+                "available_hours_per_week": 2,
+                "authorship_intention": "contribution",
+            },
+        )
+        claim_response = self.post_json(
+            f"/api/projects/{self.project.pk}/claim/",
+            {"claim_type": "leader", "message": "管理员不应作为负责人认领"},
+        )
+        sponsor_response = self.post_json(
+            f"/api/projects/{self.project.pk}/sponsor/",
+            {"sponsor_type": "compute", "note": "管理员不应资助"},
+        )
+
+        for response in [interest_response, claim_response, sponsor_response]:
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.json()["error"]["code"], "platform_admin_cannot_collaborate")
+        self.assertFalse(ProjectInterest.objects.filter(user=admin, project=self.project).exists())
+        self.assertFalse(ProjectClaimIntent.objects.filter(user=admin, project=self.project).exists())
+        self.assertFalse(SponsorIntent.objects.filter(user=admin, project=self.project).exists())
+        self.assertEqual(
+            AuditLog.objects.filter(
+                actor=admin,
+                target_type="Project",
+                target_id=str(self.project.pk),
+                status="failed",
+                error_code="platform_admin_cannot_collaborate",
+            ).count(),
+            3,
+        )
+
+        ProjectInterest.objects.create(
+            user=admin,
+            project=self.project,
+            role="学生",
+            available_hours_per_week=2,
+            status=InteractionStatus.APPROVED,
+        )
+        self.project.stage = ProjectStage.ACTIVE
+        self.project.save(update_fields=["stage", "updated_at"])
+        contribution_response = self.post_json(
+            "/api/me/contributions/",
+            {
+                "project_id": self.project.pk,
+                "title": "管理员历史关系也不能提交结果",
+                "result_type": "stage",
+            },
+        )
+
+        self.assertEqual(contribution_response.status_code, 403)
+        self.assertEqual(contribution_response.json()["error"]["code"], "platform_admin_cannot_collaborate")
+        self.assertFalse(Contribution.objects.filter(user=admin, project=self.project).exists())
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=admin,
+                action="contribution.submit",
+                target_type="Project",
+                target_id=str(self.project.pk),
+                status="failed",
+                error_code="platform_admin_cannot_collaborate",
+            ).exists()
+        )
+
+    def test_legacy_project_views_block_platform_admin_collaboration_writes(self):
+        admin = self.login_platform_admin()
+
+        for path, payload in [
+            (
+                f"/projects/{self.project.pk}/interest/",
+                {
+                    "role": "学生",
+                    "available_hours_per_week": "2",
+                    "authorship_intention": "contribution",
+                },
+            ),
+            (f"/projects/{self.project.pk}/claim/", {"claim_type": "leader", "message": "旧表单不应写入"}),
+            (f"/projects/{self.project.pk}/sponsor/", {"sponsor_type": "compute", "note": "旧表单不应写入"}),
+        ]:
+            response = self.client.post(path, payload)
+            self.assertEqual(response.status_code, 302)
+
+        self.assertFalse(ProjectInterest.objects.filter(user=admin, project=self.project).exists())
+        self.assertFalse(ProjectClaimIntent.objects.filter(user=admin, project=self.project).exists())
+        self.assertFalse(SponsorIntent.objects.filter(user=admin, project=self.project).exists())
+
+    def test_seed_e2e_reset_removes_namespaced_projects_even_if_title_changed(self):
+        theme = Theme.objects.create(name="E2E stale theme", slug="e2e-stale-theme")
+        owner = User.objects.create_user(username="e2e_stale_owner", email="legacy-e2e-owner@example.com", password="StrongPass12345")
+        stale_leader = User.objects.create_user(username="legacy_e2e_leader", email="legacy-e2e-leader@example.com", password="StrongPass12345")
+        stale_project = Project.objects.create(
+            topic_id=9902,
+            title="标题已被浏览器验收改掉",
+            stage=ProjectStage.TEAM_BUILDING,
+            is_public=True,
+            theme=theme,
+            created_by=owner,
+        )
+        ProjectClaimIntent.objects.create(
+            user=stale_leader,
+            project=stale_project,
+            claim_type=ClaimType.LEADER,
+            status=InteractionStatus.APPROVED,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path = Path(tmpdir) / "fixture.json"
+            with patch.dict(os.environ, {"OPENMEDAILAB_E2E": "1"}), patch(
+                "api.management.commands.seed_e2e_data.FIXTURE_PATH",
+                fixture_path,
+            ):
+                call_command("seed_e2e_data", "--reset", verbosity=0)
+
+        with_relations = Project.objects.get(topic_id=9902)
+        self.assertTrue(with_relations.title.startswith("E2E_PUBLIC_WITH_RELATIONS"))
+        leader_claim = ProjectClaimIntent.objects.get(project=with_relations, claim_type=ClaimType.LEADER)
+        self.assertEqual(leader_claim.user.username, "e2e_participant")
+
+    def test_seed_e2e_reset_does_not_delete_non_e2e_topic_collision(self):
+        owner = User.objects.create_user(username="non_e2e_owner", email="non-e2e-owner@example.com", password="StrongPass12345")
+        project = Project.objects.create(
+            topic_id=9901,
+            title="真实业务课题不应被 E2E reset 删除",
+            stage=ProjectStage.OPEN_RECRUITING,
+            is_public=True,
+            created_by=owner,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path = Path(tmpdir) / "fixture.json"
+            with patch.dict(os.environ, {"OPENMEDAILAB_E2E": "1"}), patch(
+                "api.management.commands.seed_e2e_data.FIXTURE_PATH",
+                fixture_path,
+            ):
+                with self.assertRaises(CommandError):
+                    call_command("seed_e2e_data", "--reset", verbosity=0)
+
+        self.assertTrue(Project.objects.filter(pk=project.pk, title="真实业务课题不应被 E2E reset 删除").exists())
+
+    def test_platform_admin_rbac_removes_collaboration_capabilities_but_keeps_management(self):
+        self.login_platform_admin()
+
+        response = self.client.get("/api/rbac/")
+
+        self.assertEqual(response.status_code, 200)
+        capabilities = response.json()["data"]["capabilities"]
+        self.assertFalse(capabilities["express_interest"])
+        self.assertFalse(capabilities["claim_work"])
+        self.assertFalse(capabilities["sponsor_project"])
+        self.assertTrue(capabilities["follow_project"])
+        self.assertTrue(capabilities["score_project"])
+        self.assertTrue(capabilities["manage_projects"])
+        self.assertTrue(capabilities["review_interactions"])
+
+    def test_historical_platform_admin_rows_do_not_count_as_current_collaboration(self):
+        admin = self.login_platform_admin()
+        ProjectInterest.objects.create(
+            user=admin,
+            project=self.project,
+            role="医生",
+            available_hours_per_week=2,
+            status=InteractionStatus.APPROVED,
+        )
+        ProjectClaimIntent.objects.create(
+            user=admin,
+            project=self.project,
+            claim_type=ClaimType.LEADER,
+            status=InteractionStatus.APPROVED,
+        )
+        SponsorIntent.objects.create(
+            user=admin,
+            project=self.project,
+            sponsor_type="compute",
+            status=InteractionStatus.APPROVED,
+        )
+        normal = User.objects.create_user(username="adminhistoryviewer", email="admin-history-viewer@example.com", password="StrongPass12345")
+        self.client.force_login(normal)
+
+        list_response = self.client.get("/api/projects/?page_size=1")
+        status_response = self.client.get(f"/api/projects/{self.project.pk}/status-card/")
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(status_response.status_code, 200)
+        listed_project = list_response.json()["data"]["results"][0]
+        self.assertEqual(listed_project["team_status"]["sponsor_count"], 0)
+        required_roles = {row["key"]: row["count"] for row in listed_project["team_status"]["required_roles"]}
+        self.assertEqual(required_roles["doctor"], 0)
+        self.assertEqual(required_roles["leader"], 0)
+        groups = status_response.json()["data"]["uid_groups"]["groups"]
+        serialized_groups = json.dumps(groups, ensure_ascii=False)
+        self.assertNotIn(PLATFORM_ADMIN_UID, serialized_groups)
+
+        self.client.force_login(admin)
+        admin_detail_response = self.client.get(f"/api/projects/{self.project.pk}/")
+        self.assertEqual(admin_detail_response.status_code, 200)
+        viewer = admin_detail_response.json()["data"]["viewer_state"]
+        self.assertEqual(viewer["interest_roles"], [])
+        self.assertEqual(viewer["claim_types"], [])
+        self.assertEqual(viewer["sponsor_types"], [])
+        self.assertEqual(viewer["team_role_keys"], [])
+
+    def test_platform_admin_claim_availability_is_unavailable(self):
+        admin = self.login_platform_admin()
+
+        response = self.client.get(f"/api/projects/{self.project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        availability = response.json()["data"]["claim_availability"]
+        for claim_type in [ClaimType.LEADER, ClaimType.PAPER_FIRST_UNIT]:
+            self.assertFalse(availability[claim_type]["available"])
+            self.assertEqual(availability[claim_type]["action"], "unavailable")
+            self.assertEqual(availability[claim_type]["reason_code"], "platform_admin_cannot_collaborate")
+        self.assertFalse(ProjectClaimIntent.objects.filter(user=admin, project=self.project).exists())
 
     def test_team_status_counts_only_approved_relationships(self):
         doctor = User.objects.create_user(username="teamdoctor", email="teamdoctor@example.com", password="StrongPass12345")
@@ -2300,6 +2604,8 @@ class ApiTests(TestCase):
         doctor = User.objects.create_user(username="doctoruid", email="doctoruid@example.com", password="StrongPass12345")
         pending = User.objects.create_user(username="pendinguid", email="pendinguid@example.com", password="StrongPass12345")
         follower = User.objects.create_user(username="followeruid", email="followeruid@example.com", password="StrongPass12345")
+        student.profile.contact_wechat = "student-sponsor-wechat"
+        student.profile.save(update_fields=["contact_wechat", "updated_at"])
         ProjectInterest.objects.create(
             user=student,
             project=self.project,
@@ -2367,6 +2673,11 @@ class ApiTests(TestCase):
         self.assertIn(pending.profile.uid, uid_groups["参与：医生（待处理）"])
         self.assertIn(doctor.profile.uid, uid_groups["认领项目负责人（已通过）"])
         self.assertIn(student.profile.uid, uid_groups["资助：资助算力（已通过）"])
+        sponsor_group = next(group for group in payload["uid_groups"]["groups"] if group["key"] == "sponsor-compute-approved")
+        self.assertEqual(sponsor_group["members"][0]["uid"], student.profile.uid)
+        self.assertEqual(sponsor_group["members"][0]["wechat"], "student-sponsor-wechat")
+        self.assertTrue(sponsor_group["members"][0]["wechat_visible"])
+        self.assertNotIn("name", sponsor_group["members"][0])
         self.assertNotIn("studentuid@example.com", json.dumps(payload, ensure_ascii=False))
         contact_groups = {group["key"]: group["members"] for group in payload["project"]["team_contact_groups"]}
         self.assertEqual(contact_groups["student"][0]["uid"], student.profile.uid)
@@ -2388,6 +2699,8 @@ class ApiTests(TestCase):
         pending = User.objects.create_user(username="pendingtaskfund", email="pendingtaskfund@example.com", password="StrongPass12345")
         approved = User.objects.create_user(username="approvedtaskfund", email="approvedtaskfund@example.com", password="StrongPass12345")
         rejected = User.objects.create_user(username="rejectedtaskfund", email="rejectedtaskfund@example.com", password="StrongPass12345")
+        approved.profile.contact_wechat = "approved-sponsor-wechat"
+        approved.profile.save(update_fields=["contact_wechat", "updated_at"])
         SponsorIntent.objects.create(user=pending, project=self.project, sponsor_type="compute", status=InteractionStatus.PENDING)
         SponsorIntent.objects.create(user=approved, project=self.project, sponsor_type="labor_fee", status=InteractionStatus.APPROVED)
         SponsorIntent.objects.create(user=rejected, project=self.project, sponsor_type="token", status=InteractionStatus.REJECTED)
@@ -2408,6 +2721,13 @@ class ApiTests(TestCase):
         self.assertEqual(len(approved_groups), 1)
         self.assertEqual(approved_groups[0]["subtype"], "labor_fee")
         self.assertEqual(approved_groups[0]["uids"], [approved.profile.uid])
+        self.assertEqual(approved_groups[0]["members"][0]["uid"], approved.profile.uid)
+        self.assertEqual(approved_groups[0]["members"][0]["wechat"], "approved-sponsor-wechat")
+        self.assertTrue(approved_groups[0]["members"][0]["wechat_visible"])
+        self.assertNotIn("name", approved_groups[0]["members"][0])
+        inactive_groups = [group for group in sponsor_groups if group["status"] != InteractionStatus.APPROVED]
+        self.assertTrue(inactive_groups)
+        self.assertTrue(all("members" not in group for group in inactive_groups))
         self.assertFalse(any(group["status"] == InteractionStatus.PENDING and group.get("label") == "已获批资助" for group in sponsor_groups))
 
     def test_interest_auto_approves_and_admin_reviews_claims_and_sponsors(self):
@@ -2737,6 +3057,50 @@ class ApiTests(TestCase):
         self.assertEqual(intent.status, InteractionStatus.APPROVED)
         self.assertEqual(intent.note, "补充说明")
 
+    def test_active_sponsor_can_update_note_after_recruiting_stage_ends(self):
+        sponsor_user = User.objects.create_user(username="sponsorpostrecruit", email="sponsor-post-recruit@example.com", password="StrongPass12345")
+        intent = SponsorIntent.objects.create(
+            user=sponsor_user,
+            project=self.project,
+            sponsor_type="compute",
+            status=InteractionStatus.APPROVED,
+            note="已通过算力",
+        )
+        self.project.stage = ProjectStage.ACTIVE
+        self.project.save(update_fields=["stage", "updated_at"])
+        self.client.force_login(sponsor_user)
+
+        response = self.post_json(
+            f"/api/projects/{self.project.pk}/sponsor/",
+            {"sponsor_type": "compute", "note": "进行中追加算力说明"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        intent.refresh_from_db()
+        self.assertEqual(intent.status, InteractionStatus.APPROVED)
+        self.assertEqual(intent.note, "进行中追加算力说明")
+
+    def test_resubmitting_pending_sponsor_updates_note_without_resetting_status(self):
+        sponsor_user = User.objects.create_user(username="sponsorpendrepeat", email="sponsor-pending-repeat@example.com", password="StrongPass12345")
+        intent = SponsorIntent.objects.create(
+            user=sponsor_user,
+            project=self.project,
+            sponsor_type="labor_fee",
+            status=InteractionStatus.PENDING,
+            note="旧劳务费说明",
+        )
+        self.client.force_login(sponsor_user)
+
+        response = self.post_json(
+            f"/api/projects/{self.project.pk}/sponsor/",
+            {"sponsor_type": "labor_fee", "note": "追加劳务费金额"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        intent.refresh_from_db()
+        self.assertEqual(intent.status, InteractionStatus.PENDING)
+        self.assertEqual(intent.note, "追加劳务费金额")
+
     def test_resubmitting_rejected_sponsor_becomes_pending_and_clears_review_fields(self):
         sponsor_user = User.objects.create_user(username="sponsorrejectedrepeat", email="sponsor-rejected-repeat@example.com", password="StrongPass12345")
         admin = self.login_platform_admin()
@@ -2809,6 +3173,78 @@ class ApiTests(TestCase):
             ).exists()
         )
 
+    def test_user_can_withdraw_pending_and_approved_sponsor_intents(self):
+        sponsor_user = User.objects.create_user(username="sponsorwithdrawactive", email="sponsor-withdraw-active@example.com", password="StrongPass12345")
+        pending = SponsorIntent.objects.create(user=sponsor_user, project=self.project, sponsor_type="compute", status=InteractionStatus.PENDING)
+        approved = SponsorIntent.objects.create(user=sponsor_user, project=self.project, sponsor_type="labor_fee", status=InteractionStatus.APPROVED)
+        self.client.force_login(sponsor_user)
+
+        pending_response = self.patch_json(
+            f"/api/me/interactions/sponsor/{pending.pk}/withdraw/",
+            {"reason": "用户主动撤回资助算力"},
+        )
+        approved_response = self.patch_json(
+            f"/api/me/interactions/sponsor/{approved.pk}/withdraw/",
+            {"reason": "用户主动撤回资助劳务费"},
+        )
+
+        self.assertEqual(pending_response.status_code, 200)
+        self.assertEqual(approved_response.status_code, 200)
+        pending.refresh_from_db()
+        approved.refresh_from_db()
+        self.assertEqual(pending.status, InteractionStatus.WITHDRAWN)
+        self.assertEqual(approved.status, InteractionStatus.WITHDRAWN)
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=sponsor_user,
+                action="interaction.withdraw",
+                target_type="SponsorIntent",
+                target_id=str(pending.pk),
+            ).exists()
+        )
+        self.assertTrue(
+            AuditLog.objects.filter(
+                actor=sponsor_user,
+                action="interaction.withdraw",
+                target_type="SponsorIntent",
+                target_id=str(approved.pk),
+            ).exists()
+        )
+
+    def test_user_cannot_withdraw_inactive_sponsor_intents(self):
+        sponsor_user = User.objects.create_user(username="sponsorwithdrawinactive", email="sponsor-withdraw-inactive@example.com", password="StrongPass12345")
+        rejected = SponsorIntent.objects.create(user=sponsor_user, project=self.project, sponsor_type="token", status=InteractionStatus.REJECTED)
+        withdrawn = SponsorIntent.objects.create(user=sponsor_user, project=self.project, sponsor_type="compute", status=InteractionStatus.WITHDRAWN)
+        self.client.force_login(sponsor_user)
+
+        rejected_response = self.patch_json(
+            f"/api/me/interactions/sponsor/{rejected.pk}/withdraw/",
+            {"reason": "重复撤回被拒绝资助"},
+        )
+        withdrawn_response = self.patch_json(
+            f"/api/me/interactions/sponsor/{withdrawn.pk}/withdraw/",
+            {"reason": "重复撤回已撤回资助"},
+        )
+
+        self.assertEqual(rejected_response.status_code, 422)
+        self.assertEqual(withdrawn_response.status_code, 422)
+        self.assertEqual(rejected_response.json()["error"]["code"], "interaction_not_withdrawable")
+        self.assertEqual(withdrawn_response.json()["error"]["code"], "interaction_not_withdrawable")
+        rejected.refresh_from_db()
+        withdrawn.refresh_from_db()
+        self.assertEqual(rejected.status, InteractionStatus.REJECTED)
+        self.assertEqual(withdrawn.status, InteractionStatus.WITHDRAWN)
+        self.assertEqual(
+            AuditLog.objects.filter(
+                actor=sponsor_user,
+                action="interaction.withdraw",
+                target_type="SponsorIntent",
+                status="failed",
+                error_code="interaction_not_withdrawable",
+            ).count(),
+            2,
+        )
+
     def test_database_lock_retry_retries_locked_operations_until_success(self):
         from api import ninja_api
 
@@ -2839,7 +3275,8 @@ class ApiTests(TestCase):
         )
         self.client.force_login(sponsor_user)
         query_mock = Mock()
-        query_mock.get_or_create.side_effect = [OperationalError("database is locked"), (intent, False)]
+        query_mock.filter.return_value = query_mock
+        query_mock.first.side_effect = [OperationalError("database is locked"), intent]
 
         with patch("api.ninja_api.SponsorIntent.objects.select_for_update", return_value=query_mock), patch("api.ninja_api.time.sleep"):
             response = self.post_json(
@@ -2851,7 +3288,7 @@ class ApiTests(TestCase):
         self.assertNotIn("database is locked", json.dumps(response.json(), ensure_ascii=False).lower())
         intent.refresh_from_db()
         self.assertEqual(intent.note, "锁后成功")
-        self.assertEqual(query_mock.get_or_create.call_count, 2)
+        self.assertEqual(query_mock.first.call_count, 2)
         self.assertTrue(
             AuditLog.objects.filter(
                 actor=sponsor_user,
@@ -2867,7 +3304,8 @@ class ApiTests(TestCase):
         sponsor_user = User.objects.create_user(username="sponsorlockexhausted", email="sponsor-lock-exhausted@example.com", password="StrongPass12345")
         self.client.force_login(sponsor_user)
         query_mock = Mock()
-        query_mock.get_or_create.side_effect = OperationalError("database is locked")
+        query_mock.filter.return_value = query_mock
+        query_mock.first.side_effect = OperationalError("database is locked")
 
         with patch("api.ninja_api.SponsorIntent.objects.select_for_update", return_value=query_mock), patch("api.ninja_api.time.sleep"):
             response = self.post_json(
@@ -2878,7 +3316,7 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["error"]["code"], "database_busy")
         self.assertNotIn("database is locked", json.dumps(response.json(), ensure_ascii=False).lower())
-        self.assertEqual(query_mock.get_or_create.call_count, ninja_api.DATABASE_LOCK_RETRY_ATTEMPTS)
+        self.assertEqual(query_mock.first.call_count, ninja_api.DATABASE_LOCK_RETRY_ATTEMPTS)
         self.assertTrue(
             AuditLog.objects.filter(
                 actor=sponsor_user,
@@ -3227,7 +3665,7 @@ class ApiTests(TestCase):
             {"role": "学生", "available_hours_per_week": 4, "message": "第三个课题"},
         )
         self.assertEqual(third_interest_response.status_code, 422)
-        self.assertEqual(third_interest_response.json()["error"]["code"], "insufficient_credits")
+        self.assertEqual(third_interest_response.json()["error"]["code"], "participation_limit_reached")
 
         reserved_transfer_response = self.post_json(
             "/api/me/credits/transfer/",
@@ -3268,6 +3706,96 @@ class ApiTests(TestCase):
                 amount=100,
             ).exists()
         )
+
+    def test_participation_project_limit_depends_on_role_even_with_extra_credits(self):
+        topic_counter = 1000
+
+        def next_project(title):
+            nonlocal topic_counter
+            topic_counter += 1
+            return Project.objects.create(
+                topic_id=topic_counter,
+                title=title,
+                summary=title,
+                theme=self.theme,
+                stage=ProjectStage.OPEN_RECRUITING,
+                is_public=True,
+            )
+
+        def user_with_role(username, role_type):
+            user = User.objects.create_user(
+                username=username,
+                email=f"{username}@example.com",
+                password="StrongPass12345",
+            )
+            user.profile.role_type = role_type
+            user.profile.credit_balance = 1000
+            user.profile.save(update_fields=["role_type", "credit_balance", "updated_at"])
+            return user
+
+        cases = [
+            (RoleType.DOCTOR, 5, "医生"),
+            (RoleType.PHD_STUDENT, 4, "学生"),
+            (RoleType.UNDERGRAD_OR_BELOW, 2, "学生"),
+        ]
+        for role_type, limit, participation_role in cases:
+            user = user_with_role(f"limit{role_type}", role_type)
+            for index in range(limit):
+                project = next_project(f"{role_type} 已参与课题 {index}")
+                ProjectInterest.objects.create(
+                    user=user,
+                    project=project,
+                    role=participation_role,
+                    available_hours_per_week=4,
+                    status=InteractionStatus.APPROVED,
+                )
+                if index == 0:
+                    CreditLedger.objects.create(
+                        user=user,
+                        project=project,
+                        action_type=CreditLedger.ActionType.PROJECT_PARTICIPATION_COST,
+                        amount=-50,
+                        balance_after=user.profile.credit_balance - 50,
+                        reason="已启动课题也计入并行上限",
+                    )
+            overflow_project = next_project(f"{role_type} 超额课题")
+            self.client.force_login(user)
+
+            availability_response = self.client.get(f"/api/projects/{overflow_project.pk}/status-card/")
+            self.assertEqual(availability_response.status_code, 200)
+            availability = availability_response.json()["data"]["claim_availability"]["leader"]
+            self.assertEqual(availability["action"], "unavailable")
+            self.assertEqual(availability["reason_code"], "participation_limit_reached")
+
+            interest_response = self.post_json(
+                f"/api/projects/{overflow_project.pk}/interest/",
+                {"role": participation_role, "available_hours_per_week": 4, "message": "想继续参与"},
+            )
+            self.assertEqual(interest_response.status_code, 422)
+            self.assertEqual(interest_response.json()["error"]["code"], "participation_limit_reached")
+
+            claim_response = self.post_json(
+                f"/api/projects/{overflow_project.pk}/claim/",
+                {"claim_type": "leader", "message": "想认领项目负责人"},
+            )
+            self.assertEqual(claim_response.status_code, 422)
+            self.assertEqual(claim_response.json()["error"]["code"], "participation_limit_reached")
+            self.assertTrue(
+                AuditLog.objects.filter(
+                    actor=user,
+                    action="interaction.submit_interest",
+                    status="failed",
+                    error_code="participation_limit_reached",
+                ).exists()
+            )
+            self.assertTrue(
+                AuditLog.objects.filter(
+                    actor=user,
+                    action="interaction.submit_claim",
+                    status="failed",
+                    error_code="participation_limit_reached",
+                ).exists()
+            )
 
     def test_interaction_stage_and_credit_failures_write_failed_audit(self):
         user = User.objects.create_user(username="interactionfail", email="interactionfail@example.com", password="StrongPass12345")
@@ -3379,6 +3907,27 @@ class ApiTests(TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "interaction_not_approved")
+
+    def test_follow_and_score_do_not_allow_task_result_submission(self):
+        user = User.objects.create_user(username="feedbackonly", email="feedbackonly@example.com", password="StrongPass12345")
+        ProjectFollow.objects.create(user=user, project=self.project)
+        ProjectScore.objects.create(user=user, project=self.project, score=10, comment="点赞支持")
+        self.project.stage = ProjectStage.ACTIVE
+        self.project.save(update_fields=["stage", "updated_at"])
+        self.client.force_login(user)
+
+        response = self.post_json(
+            "/api/me/contributions/",
+            {
+                "project_id": self.project.pk,
+                "title": "只有收藏点赞不能提交",
+                "result_type": "stage",
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "interaction_not_approved")
+        self.assertFalse(Contribution.objects.filter(user=user, project=self.project).exists())
 
     def test_user_can_withdraw_own_interaction_but_not_others(self):
         owner = User.objects.create_user(username="owner", email="owner@example.com", password="StrongPass12345")
@@ -4000,6 +4549,38 @@ class ApiTests(TestCase):
         self.assertEqual(profile_response.status_code, 200)
         user.profile.refresh_from_db()
         self.assertEqual(user.profile.uid, original_uid)
+
+    def test_register_initial_credits_depend_on_role_and_ledger_matches_balance(self):
+        expected_credits = {
+            "doctor": 250,
+            "phd_student": 200,
+            "phd_or_above": 200,
+            "undergrad_or_below": 100,
+            "master_student": 100,
+            "engineer": 100,
+        }
+
+        for role, expected_balance in expected_credits.items():
+            response = self.post_json(
+                "/api/auth/register/",
+                {
+                    "username": f"{role}credit",
+                    "email": f"{role}-credit@example.com",
+                    "display_name": f"{role} credit",
+                    "role_type": role,
+                    "password1": "StrongPass12345",
+                    "password2": "StrongPass12345",
+                },
+            )
+            self.assertEqual(response.status_code, 201, role)
+            profile = response.json()["data"]["profile"]
+            self.assertEqual(profile["credit_balance"], expected_balance, role)
+            user = User.objects.get(username=f"{role}credit")
+            self.assertEqual(user.profile.credit_balance, expected_balance)
+            ledger = CreditLedger.objects.get(user=user, action_type=CreditLedger.ActionType.REGISTER_BONUS)
+            self.assertEqual(ledger.amount, expected_balance)
+            self.assertEqual(ledger.balance_after, expected_balance)
+            self.client.logout()
 
     @override_settings(OPENMEDAILAB_DEFAULT_PASSWORD="SystemDefaultPass12345")
     def test_admin_resets_password_to_default_and_user_must_change_before_using_system(self):
