@@ -1421,9 +1421,43 @@ textarea:focus {
 
 .project-progress-summary,
 .project-progress-documents,
-.project-progress-timeline,
-.project-discussion-section {
+.project-progress-timeline {
   min-width: 0;
+}
+
+.project-discussion-page {
+  display: grid;
+  gap: 18px;
+}
+
+.discussion-page-shell {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.45fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.discussion-project-card,
+.discussion-stream-panel {
+  min-width: 0;
+}
+
+.discussion-project-card {
+  position: sticky;
+  top: 24px;
+  display: grid;
+  gap: 14px;
+}
+
+.discussion-project-card h2,
+.discussion-stream-panel h2 {
+  margin: 0;
+}
+
+.discussion-project-card p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.65;
 }
 
 .timeline-list {
@@ -1465,6 +1499,18 @@ textarea:focus {
   display: grid;
   gap: 10px;
   margin-bottom: 16px;
+}
+
+.discussion-bottom-bar {
+  position: sticky;
+  top: 12px;
+  z-index: 2;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 14px 36px rgba(12, 39, 47, 0.09);
+  backdrop-filter: blur(10px);
 }
 
 .discussion-form textarea {
@@ -1521,6 +1567,40 @@ textarea:focus {
   margin: 14px 0;
 }
 
+.project-card-tags-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.project-card-tags-actions .tag-row {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+
+.project-card-inline-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.project-card-inline-actions .ghost-button {
+  min-height: 34px;
+  padding: 7px 12px;
+  white-space: nowrap;
+}
+
+.empty-tags {
+  min-height: 34px;
+}
+
 .tag-row span {
   padding: 5px 8px;
   border-radius: 999px;
@@ -1574,6 +1654,16 @@ textarea:focus {
   line-height: 1.18;
   white-space: normal;
   gap: 6px;
+}
+
+.project-card-footer .project-interaction-actions {
+  grid-template-columns: repeat(7, minmax(72px, 1fr));
+  max-width: none;
+  min-width: 0;
+}
+
+.project-card-footer .project-interaction-actions button {
+  padding: 6px 7px;
 }
 
 .project-interaction-actions .claim-action-button {
@@ -4379,6 +4469,7 @@ code {
   .sidebar-qr-admin-grid,
   .faq-qr-grid,
   .project-progress-layout,
+  .discussion-page-shell,
   .admin-grid,
   .workspace-split,
   .dashboard-grid,
@@ -4474,6 +4565,10 @@ code {
     margin-left: 0;
   }
 
+  .discussion-project-card {
+    position: static;
+  }
+
   .project-interaction-actions {
     grid-template-columns: repeat(auto-fit, minmax(88px, 112px));
     width: auto;
@@ -4485,6 +4580,19 @@ code {
   .project-interaction-actions button {
     min-height: 44px;
     padding: 6px 8px;
+  }
+
+  .project-card-footer .project-interaction-actions {
+    grid-template-columns: repeat(7, minmax(64px, 1fr));
+    width: auto;
+    max-width: none;
+    min-width: 0;
+    justify-content: stretch;
+    gap: 6px;
+  }
+
+  .project-card-footer .project-interaction-actions button {
+    padding: 5px 6px;
   }
 
   .workspace-overview-grid {
@@ -4703,6 +4811,16 @@ code {
   .project-card-footer {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .project-card-tags-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .project-card-inline-actions {
+    justify-content: flex-start;
+    margin-left: 0;
   }
 
   .file-manager-layout {

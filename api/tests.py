@@ -3665,7 +3665,7 @@ class ApiTests(TestCase):
             {"role": "学生", "available_hours_per_week": 4, "message": "第三个课题"},
         )
         self.assertEqual(third_interest_response.status_code, 422)
-        self.assertEqual(third_interest_response.json()["error"]["code"], "insufficient_credits")
+        self.assertEqual(third_interest_response.json()["error"]["code"], "participation_limit_reached")
 
         reserved_transfer_response = self.post_json(
             "/api/me/credits/transfer/",
@@ -3706,6 +3706,96 @@ class ApiTests(TestCase):
                 amount=100,
             ).exists()
         )
+
+    def test_participation_project_limit_depends_on_role_even_with_extra_credits(self):
+        topic_counter = 1000
+
+        def next_project(title):
+            nonlocal topic_counter
+            topic_counter += 1
+            return Project.objects.create(
+                topic_id=topic_counter,
+                title=title,
+                summary=title,
+                theme=self.theme,
+                stage=ProjectStage.OPEN_RECRUITING,
+                is_public=True,
+            )
+
+        def user_with_role(username, role_type):
+            user = User.objects.create_user(
+                username=username,
+                email=f"{username}@example.com",
+                password="StrongPass12345",
+            )
+            user.profile.role_type = role_type
+            user.profile.credit_balance = 1000
+            user.profile.save(update_fields=["role_type", "credit_balance", "updated_at"])
+            return user
+
+        cases = [
+            (RoleType.DOCTOR, 5, "医生"),
+            (RoleType.PHD_STUDENT, 4, "学生"),
+            (RoleType.UNDERGRAD_OR_BELOW, 2, "学生"),
+        ]
+        for role_type, limit, participation_role in cases:
+            user = user_with_role(f"limit{role_type}", role_type)
+            for index in range(limit):
+                project = next_project(f"{role_type} 已参与课题 {index}")
+                ProjectInterest.objects.create(
+                    user=user,
+                    project=project,
+                    role=participation_role,
+                    available_hours_per_week=4,
+                    status=InteractionStatus.APPROVED,
+                )
+                if index == 0:
+                    CreditLedger.objects.create(
+                        user=user,
+                        project=project,
+                        action_type=CreditLedger.ActionType.PROJECT_PARTICIPATION_COST,
+                        amount=-50,
+                        balance_after=user.profile.credit_balance - 50,
+                        reason="已启动课题也计入并行上限",
+                    )
+            overflow_project = next_project(f"{role_type} 超额课题")
+            self.client.force_login(user)
+
+            availability_response = self.client.get(f"/api/projects/{overflow_project.pk}/status-card/")
+            self.assertEqual(availability_response.status_code, 200)
+            availability = availability_response.json()["data"]["claim_availability"]["leader"]
+            self.assertEqual(availability["action"], "unavailable")
+            self.assertEqual(availability["reason_code"], "participation_limit_reached")
+
+            interest_response = self.post_json(
+                f"/api/projects/{overflow_project.pk}/interest/",
+                {"role": participation_role, "available_hours_per_week": 4, "message": "想继续参与"},
+            )
+            self.assertEqual(interest_response.status_code, 422)
+            self.assertEqual(interest_response.json()["error"]["code"], "participation_limit_reached")
+
+            claim_response = self.post_json(
+                f"/api/projects/{overflow_project.pk}/claim/",
+                {"claim_type": "leader", "message": "想认领项目负责人"},
+            )
+            self.assertEqual(claim_response.status_code, 422)
+            self.assertEqual(claim_response.json()["error"]["code"], "participation_limit_reached")
+            self.assertTrue(
+                AuditLog.objects.filter(
+                    actor=user,
+                    action="interaction.submit_interest",
+                    status="failed",
+                    error_code="participation_limit_reached",
+                ).exists()
+            )
+            self.assertTrue(
+                AuditLog.objects.filter(
+                    actor=user,
+                    action="interaction.submit_claim",
+                    status="failed",
+                    error_code="participation_limit_reached",
+                ).exists()
+            )
 
     def test_interaction_stage_and_credit_failures_write_failed_audit(self):
         user = User.objects.create_user(username="interactionfail", email="interactionfail@example.com", password="StrongPass12345")

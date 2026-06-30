@@ -596,6 +596,9 @@ const App = {
       if (state.route.name === "project") {
         await loadProjectProgress();
       }
+      if (state.route.name === "projectDiscussion") {
+        await loadProjectDiscussionPage();
+      }
       if (state.route.name === "favorites") {
         await loadFavorites({ force: true });
       }
@@ -678,7 +681,38 @@ const App = {
       await loadProjects();
     }
 
+    function syncProjectProgressPayload(progress) {
+      state.projectProgress.project = progress.project;
+      applyProjectViewerState(state.projectProgress.project);
+      state.projectProgress.progressText = progress.progress_text || "";
+      state.projectProgress.documents = progress.documents || [];
+      state.projectProgress.timeline = progress.timeline || [];
+    }
+
     async function loadProjectProgress() {
+      const projectId = Number(state.route.params.id);
+      if (!projectId) {
+        navigate("home");
+        return;
+      }
+      state.projectProgress.loading = true;
+      state.loading = true;
+      try {
+        const progress = await api.projectProgress(projectId);
+        syncProjectProgressPayload(progress);
+      } catch (error) {
+        showToast(error.message || "课题进度读取失败");
+        state.projectProgress.project = null;
+        state.projectProgress.documents = [];
+        state.projectProgress.timeline = [];
+        state.projectProgress.discussions = [];
+      } finally {
+        state.projectProgress.loading = false;
+        state.loading = false;
+      }
+    }
+
+    async function loadProjectDiscussionPage() {
       const projectId = Number(state.route.params.id);
       if (!projectId) {
         navigate("home");
@@ -691,19 +725,13 @@ const App = {
           api.projectProgress(projectId),
           api.projectDiscussions(projectId, { page_size: 50 })
         ]);
-        state.projectProgress.project = progress.project;
-        applyProjectViewerState(state.projectProgress.project);
-        state.projectProgress.progressText = progress.progress_text || "";
-        state.projectProgress.documents = progress.documents || [];
-        state.projectProgress.timeline = progress.timeline || [];
+        syncProjectProgressPayload(progress);
         state.projectProgress.discussions = discussions.results || [];
         state.projectProgress.discussionPagination = discussions.pagination || {};
         state.projectProgress.replyDrafts = {};
       } catch (error) {
-        showToast(error.message || "课题进度读取失败");
+        showToast(error.message || "课题讨论读取失败");
         state.projectProgress.project = null;
-        state.projectProgress.documents = [];
-        state.projectProgress.timeline = [];
         state.projectProgress.discussions = [];
       } finally {
         state.projectProgress.loading = false;
@@ -3020,6 +3048,7 @@ const App = {
         stage_not_recruiting: `当前阶段暂不接受${label}。`,
         slot_occupied: `该课题已有${label}申请或已通过${label}。`,
         insufficient_credits: `当前积分不足，暂不能提交${label}。`,
+        participation_limit_reached: "当前身份可同时参与的课题数已达上限。",
         data_conflict: `该课题的${label}数据存在冲突，请联系管理员处理。`,
         platform_admin_cannot_collaborate: "系统管理员不能认领项目。"
       };
@@ -5473,6 +5502,7 @@ const App = {
       topicThemeCardStyle,
       loadMoreProjects,
       loadProjectProgress,
+      loadProjectDiscussionPage,
       loadProjectDiscussions,
       submitProjectDiscussion,
       updateProjectDiscussion,
@@ -5711,6 +5741,7 @@ const App = {
       projectPdfHref,
       projectProgressDocumentsFor,
       projectDetailHref,
+      projectDiscussionHref,
       hasPrimaryProjectPdf,
       projectCreatorLabel,
       documentDisplayTitle,
@@ -5955,8 +5986,27 @@ const App = {
                       <div v-if="project.clinical_endpoint"><dt>临床终点</dt><dd>{{ project.clinical_endpoint }}</dd></div>
                       <div v-if="project.existing_foundation"><dt>已有基础</dt><dd>{{ project.existing_foundation }}</dd></div>
                     </div>
-                    <div v-if="project.tags.length" class="tag-row">
-                      <span v-for="tag in project.tags.slice(0, 5)" :key="tag.id">{{ tag.name }}</span>
+                    <div class="project-card-tags-actions">
+                      <div v-if="project.tags.length" class="tag-row project-tag-row">
+                        <span v-for="tag in project.tags.slice(0, 5)" :key="tag.id">{{ tag.name }}</span>
+                      </div>
+                      <div v-else class="tag-row project-tag-row empty-tags" aria-hidden="true"></div>
+                      <div class="project-card-inline-actions">
+                        <a
+                          class="ghost-button project-discussion-link"
+                          :href="projectDiscussionHref(project)"
+                          @click.stop.prevent="navigate('projectDiscussion', { id: project.id })"
+                        >
+                          交流区
+                        </a>
+                        <a
+                          class="ghost-button project-progress-link"
+                          :href="projectDetailHref(project)"
+                          @click.stop.prevent="navigate('project', { id: project.id })"
+                        >
+                          项目进度
+                        </a>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -6105,6 +6155,7 @@ const App = {
                 </div>
                 <div class="section-head-actions">
                   <button class="ghost-button" type="button" @click="navigate('home')">返回课题库</button>
+                  <a class="ghost-button" :href="projectDiscussionHref(state.projectProgress.project)" @click.prevent="navigate('projectDiscussion', { id: state.projectProgress.project.id })">进入讨论区</a>
                   <a v-if="hasPrimaryProjectPdf(state.projectProgress.project)" class="ghost-button" :href="projectPdfHref(state.projectProgress.project)" target="_blank" rel="noopener">查看PDF</a>
                   <a v-if="hasPrimaryProjectPdf(state.projectProgress.project)" class="ghost-button" :href="projectPdfHref(state.projectProgress.project)" download>下载PDF</a>
                 </div>
@@ -6211,54 +6262,109 @@ const App = {
                 <p v-else class="muted-inline">暂无公开进度时间线。</p>
               </article>
 
-              <article class="content-panel project-discussion-section">
-                <div class="panel-title-row compact-title-row">
-                  <div>
-                    <h2>讨论区</h2>
-                    <p>所有登录用户都可以基于本课题讨论任何事情；公开展示只显示 UID。</p>
-                  </div>
-                </div>
-                <form v-if="state.user" class="discussion-form" @submit.prevent="submitProjectDiscussion()">
-                  <textarea v-model="state.projectProgress.discussionForm.content" maxlength="2000" placeholder="写下你的问题、建议或协作信息"></textarea>
-                  <button class="primary-button" type="submit" :disabled="state.projectProgress.submittingDiscussion">
-                    {{ state.projectProgress.submittingDiscussion ? '发布中...' : '发布讨论' }}
-                  </button>
-                </form>
-                <p v-else class="muted-inline">登录后参与讨论</p>
-
-                <div class="project-discussion-list">
-                  <article v-for="discussion in state.projectProgress.discussions" :key="discussion.id" class="project-discussion-item">
-                    <header>
-                      <strong>{{ discussion.author?.uid || '已注销用户' }}</strong>
-                      <time>{{ formatAuditTime(discussion.created_at) }}</time>
-                    </header>
-                    <p>{{ discussion.content }}</p>
-                    <div class="button-row">
-                      <button v-if="canManageDiscussion(discussion)" class="ghost-button" type="button" @click="updateProjectDiscussion(discussion)">编辑</button>
-                      <button v-if="canManageDiscussion(discussion)" class="ghost-button danger" type="button" @click="deleteProjectDiscussion(discussion)">删除</button>
-                      <button v-if="can('manage_projects')" class="ghost-button danger" type="button" @click="moderateProjectDiscussion(discussion, 'hidden')">隐藏</button>
-                    </div>
-                    <div v-if="discussion.replies?.length" class="project-discussion-replies">
-                      <article v-for="reply in discussion.replies" :key="reply.id" class="project-discussion-reply">
-                        <header><strong>{{ reply.author?.uid || '已注销用户' }}</strong><time>{{ formatAuditTime(reply.created_at) }}</time></header>
-                        <p>{{ reply.content }}</p>
-                        <div class="button-row">
-                          <button v-if="canManageDiscussion(reply)" class="ghost-button" type="button" @click="updateProjectDiscussion(reply)">编辑</button>
-                          <button v-if="canManageDiscussion(reply)" class="ghost-button danger" type="button" @click="deleteProjectDiscussion(reply)">删除</button>
-                        </div>
-                      </article>
-                    </div>
-                    <form v-if="state.user" class="discussion-reply-form" @submit.prevent="submitProjectDiscussion(discussion)">
-                      <input v-model="state.projectProgress.replyDrafts[discussion.id]" type="text" maxlength="2000" placeholder="回复这条讨论" />
-                      <button class="ghost-button" type="submit" :disabled="state.projectProgress.submittingDiscussion">回复</button>
-                    </form>
-                  </article>
-                  <p v-if="!state.projectProgress.discussions.length" class="muted-inline">暂无讨论。</p>
-                </div>
-              </article>
             </template>
             <section v-else class="empty-state">
               <h2>课题不可访问</h2>
+              <p>课题可能未公开或已归档。</p>
+              <button class="primary-button" type="button" @click="navigate('home')">返回课题库</button>
+            </section>
+          </section>
+
+          <section v-else-if="activeView === 'projectDiscussion'" class="project-discussion-page">
+            <div v-if="state.projectProgress.loading" class="empty-state">
+              <div class="loader"></div>
+              <h2>正在读取讨论区</h2>
+            </div>
+            <template v-else-if="state.projectProgress.project">
+              <div class="section-head project-discussion-head">
+                <div>
+                  <span class="eyebrow">{{ topicCode(state.projectProgress.project) }} · {{ state.projectProgress.project.theme?.name || '未分类' }}</span>
+                  <h1>{{ state.projectProgress.project.title }}</h1>
+                  <p>{{ projectSummaryText(state.projectProgress.project) }}</p>
+                </div>
+                <div class="section-head-actions">
+                  <button class="ghost-button" type="button" @click="navigate('home')">返回课题库</button>
+                  <a class="ghost-button" :href="projectDetailHref(state.projectProgress.project)" @click.prevent="navigate('project', { id: state.projectProgress.project.id })">查看项目进度</a>
+                </div>
+              </div>
+
+              <div class="discussion-page-shell">
+                <aside class="content-panel discussion-project-card">
+                  <div class="project-card-meta">
+                    <span>{{ state.projectProgress.project.stage_label }}</span>
+                    <span>{{ projectFundingLabel(state.projectProgress.project) }}</span>
+                    <span>{{ projectStartupLabel(state.projectProgress.project) }}</span>
+                  </div>
+                  <h2>课题协作讨论</h2>
+                  <p>围绕需求、数据、分工、联系方式和推进事项持续沟通。</p>
+                  <div class="project-role-chip-row">
+                    <span
+                      v-for="role in requiredTeamRoles(state.projectProgress.project.team_status, state.projectProgress.project)"
+                      :key="role.key"
+                      class="team-role-chip contact-hover-trigger"
+                      :class="{ ready: role.ready, overfilled: role.overfilled, 'self-role': role.isSelfRole }"
+                      tabindex="0"
+                      :aria-label="teamRoleAriaLabel(role)"
+                      @mouseenter="showTeamContactCard($event, role, state.projectProgress.project)"
+                      @focus="showTeamContactCard($event, role, state.projectProgress.project)"
+                      @mouseleave="scheduleHideContactHoverCard"
+                      @blur="scheduleHideContactHoverCard"
+                    >
+                      {{ role.label }} {{ role.count }}/{{ role.required }}
+                    </span>
+                  </div>
+                  <a v-if="hasPrimaryProjectPdf(state.projectProgress.project)" class="ghost-button" :href="projectPdfHref(state.projectProgress.project)" target="_blank" rel="noopener">查看PDF</a>
+                </aside>
+
+                <article class="content-panel discussion-stream-panel">
+                  <div class="panel-title-row compact-title-row">
+                    <div>
+                      <h2>讨论流</h2>
+                      <p>公开展示只显示 UID；登录后可发起讨论和回复。</p>
+                    </div>
+                  </div>
+                  <form v-if="state.user" class="discussion-form discussion-bottom-bar" @submit.prevent="submitProjectDiscussion()">
+                    <textarea v-model="state.projectProgress.discussionForm.content" maxlength="2000" placeholder="写下你的问题、建议或协作信息"></textarea>
+                    <button class="primary-button" type="submit" :disabled="state.projectProgress.submittingDiscussion">
+                      {{ state.projectProgress.submittingDiscussion ? '发布中...' : '发布讨论' }}
+                    </button>
+                  </form>
+                  <p v-else class="muted-inline">登录后参与课题讨论</p>
+
+                  <div class="project-discussion-list">
+                    <article v-for="discussion in state.projectProgress.discussions" :key="discussion.id" class="project-discussion-item">
+                      <header>
+                        <strong>{{ discussion.author?.uid || '已注销用户' }}</strong>
+                        <time>{{ formatAuditTime(discussion.created_at) }}</time>
+                      </header>
+                      <p>{{ discussion.content }}</p>
+                      <div class="button-row">
+                        <button v-if="canManageDiscussion(discussion)" class="ghost-button" type="button" @click="updateProjectDiscussion(discussion)">编辑</button>
+                        <button v-if="canManageDiscussion(discussion)" class="ghost-button danger" type="button" @click="deleteProjectDiscussion(discussion)">删除</button>
+                        <button v-if="can('manage_projects')" class="ghost-button danger" type="button" @click="moderateProjectDiscussion(discussion, 'hidden')">隐藏</button>
+                      </div>
+                      <div v-if="discussion.replies?.length" class="project-discussion-replies">
+                        <article v-for="reply in discussion.replies" :key="reply.id" class="project-discussion-reply">
+                          <header><strong>{{ reply.author?.uid || '已注销用户' }}</strong><time>{{ formatAuditTime(reply.created_at) }}</time></header>
+                          <p>{{ reply.content }}</p>
+                          <div class="button-row">
+                            <button v-if="canManageDiscussion(reply)" class="ghost-button" type="button" @click="updateProjectDiscussion(reply)">编辑</button>
+                            <button v-if="canManageDiscussion(reply)" class="ghost-button danger" type="button" @click="deleteProjectDiscussion(reply)">删除</button>
+                          </div>
+                        </article>
+                      </div>
+                      <form v-if="state.user" class="discussion-reply-form" @submit.prevent="submitProjectDiscussion(discussion)">
+                        <input v-model="state.projectProgress.replyDrafts[discussion.id]" type="text" maxlength="2000" placeholder="回复这条讨论" />
+                        <button class="ghost-button" type="submit" :disabled="state.projectProgress.submittingDiscussion">回复</button>
+                      </form>
+                    </article>
+                    <p v-if="!state.projectProgress.discussions.length" class="muted-inline">暂无讨论。</p>
+                  </div>
+                </article>
+              </div>
+            </template>
+            <section v-else class="empty-state">
+              <h2>讨论区不可访问</h2>
               <p>课题可能未公开或已归档。</p>
               <button class="primary-button" type="button" @click="navigate('home')">返回课题库</button>
             </section>
@@ -6509,7 +6615,7 @@ const App = {
                   <form class="stack-form" @submit.prevent="saveProfile">
                     <div class="form-grid">
                       <label><span>昵称</span><input v-model="state.forms.profile.display_name" type="text" /></label>
-                      <label><span>真实姓名</span><input v-model="state.forms.profile.real_name" type="text" /></label>
+                      <label><span>对外显示姓名</span><input v-model="state.forms.profile.real_name" type="text" /></label>
                       <label><span>身份</span>
                         <select v-model="state.forms.profile.role_type">
                           <option v-for="role in state.meta.profile_roles" :key="role.value" :value="role.value">{{ role.label }}</option>
@@ -8259,6 +8365,12 @@ function parseRoute() {
   const parts = hash.split("/").filter(Boolean);
   if (!parts.length) return { name: "home", params: {}, fullPath: location.hash || "#/" };
   if (parts[0] === "project" && parts[1]) {
+    if (parts[2] === "discussion") {
+      return { name: "projectDiscussion", params: { id: parts[1] }, fullPath: location.hash };
+    }
+    if (parts[2] === "progress") {
+      return { name: "project", params: { id: parts[1] }, fullPath: location.hash };
+    }
     return { name: "project", params: { id: parts[1] }, fullPath: location.hash };
   }
   const known = new Set(["home", "projects", "faq", "dashboard", "favorites", "admin", "login", "register", "password-reset", "password-change"]);
@@ -8268,6 +8380,7 @@ function parseRoute() {
 function buildHash(name, params = {}) {
   if (name === "home") return "#/";
   if (name === "project") return params.id ? `#/project/${params.id}` : "#/";
+  if (name === "projectDiscussion") return params.id ? `#/project/${params.id}/discussion` : "#/";
   return `#/${name}`;
 }
 
@@ -8617,6 +8730,10 @@ function projectPdfHref(project) {
 
 function projectDetailHref(project) {
   return project?.id ? `#/project/${project.id}` : "#/";
+}
+
+function projectDiscussionHref(project) {
+  return project?.id ? `#/project/${project.id}/discussion` : "#/";
 }
 
 function projectCreatorLabel(project) {

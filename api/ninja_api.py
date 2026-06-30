@@ -28,7 +28,15 @@ from ninja.security import SessionAuth
 
 from config.release import APP_VERSION, release_payload
 from accounts.forms import RegisterForm, UserProfileForm
-from accounts.models import PLATFORM_ADMIN_UID, PUBLIC_ROLE_CHOICES, RoleType, UserProfile, is_platform_admin_user, normalize_public_role
+from accounts.models import (
+    PLATFORM_ADMIN_UID,
+    PUBLIC_ROLE_CHOICES,
+    RoleType,
+    UserProfile,
+    is_platform_admin_user,
+    normalize_public_role,
+    participation_project_limit_for_role,
+)
 from accounts.services import (
     DefaultPasswordConfigError,
     create_registered_user,
@@ -3036,6 +3044,14 @@ def interest_project(request, project_id: int, payload: InterestRequest):
                         fail("Project is not recruiting.", status=422, code="project_not_recruiting"),
                     )
                 locked_profile = UserProfile.objects.select_for_update().get(user=request.user)
+                capacity = participation_capacity(request.user, exclude_project=locked_project, profile=locked_profile)
+                if capacity["remaining"] <= 0:
+                    return participation_limit_reached_response(
+                        request.user,
+                        "interaction.submit_interest",
+                        locked_project,
+                        capacity["limit"],
+                    )
                 if not has_required_participation_credits(request.user, project=locked_project, profile=locked_profile):
                     return audit_failed_response(
                         request.user,
@@ -3139,6 +3155,14 @@ def claim_project(request, project_id: int, payload: ClaimRequest):
                         fail("Project is not recruiting.", status=422, code="project_not_recruiting"),
                     )
                 locked_profile = UserProfile.objects.select_for_update().get(user=request.user)
+                capacity = participation_capacity(request.user, exclude_project=locked_project, profile=locked_profile)
+                if capacity["remaining"] <= 0:
+                    return participation_limit_reached_response(
+                        request.user,
+                        "interaction.submit_claim",
+                        locked_project,
+                        capacity["limit"],
+                    )
                 if not has_required_participation_credits(request.user, project=locked_project, profile=locked_profile):
                     return audit_failed_response(
                         request.user,
@@ -4537,6 +4561,14 @@ def claim_availability_for_type(user, project, claim_type):
             "reason_code": "slot_occupied",
             "reason": f"该课题已有{label}，暂不能重复认领。",
         }
+    capacity = participation_capacity(user, exclude_project=project)
+    if capacity["remaining"] <= 0:
+        return {
+            "available": False,
+            "action": "unavailable",
+            "reason_code": "participation_limit_reached",
+            "reason": participation_limit_reached_message(capacity["limit"]),
+        }
     if not has_required_participation_credits(user, project=project):
         return {
             "available": False,
@@ -4728,7 +4760,7 @@ def grant_profile_completion_bonus_once(user, actor):
     )
 
 
-def reserved_participation_project_ids(user, exclude_project=None):
+def active_participation_project_ids(user, exclude_project=None):
     if is_platform_admin_user(user):
         return set()
     project_ids = set(
@@ -4743,6 +4775,11 @@ def reserved_participation_project_ids(user, exclude_project=None):
     )
     if exclude_project:
         project_ids.discard(exclude_project.id)
+    return project_ids
+
+
+def reserved_participation_project_ids(user, exclude_project=None):
+    project_ids = active_participation_project_ids(user, exclude_project=exclude_project)
     if not project_ids:
         return set()
     charged_project_ids = set(
@@ -4753,6 +4790,39 @@ def reserved_participation_project_ids(user, exclude_project=None):
         ).values_list("project_id", flat=True)
     )
     return project_ids - charged_project_ids
+
+
+def participation_project_limit(user, profile=None):
+    profile = profile or getattr(user, "profile", None)
+    return participation_project_limit_for_role(getattr(profile, "role_type", ""))
+
+
+def participation_capacity(user, exclude_project=None, profile=None):
+    if is_platform_admin_user(user):
+        return {"limit": 0, "used": 0, "remaining": 0}
+    limit = participation_project_limit(user, profile=profile)
+    used = len(active_participation_project_ids(user, exclude_project=exclude_project))
+    return {"limit": limit, "used": used, "remaining": max(limit - used, 0)}
+
+
+def participation_limit_reached_message(limit):
+    return f"当前身份可同时参与的课题数已达上限（最多 {limit} 个）。"
+
+
+def participation_limit_reached_response(actor, action, project, limit):
+    message = participation_limit_reached_message(limit)
+    return audit_failed_response(
+        actor,
+        action,
+        "Project",
+        project.id,
+        fail(
+            message,
+            status=422,
+            code="participation_limit_reached",
+            errors={"participation_limit": [message]},
+        ),
+    )
 
 
 def available_participation_credits(user, exclude_project=None, profile=None):

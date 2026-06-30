@@ -93,6 +93,15 @@ def initial_credits_for_role(role_type):
     return 100
 
 
+def participation_project_limit_for_role(role_type):
+    normalized_role = normalize_public_role(role_type) or RoleType.OTHER
+    if normalized_role == RoleType.DOCTOR:
+        return 5
+    if normalized_role in {RoleType.PHD_STUDENT, RoleType.PHD_OR_ABOVE}:
+        return 4
+    return 2
+
+
 class UserProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile")
     uid = models.CharField(max_length=16, unique=True, null=True, blank=True, db_index=True)

@@ -8,6 +8,20 @@ const apiSource = readFileSync(new URL("./api.js", import.meta.url), "utf8");
 const indexSource = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
+function cssRuleBlock(selector, source = stylesSource) {
+  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return source.match(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`))?.[1] || "";
+}
+
+function mediaRange(startQuery, endQuery) {
+  const start = stylesSource.indexOf(startQuery);
+  const end = stylesSource.indexOf(endQuery, start + startQuery.length);
+  if (start === -1) {
+    return "";
+  }
+  return stylesSource.slice(start, end === -1 ? undefined : end);
+}
+
 test("legacy project detail modal state and styles are removed", () => {
   assert.match(mainSource, /<div v-if="state\.toast" class="toast" role="status" aria-live="polite" aria-atomic="true">/);
   assert.doesNotMatch(mainSource, /state\.preview/);
@@ -28,6 +42,7 @@ test("project title opens progress page while pdf actions still open documents",
   assert.match(mainSource, /function projectDetailHref\(project\)/);
   assert.match(mainSource, /activeView === 'project'/);
   assert.match(mainSource, /parts\[0\] === "project"/);
+  assert.match(mainSource, /parts\[2\] === "progress"/);
   assert.match(mainSource, /api\.projectProgress/);
   assert.match(mainSource, /function projectPdfHref\(project\)/);
   assert.match(mainSource, /function projectCardTitle\(project\)/);
@@ -39,6 +54,40 @@ test("project title opens progress page while pdf actions still open documents",
   assert.match(mainSource, /documentHref\(primaryProjectDocument\(project\)\)"\s+download/);
   assert.doesNotMatch(mainSource, /function selectSpace\(slug\)/);
   assert.doesNotMatch(mainSource, /navigate\("space"/);
+});
+
+test("project discussion is a standalone route instead of embedded inside progress", () => {
+  assert.match(mainSource, /parts\[2\] === "discussion"/);
+  assert.match(mainSource, /name: "projectDiscussion"/);
+  assert.match(mainSource, /function projectDiscussionHref\(project\)/);
+  assert.match(mainSource, /activeView === 'projectDiscussion'/);
+  assert.match(mainSource, /class="project-discussion-page"/);
+  assert.match(mainSource, /discussion-page-shell/);
+  assert.match(mainSource, /discussion-bottom-bar/);
+  assert.match(mainSource, /进入讨论区/);
+  assert.match(mainSource, /查看项目进度/);
+  assert.doesNotMatch(mainSource, /class="content-panel project-discussion-section"/);
+});
+
+test("project cards keep communication and progress buttons beside tags while pdf actions stay bottom-right", () => {
+  assert.match(mainSource, /class="project-card-tags-actions"[\s\S]*?>\s*交流区\s*<[\s\S]*?>\s*项目进度\s*</);
+  assert.match(mainSource, /<div v-if="hasPrimaryProjectPdf\(project\)" class="project-pdf-actions">/);
+  const pdfActions = mainSource.match(/<div v-if="hasPrimaryProjectPdf\(project\)" class="project-pdf-actions">[\s\S]*?<\/div>/)?.[0] || "";
+  assert.doesNotMatch(pdfActions, /projectDiscussionHref\(project\)/);
+  assert.doesNotMatch(pdfActions, />\s*交流区\s*</);
+  assert.doesNotMatch(pdfActions, />\s*项目进度\s*</);
+  assert.match(stylesSource, /\.project-card-footer \.project-interaction-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(7,\s*minmax\(72px,\s*1fr\)\);/);
+  assert.match(cssRuleBlock(".project-card-tags-actions"), /flex-wrap:\s*nowrap;/);
+  assert.match(cssRuleBlock(".project-card-inline-actions"), /flex-wrap:\s*nowrap;/);
+  const media980 = mediaRange("@media (max-width: 980px)", "@media (max-width: 640px)");
+  assert.match(cssRuleBlock(".project-card-footer .project-interaction-actions", media980), /grid-template-columns:\s*repeat\(7,\s*minmax\(64px,\s*1fr\)\);/);
+  const media640 = mediaRange("@media (max-width: 640px)", "@media (max-width: 380px)");
+  assert.match(cssRuleBlock(".project-card-tags-actions", media640), /flex-direction:\s*column;/);
+});
+
+test("profile form uses public display name wording", () => {
+  assert.match(mainSource, />对外显示姓名</);
+  assert.doesNotMatch(mainSource, />真实姓名</);
 });
 
 test("admin project form exposes progress document upload separately from the main pdf", () => {
@@ -70,8 +119,8 @@ test("planned recruitment theme progress discussion and faq entry features are w
   assert.match(apiSource, /moderateProjectDiscussion/);
   assert.match(mainSource, /projectProgressDocuments/);
   assert.match(mainSource, /projectProgressTimelineItems/);
-  assert.match(mainSource, /project-discussion-section/);
-  assert.match(mainSource, /登录后参与讨论/);
+  assert.match(mainSource, /project-discussion-page/);
+  assert.match(mainSource, /登录后参与课题讨论/);
   assert.match(stylesSource, /\.project-progress-page\s*\{/);
   assert.match(stylesSource, /\.project-discussion-item\s*\{/);
 
@@ -105,6 +154,11 @@ test("planned recruitment theme progress discussion and faq entry features are w
   assert.match(stylesSource, /\.sidebar-qr-admin-grid\s*\{/);
   assert.doesNotMatch(stylesSource, /\.sidebar-qr-modal-backdrop/);
   assert.match(stylesSource, /\.confirm-modal-backdrop\s*\{[\s\S]*?z-index:\s*900;/);
+});
+
+test("participation hard cap has stable user-facing handling", () => {
+  assert.match(mainSource, /participation_limit_reached/);
+  assert.match(mainSource, /当前身份可同时参与的课题数已达上限/);
 });
 
 test("route changes close workspace and admin modal overlays", () => {
